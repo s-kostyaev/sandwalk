@@ -51,6 +51,9 @@ Public opaque references exist only when possession proves provenance:
 Plan steps and findings use human-readable keys. Logical sources, evidence
 bundles, reviews, queue rows, and event identifiers remain internal.
 
+Initial plan-step keys use the same canonical path-safe form as slugs. Step
+titles are trimmed, non-empty text of at most 200 bytes.
+
 ## Workspace
 
 The workspace root is:
@@ -63,6 +66,7 @@ The workspace root is:
 │   ├── snapshots/
 │   ├── excerpts/
 │   ├── resume/
+│   │   └── workspace.md
 │   └── temporary/
 ├── exports/
 │   ├── research-plan.md
@@ -86,6 +90,7 @@ not select an implicit `latest` workspace.
 ```console
 sandwalk init --slug <slug> [--directory-prefix <path>]
 sandwalk status --slug <slug> [--directory-prefix <path>]
+sandwalk resume --slug <slug> [--directory-prefix <path>]
 ```
 
 SQLite uses WAL mode and a configurable busy timeout. Independent commands use
@@ -145,7 +150,7 @@ an atomically regenerated, read-only projection for humans and agents.
 
 ```console
 sandwalk plan set-objective --slug <slug> --file <path>
-sandwalk plan add-step --slug <slug> --title <title> ...
+sandwalk plan add-step --slug <slug> --key <key> --title <title> [--optional]
 sandwalk plan add-dependency --slug <slug> <step> --on <dependency>
 sandwalk plan list --slug <slug>
 sandwalk plan validate --slug <slug>
@@ -154,6 +159,11 @@ sandwalk plan seal --slug <slug>
 
 The initial model is a flat directed acyclic graph. Nested substeps are outside
 the first release.
+
+The first plan mutation in a workspace without reconnaissance advances it
+through the legal `initialized → scoping → planning` transitions. A mutation
+from `scoping` or `reconnaissance` advances to `planning`; later phases reject
+direct plan mutation.
 
 After work begins, existing steps are immutable. New steps are added through an
 append-only plan revision with a recorded reason.
@@ -181,6 +191,10 @@ sandwalk step checkpoint --slug <slug> --claim <claim> \
 Sandwalk always creates a mechanical resume pack from durable state and logs.
 An explicit checkpoint adds the agent's current interpretation, hypotheses, and
 next intended action.
+
+Before plan steps exist, `resume` atomically regenerates
+`artifacts/resume/workspace.md` with workspace-level durable state. Once a step
+is selected, the same pack format is enriched with its checkpoint and entities.
 
 A resume pack is bounded Markdown containing:
 

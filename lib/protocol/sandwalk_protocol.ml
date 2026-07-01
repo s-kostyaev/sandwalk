@@ -47,6 +47,67 @@ module Envelope = struct
 end
 
 module Audit_event = struct
+  type kind =
+    [ `Started
+    | `Finished
+    | `Failed
+    ]
+
+  type metadata =
+    { kind : kind
+    ; invocation_id : string
+    ; command : string
+    ; outcome : string option
+    ; error_code : string option
+    }
+
+  let metadata_kind t = t.kind
+  let metadata_invocation_id t = t.invocation_id
+  let metadata_command t = t.command
+  let metadata_outcome t = t.outcome
+  let metadata_error_code t = t.error_code
+
+  let metadata_of_yojson json =
+    let string_field fields name =
+      List.Assoc.find fields name ~equal:String.equal
+      |> Option.bind ~f:(function
+        | `String value -> Some value
+        | _ -> None)
+    in
+    match json with
+    | `Assoc fields ->
+      let open Option.Let_syntax in
+      let%bind version =
+        List.Assoc.find fields "version" ~equal:String.equal
+        |> Option.bind ~f:(function
+          | `Int value -> Some value
+          | _ -> None)
+      in
+      let%bind () = if version = 1 then Some () else None in
+      let%bind event = string_field fields "event" in
+      let%bind kind =
+        match event with
+        | "command.started" -> Some `Started
+        | "command.finished" -> Some `Finished
+        | "command.failed" -> Some `Failed
+        | _ -> None
+      in
+      let%bind invocation_id = string_field fields "invocation_id" in
+      let%map command = string_field fields "command" in
+      let outcome =
+        match string_field fields "outcome" with
+        | Some ("success" | "failure" as outcome) -> Some outcome
+        | Some _ | None -> None
+      in
+      { kind
+      ; invocation_id
+      ; command
+      ; outcome
+      ; error_code = string_field fields "error_code"
+      }
+    | _ -> None
+  ;;
+
   let create
         ~invocation_id
         ~timestamp
@@ -102,6 +163,14 @@ module Audit_event = struct
   ;;
 end
 
+module Shell_command = struct
+  let quote value =
+    "'" ^ String.substr_replace_all value ~pattern:"'" ~with_:"'\\''" ^ "'"
+  ;;
+
+  let of_words words = words |> List.map ~f:quote |> String.concat ~sep:" "
+end
+
 let%expect_test "renders a compact failure with one next command" =
   Envelope.failure
     ~code:"PLAN_NOT_VALIDATED"
@@ -137,4 +206,35 @@ let%expect_test "renders a versioned finished audit event" =
   |> print_endline;
   [%expect
     {| {"version":1,"event":"command.finished","invocation_id":"internal-1","timestamp":"2026-07-01 12:00:00.000000Z","command":"init","phase":"initialized","claim":null,"step":null,"raw_argv":["sandwalk","init","--slug","typed-harness"],"arguments":{"slug":"typed-harness"},"consumed_references":[],"created_references":[],"state_changes":[{"entity":"workspace","from":null,"to":"initialized"}],"duration_ms":2,"outcome":"success","hint":null} |}]
+;;
+
+let%test_unit "audit metadata decodes recovery fields" =
+  let json =
+    Audit_event.create
+      ~invocation_id:"invocation-1"
+      ~timestamp:"2026-07-01 12:00:00Z"
+      ~kind:`Failed
+      ~command:"status"
+      ~phase:None
+      ~raw_argv:[]
+      ~arguments:(`Assoc [])
+      ~state_changes:[]
+      ~outcome:"failure"
+      ~error_code:"DATABASE_ERROR"
+      ()
+  in
+  let metadata = Audit_event.metadata_of_yojson json |> Option.value_exn in
+  [%test_eq: string]
+    (Audit_event.metadata_invocation_id metadata)
+    "invocation-1";
+  [%test_eq: string option]
+    (Audit_event.metadata_error_code metadata)
+    (Some "DATABASE_ERROR")
+;;
+
+let%expect_test "shell commands quote every word" =
+  Shell_command.of_words [ "sandwalk"; "status"; "--slug"; "researcher's-notes" ]
+  |> print_endline;
+  [%expect
+    {| 'sandwalk' 'status' '--slug' 'researcher'\''s-notes' |}]
 ;;

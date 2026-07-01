@@ -106,6 +106,109 @@ module Phase = struct
   ;;
 end
 
+module Plan_step = struct
+  module Key = struct
+    type t = Slug.t
+
+    module Error = struct
+      type t =
+        | Empty
+        | Too_long
+        | Invalid_format
+      [@@deriving sexp_of]
+
+      let message = function
+        | Empty -> "Plan step key must not be empty."
+        | Too_long -> "Plan step key must contain at most 63 characters."
+        | Invalid_format ->
+          "Plan step key must use lowercase letters or digits, separated by single hyphens."
+      ;;
+    end
+
+    let of_string value =
+      Slug.of_string value
+      |> Result.map_error ~f:(function
+        | Slug.Error.Empty -> Error.Empty
+        | Too_long -> Too_long
+        | Invalid_format -> Invalid_format)
+    ;;
+
+    let to_string = Slug.to_string
+  end
+
+  module Error = struct
+    type t =
+      | Empty_title
+      | Title_too_long
+    [@@deriving sexp_of]
+
+    let message = function
+      | Empty_title -> "Plan step title must not be empty."
+      | Title_too_long -> "Plan step title must contain at most 200 bytes."
+    ;;
+  end
+
+  type t =
+    { key : Key.t
+    ; title : string
+    ; required : bool
+    }
+
+  let create ~key ~title ~required =
+    let title = String.strip title in
+    if String.is_empty title
+    then Error Error.Empty_title
+    else if String.length title > 200
+    then Error Error.Title_too_long
+    else Ok { key; title; required }
+  ;;
+
+  let key t = t.key
+  let title t = t.title
+  let required t = t.required
+end
+
+module Planning = struct
+  module Error = struct
+    type t = Wrong_phase of Phase.t [@@deriving sexp_of]
+  end
+
+  let transition_path = function
+    | Phase.Initialized -> Ok [ Phase.Scoping; Planning ]
+    | Scoping | Reconnaissance -> Ok [ Planning ]
+    | Planning -> Ok []
+    | phase -> Error (Error.Wrong_phase phase)
+  ;;
+end
+
+module Plan_projection = struct
+  let render ~phase ~revision ~steps =
+    let step_lines =
+      match steps with
+      | [] -> [ "No steps." ]
+      | steps ->
+        List.concat_map steps ~f:(fun (key, title, required, position) ->
+          [ sprintf
+              "%d. `%s` (%s)"
+              position
+              (Plan_step.Key.to_string key)
+              (if required then "required" else "optional")
+          ; sprintf "   Title: %S" title
+          ])
+    in
+    String.concat
+      ~sep:"\n"
+      ([ sprintf "<!-- sandwalk-plan-revision: %d -->" revision
+       ; "# Research plan"
+       ; ""
+       ; sprintf "Phase: %s" (Phase.to_string phase)
+       ; ""
+       ]
+       @ step_lines
+       @ [ "" ])
+  ;;
+end
+
 module Transition_error = struct
   type t =
     { from : Phase.t
@@ -125,6 +228,200 @@ let transition ~from ~into =
   if Phase.can_transition ~from ~into
   then Ok into
   else Error { Transition_error.from; into }
+;;
+
+module Resume_pack = struct
+  module Error = struct
+    type t = Too_large [@@deriving sexp_of]
+  end
+
+  let maximum_bytes = 32 * 1024
+
+  let render
+        ~slug
+        ~phase
+        ~schema_version
+        ~plan_steps
+        ~recent_commands
+        ~unmatched_commands
+        ~events_path
+        ~next_command
+    =
+    let recent_commands = List.take recent_commands 10 in
+    let unmatched_commands = List.take unmatched_commands 10 in
+    let durable_entity_lines =
+      match plan_steps with
+      | [] -> [ "The workspace record is initialized. No plan entities exist yet." ]
+      | steps ->
+        "The workspace record and these plan steps are durable:"
+        :: List.map steps ~f:(fun (key, title, required, position) ->
+          sprintf
+            "- %d. %S: %S (%s)"
+            position
+            (Plan_step.Key.to_string key)
+            title
+            (if required then "required" else "optional"))
+    in
+    let command_lines =
+      match recent_commands with
+      | [] -> [ "- None." ]
+      | commands ->
+        List.map commands ~f:(fun (command, outcome, error_code) ->
+          match error_code with
+          | None -> sprintf "- %S: %s" command outcome
+          | Some code -> sprintf "- %S: %s (%S)" command outcome code)
+    in
+    let unmatched_lines =
+      match unmatched_commands with
+      | [] -> [ "- None." ]
+      | commands ->
+        List.map commands ~f:(fun command -> sprintf "- %S" command)
+    in
+    let last_error =
+      List.find_map (List.rev recent_commands) ~f:(fun (command, _, error_code) ->
+        Option.map error_code ~f:(fun code -> sprintf "%S (%S)" command code))
+      |> Option.value ~default:"None."
+    in
+    let unresolved =
+      match phase with
+      | Phase.Initialized -> "Workspace scope and plan are not yet defined."
+      | Planning -> "Plan validation and sealing are pending."
+      | _ -> "Consult the current durable workspace state."
+    in
+    let maximum_backtick_run =
+      String.fold next_command ~init:(0, 0) ~f:(fun (maximum, current) character ->
+        if Char.equal character '`'
+        then maximum, current + 1
+        else Int.max maximum current, 0)
+      |> fun (maximum, current) -> Int.max maximum current
+    in
+    let command_fence = String.make (Int.max 3 (maximum_backtick_run + 1)) '`' in
+    let content =
+      String.concat
+        ~sep:"\n"
+        ([ "# Sandwalk resume pack"
+         ; ""
+         ; sprintf "- Workspace: %S" (Slug.to_string slug)
+         ; sprintf "- Phase: %s" (Phase.to_string phase)
+         ; sprintf "- Schema version: %d" schema_version
+         ; ""
+         ; "## Step objective and scope"
+         ; ""
+         ; "No plan step is active."
+         ; ""
+         ; "## Latest checkpoint"
+         ; ""
+         ; "None."
+         ; ""
+         ; "## Durable entities"
+         ; ""
+         ]
+         @ durable_entity_lines
+         @ [ ""
+           ; "## Recent commands"
+         ; ""
+         ]
+         @ command_lines
+         @ [ ""
+           ; "## Unmatched command starts"
+           ; ""
+           ]
+         @ unmatched_lines
+         @ [ ""
+           ; "## Last error or blocker"
+           ; ""
+           ; last_error
+           ; ""
+           ; "## Unresolved items"
+           ; ""
+           ; unresolved
+           ; ""
+           ; "## Relevant artifact paths"
+           ; ""
+           ; sprintf "- Event log: %S" events_path
+           ; ""
+           ; "## Recommended next command"
+           ; ""
+           ; command_fence ^ "console"
+           ; next_command
+           ; command_fence
+           ; ""
+           ])
+    in
+    if String.length content > maximum_bytes
+    then Error Error.Too_large
+    else Ok content
+  ;;
+end
+
+let%expect_test "renders a bounded mechanical resume pack" =
+  let slug =
+    match Slug.of_string "typed-harness" with
+    | Ok slug -> slug
+    | Error _ -> assert false
+  in
+  let pack =
+    match
+      Resume_pack.render
+        ~slug
+        ~phase:Phase.Initialized
+        ~schema_version:1
+        ~plan_steps:[]
+        ~recent_commands:[ "init", "success", None ]
+        ~unmatched_commands:[]
+        ~events_path:"workspace/logs/events.jsonl"
+        ~next_command:"sandwalk status --slug 'typed-harness'"
+    with
+    | Ok pack -> pack
+    | Error _ -> assert false
+  in
+  print_endline pack;
+  [%expect
+    {|
+    # Sandwalk resume pack
+
+    - Workspace: "typed-harness"
+    - Phase: initialized
+    - Schema version: 1
+
+    ## Step objective and scope
+
+    No plan step is active.
+
+    ## Latest checkpoint
+
+    None.
+
+    ## Durable entities
+
+    The workspace record is initialized. No plan entities exist yet.
+
+    ## Recent commands
+
+    - "init": success
+
+    ## Unmatched command starts
+
+    - None.
+
+    ## Last error or blocker
+
+    None.
+
+    ## Unresolved items
+
+    Workspace scope and plan are not yet defined.
+
+    ## Relevant artifact paths
+
+    - Event log: "workspace/logs/events.jsonl"
+
+    ## Recommended next command
+
+    ```console
+    sandwalk status --slug 'typed-harness'
+    ```
+    |}]
 ;;
 
 let%expect_test "slug validation protects canonical workspace paths" =
@@ -193,4 +490,23 @@ let%test_unit "phase persistence strings round-trip" =
     [%test_eq: Phase.t option]
       (Some phase)
       (Phase.of_string (Phase.to_string phase)))
+;;
+
+let%expect_test "plan mutation follows only legal phase transitions" =
+  [ Phase.Initialized; Scoping; Reconnaissance; Planning; Researching ]
+  |> List.iter ~f:(fun phase ->
+    match Planning.transition_path phase with
+    | Error _ -> printf "%s -> rejected\n" (Phase.to_string phase)
+    | Ok path ->
+      printf
+        "%s -> %s\n"
+        (Phase.to_string phase)
+        (path |> List.map ~f:Phase.to_string |> String.concat ~sep:","));
+  [%expect
+    {|
+    initialized -> scoping,planning
+    scoping -> planning
+    reconnaissance -> planning
+    planning ->
+    researching -> rejected |}]
 ;;

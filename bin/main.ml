@@ -178,7 +178,7 @@ let status_error = function
     "WORKSPACE_INVALID", "Workspace state is invalid."
   | Database_error _ ->
     "DATABASE_ERROR", "Could not read workspace database."
-  | Already_initialized ->
+  | Already_initialized | Duplicate_plan_step _ | Plan_mutation_wrong_phase _ ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -316,10 +316,571 @@ let status_command =
                    Deferred.unit))))
 ;;
 
+let resume_command =
+  Async.Command.async
+    ~summary:"Regenerate a bounded recovery pack from durable workspace state."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag
+         "--directory-prefix"
+         (optional string)
+         ~doc:"PATH Parent directory for Sandwalk workspaces"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let arguments = parsed_arguments ~slug ~directory_prefix in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let started_at = Time_float_unix.now () in
+           let%bind invocation_id =
+             In_thread.run (fun () ->
+               Sandwalk_runtime.invocation_id ~now:started_at)
+           in
+           let append_event
+                 ~kind
+                 ~timestamp
+                 ~phase
+                 ?duration_ms
+                 ?outcome
+                 ?error_code
+                 ()
+             =
+             Sandwalk_runtime.Audit.append
+               ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+               (Sandwalk_protocol.Audit_event.create
+                  ~invocation_id
+                  ~timestamp
+                  ~kind
+                  ~command:"resume"
+                  ~arguments
+                  ~phase
+                  ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                  ~state_changes:[]
+                  ?duration_ms
+                  ?outcome
+                  ?error_code
+                  ())
+           in
+           let fail_with_audit ~phase ~code ~message =
+             let finished_at = Time_float_unix.now () in
+             let duration_ms =
+               Time_float.diff finished_at started_at
+               |> Time_float.Span.to_ms
+               |> Float.iround_nearest_exn
+             in
+             let%bind logged =
+               append_event
+                 ~kind:`Failed
+                 ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                 ~phase
+                 ~duration_ms
+                 ~outcome:"failure"
+                 ~error_code:code
+                 ()
+             in
+             match logged with
+             | Error _ ->
+               print_failure_and_exit
+                 ~code:"AUDIT_LOG_ERROR"
+                 ~message:"Could not append workspace audit log."
+             | Ok () -> print_failure_and_exit ~code ~message
+           in
+           let%bind started =
+             append_event
+               ~kind:`Started
+               ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+               ~phase:None
+               ()
+           in
+           match started with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"AUDIT_LOG_ERROR"
+               ~message:"Could not append workspace audit log."
+           | Ok () ->
+             let%bind status =
+               In_thread.run (fun () ->
+                 Sandwalk_store.read_status
+                   ~database_path:
+                     (Sandwalk_runtime.Workspace.database_path workspace)
+                   ~expected_slug:slug
+                   ())
+             in
+             (match status with
+              | Error error ->
+                let code, message = status_error error in
+                fail_with_audit ~phase:None ~code ~message
+              | Ok status ->
+                let phase =
+                  Sandwalk_store.Workspace_status.phase status
+                in
+                let%bind plan_steps, history =
+                  Deferred.both
+                    (In_thread.run (fun () ->
+                       Sandwalk_store.read_plan_steps
+                         ~database_path:
+                           (Sandwalk_runtime.Workspace.database_path workspace)
+                         ()))
+                    (Sandwalk_runtime.Audit.read_history
+                       ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                       ~exclude_invocation_id:invocation_id)
+                in
+                (match plan_steps, history with
+                 | Error _, _ ->
+                   fail_with_audit
+                     ~phase:(Some (Sandwalk_core.Phase.to_string phase))
+                     ~code:"RECOVERY_STATE_ERROR"
+                     ~message:"Could not read durable recovery state."
+                 | _, Error _ ->
+                   fail_with_audit
+                     ~phase:(Some (Sandwalk_core.Phase.to_string phase))
+                     ~code:"RECOVERY_LOG_ERROR"
+                     ~message:"Could not read workspace audit history."
+                 | Ok plan_steps, Ok history ->
+                   let recent_commands =
+                     Sandwalk_runtime.Audit.recent_commands history
+                     |> List.map ~f:(fun summary ->
+                       ( Sandwalk_runtime.Audit.summary_command summary
+                       , Sandwalk_runtime.Audit.summary_outcome summary
+                       , Sandwalk_runtime.Audit.summary_error_code summary ))
+                   in
+                   let next_command =
+                     sprintf
+                       "sandwalk status --slug %s --directory-prefix %s"
+                       (Sandwalk_protocol.Shell_command.quote
+                          (Sandwalk_core.Slug.to_string slug))
+                       (Sandwalk_protocol.Shell_command.quote directory_prefix)
+                   in
+                   let pack =
+                     Sandwalk_core.Resume_pack.render
+                       ~slug
+                       ~phase
+                       ~schema_version:
+                         (Sandwalk_store.Workspace_status.schema_version status)
+                       ~plan_steps:
+                         (List.map plan_steps ~f:(fun stored ->
+                            ( Sandwalk_store.Stored_plan_step.key stored
+                            , Sandwalk_store.Stored_plan_step.title stored
+                            , Sandwalk_store.Stored_plan_step.required stored
+                            , Sandwalk_store.Stored_plan_step.position stored )))
+                       ~recent_commands
+                       ~unmatched_commands:
+                         (Sandwalk_runtime.Audit.unmatched_commands history)
+                       ~events_path:
+                         (Sandwalk_runtime.Workspace.events_path workspace)
+                       ~next_command
+                   in
+                   (match pack with
+                    | Error Sandwalk_core.Resume_pack.Error.Too_large ->
+                      fail_with_audit
+                        ~phase:(Some (Sandwalk_core.Phase.to_string phase))
+                        ~code:"RESUME_PACK_TOO_LARGE"
+                        ~message:"Recovery data exceeds the resume pack limit."
+                    | Ok pack ->
+                      let resume_path =
+                        Sandwalk_runtime.Workspace.resume_path workspace
+                      in
+                      let%bind written =
+                        Sandwalk_runtime.Atomic_file.write
+                          ~path:resume_path
+                          ~temporary_suffix:invocation_id
+                          pack
+                      in
+                      (match written with
+                       | Error _ ->
+                         fail_with_audit
+                           ~phase:(Some (Sandwalk_core.Phase.to_string phase))
+                           ~code:"WORKSPACE_IO_ERROR"
+                           ~message:"Could not write workspace resume pack."
+                       | Ok () ->
+                         let finished_at = Time_float_unix.now () in
+                         let duration_ms =
+                           Time_float.diff finished_at started_at
+                           |> Time_float.Span.to_ms
+                           |> Float.iround_nearest_exn
+                         in
+                         let%bind logged =
+                           append_event
+                             ~kind:`Finished
+                             ~timestamp:
+                               (Sandwalk_runtime.timestamp_utc finished_at)
+                             ~phase:
+                               (Some (Sandwalk_core.Phase.to_string phase))
+                             ~duration_ms
+                             ~outcome:"success"
+                             ()
+                         in
+                         (match logged with
+                          | Error _ ->
+                            print_failure_and_exit
+                              ~code:"AUDIT_LOG_ERROR"
+                              ~message:"Could not append workspace audit log."
+                          | Ok () ->
+                            let result =
+                              `Assoc
+                                [ ( "slug"
+                                  , `String
+                                      (Sandwalk_core.Slug.to_string slug) )
+                                ; ( "phase"
+                                  , `String
+                                      (Sandwalk_core.Phase.to_string phase) )
+                                ; "resume_path", `String resume_path
+                                ]
+                            in
+                            Sandwalk_protocol.Envelope.success ~result ()
+                            |> Sandwalk_protocol.Envelope.render
+                            |> print_endline;
+                            Deferred.unit)))))))
+;;
+
+let plan_error = function
+  | Sandwalk_store.Error.Duplicate_plan_step key ->
+    "PLAN_STEP_EXISTS", sprintf "Plan step %S already exists." key
+  | Plan_mutation_wrong_phase _ ->
+    "PLAN_MUTATION_NOT_ALLOWED", "Plan cannot be changed in the current phase."
+  | error -> status_error error
+;;
+
+let plan_add_step_command =
+  Async.Command.async
+    ~summary:"Append a step to the workspace research plan."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag
+         "--directory-prefix"
+         (optional string)
+         ~doc:"PATH Parent directory for Sandwalk workspaces"
+     and key_text =
+       flag "--key" (required string) ~doc:"KEY Human-readable plan step key"
+     and title =
+       flag "--title" (required string) ~doc:"TITLE Plan step title"
+     and optional =
+       flag "--optional" no_arg ~doc:" Mark this plan step as optional"
+     in
+     fun () ->
+       match
+         ( Sandwalk_core.Slug.of_string slug_text
+         , Sandwalk_core.Plan_step.Key.of_string key_text )
+       with
+       | Error error, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_PLAN_STEP_KEY"
+           ~message:(Sandwalk_core.Plan_step.Key.Error.message error)
+       | Ok slug, Ok key ->
+         (match Sandwalk_core.Plan_step.create ~key ~title ~required:(not optional) with
+          | Error error ->
+            print_failure_and_exit
+              ~code:"INVALID_PLAN_STEP"
+              ~message:(Sandwalk_core.Plan_step.Error.message error)
+          | Ok step ->
+            let directory_prefix =
+              Sandwalk_runtime.resolve_directory_prefix
+                ~command_line:directory_prefix
+            in
+            let workspace =
+              Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+            in
+            let arguments =
+              `Assoc
+                [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                ; "directory_prefix", `String directory_prefix
+                ; ( "key"
+                  , `String
+                      (Sandwalk_core.Plan_step.Key.to_string
+                         (Sandwalk_core.Plan_step.key step)) )
+                ; "title", `String (Sandwalk_core.Plan_step.title step)
+                ; "required", `Bool (Sandwalk_core.Plan_step.required step)
+                ]
+            in
+            let%bind database_exists =
+              Async.Sys.file_exists_exn
+                (Sandwalk_runtime.Workspace.database_path workspace)
+            in
+            if not database_exists
+            then
+              print_failure_and_exit
+                ~code:"WORKSPACE_NOT_FOUND"
+                ~message:"Workspace does not exist."
+            else (
+              let started_at = Time_float_unix.now () in
+              let%bind invocation_id =
+                In_thread.run (fun () ->
+                  Sandwalk_runtime.invocation_id ~now:started_at)
+              in
+              let append_event
+                    ~kind
+                    ~timestamp
+                    ~phase
+                    ~state_changes
+                    ?duration_ms
+                    ?outcome
+                    ?error_code
+                    ()
+                =
+                Sandwalk_runtime.Audit.append
+                  ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                  (Sandwalk_protocol.Audit_event.create
+                     ~invocation_id
+                     ~timestamp
+                     ~kind
+                     ~command:"plan add-step"
+                     ~arguments
+                     ~phase
+                     ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                     ~state_changes
+                     ?duration_ms
+                     ?outcome
+                     ?error_code
+                     ())
+              in
+              let fail_with_audit ~phase ~state_changes ~code ~message =
+                let finished_at = Time_float_unix.now () in
+                let duration_ms =
+                  Time_float.diff finished_at started_at
+                  |> Time_float.Span.to_ms
+                  |> Float.iround_nearest_exn
+                in
+                let%bind logged =
+                  append_event
+                    ~kind:`Failed
+                    ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                    ~phase
+                    ~state_changes
+                    ~duration_ms
+                    ~outcome:"failure"
+                    ~error_code:code
+                    ()
+                in
+                match logged with
+                | Error _ ->
+                  print_failure_and_exit
+                    ~code:"AUDIT_LOG_ERROR"
+                    ~message:"Could not append workspace audit log."
+                | Ok () -> print_failure_and_exit ~code ~message
+              in
+              let%bind started =
+                append_event
+                  ~kind:`Started
+                  ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                  ~phase:None
+                  ~state_changes:[]
+                  ()
+              in
+              match started with
+              | Error _ ->
+                print_failure_and_exit
+                  ~code:"AUDIT_LOG_ERROR"
+                  ~message:"Could not append workspace audit log."
+              | Ok () ->
+                let%bind added =
+                  In_thread.run (fun () ->
+                    Sandwalk_store.add_plan_step
+                      ~database_path:
+                        (Sandwalk_runtime.Workspace.database_path workspace)
+                      ~expected_slug:slug
+                      ~step
+                      ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                      ())
+                in
+                (match added with
+                 | Error error ->
+                   let code, message = plan_error error in
+                   let phase =
+                     match error with
+                     | Sandwalk_store.Error.Plan_mutation_wrong_phase phase ->
+                       Some (Sandwalk_core.Phase.to_string phase)
+                     | _ -> None
+                   in
+                   fail_with_audit ~phase ~state_changes:[] ~code ~message
+                 | Ok added ->
+                   let previous_phase =
+                     Sandwalk_store.Add_plan_step_result.previous_phase added
+                   in
+                   let _, phase_changes =
+                     Sandwalk_store.Add_plan_step_result.phase_path added
+                     |> List.fold
+                          ~init:(previous_phase, [])
+                          ~f:(fun (from, changes) into ->
+                            ( into
+                            , changes
+                              @ [ `Assoc
+                                    [ "entity", `String "workspace.phase"
+                                    ; ( "from"
+                                      , `String
+                                          (Sandwalk_core.Phase.to_string from) )
+                                    ; ( "to"
+                                      , `String
+                                          (Sandwalk_core.Phase.to_string into) )
+                                    ]
+                                ] ))
+                   in
+                   let state_changes =
+                     let previous_schema_version =
+                       Sandwalk_store.Add_plan_step_result.previous_schema_version
+                         added
+                     in
+                     (if previous_schema_version
+                         < Sandwalk_store.current_schema_version
+                      then
+                        [ `Assoc
+                            [ "entity", `String "workspace.schema"
+                            ; "from", `Int previous_schema_version
+                            ; ( "to"
+                              , `Int Sandwalk_store.current_schema_version )
+                            ]
+                        ]
+                      else [])
+                     @ phase_changes
+                     @ [ `Assoc
+                           [ "entity", `String "plan.step"
+                           ; "from", `Null
+                           ; ( "to"
+                             , `String
+                                 (Sandwalk_core.Plan_step.Key.to_string
+                                    (Sandwalk_core.Plan_step.key step)) )
+                           ]
+                       ]
+                   in
+                   let phase =
+                     Sandwalk_store.Add_plan_step_result.phase added
+                   in
+                   let steps =
+                     Sandwalk_store.Add_plan_step_result.steps added
+                   in
+                   let revision =
+                     Sandwalk_store.Add_plan_step_result.revision added
+                   in
+                   let projection =
+                     Sandwalk_core.Plan_projection.render
+                       ~phase
+                       ~revision
+                       ~steps:
+                         (List.map steps ~f:(fun stored ->
+                            ( Sandwalk_store.Stored_plan_step.key stored
+                            , Sandwalk_store.Stored_plan_step.title stored
+                            , Sandwalk_store.Stored_plan_step.required stored
+                            , Sandwalk_store.Stored_plan_step.position stored )))
+                   in
+                   let plan_path =
+                     Sandwalk_runtime.Workspace.research_plan_path workspace
+                   in
+                   let%bind written =
+                     Sandwalk_runtime.Atomic_file.write_versioned
+                       ~path:plan_path
+                       ~lock_path:
+                         (Sandwalk_runtime.Workspace.research_plan_lock_path
+                            workspace)
+                       ~temporary_suffix:invocation_id
+                       ~version:revision
+                       projection
+                   in
+                   (match written with
+                    | Error _ ->
+                      fail_with_audit
+                        ~phase:(Some (Sandwalk_core.Phase.to_string phase))
+                        ~state_changes
+                        ~code:"WORKSPACE_IO_ERROR"
+                        ~message:"Could not write research plan projection."
+                    | Ok () ->
+                      let finished_at = Time_float_unix.now () in
+                      let duration_ms =
+                        Time_float.diff finished_at started_at
+                        |> Time_float.Span.to_ms
+                        |> Float.iround_nearest_exn
+                      in
+                      let%bind logged =
+                        append_event
+                          ~kind:`Finished
+                          ~timestamp:
+                            (Sandwalk_runtime.timestamp_utc finished_at)
+                          ~phase:(Some (Sandwalk_core.Phase.to_string phase))
+                          ~state_changes
+                          ~duration_ms
+                          ~outcome:"success"
+                          ()
+                      in
+                      (match logged with
+                       | Error _ ->
+                         print_failure_and_exit
+                           ~code:"AUDIT_LOG_ERROR"
+                           ~message:"Could not append workspace audit log."
+                       | Ok () ->
+                         let stored =
+                           List.find_exn steps ~f:(fun stored ->
+                             String.equal
+                               (Sandwalk_store.Stored_plan_step.key stored
+                                |> Sandwalk_core.Plan_step.Key.to_string)
+                               (Sandwalk_core.Plan_step.key step
+                                |> Sandwalk_core.Plan_step.Key.to_string))
+                         in
+                         let result =
+                           `Assoc
+                             [ ( "key"
+                               , `String
+                                   (Sandwalk_core.Plan_step.key step
+                                    |> Sandwalk_core.Plan_step.Key.to_string) )
+                             ; ( "title"
+                               , `String
+                                   (Sandwalk_core.Plan_step.title step) )
+                             ; ( "required"
+                               , `Bool
+                                   (Sandwalk_core.Plan_step.required step) )
+                             ; ( "position"
+                               , `Int
+                                   (Sandwalk_store.Stored_plan_step.position
+                                      stored) )
+                             ; ( "phase"
+                               , `String
+                                   (Sandwalk_core.Phase.to_string phase) )
+                             ; "plan_path", `String plan_path
+                             ]
+                         in
+                         Sandwalk_protocol.Envelope.success ~result ()
+                         |> Sandwalk_protocol.Envelope.render
+                         |> print_endline;
+                         Deferred.unit))))))
+;;
+
+let plan_command =
+  Async.Command.group
+    ~summary:"Manage the canonical research plan."
+    [ "add-step", plan_add_step_command ]
+;;
+
 let command =
   Async.Command.group
     ~summary:"Deterministic research orchestration for AI agents."
-    [ "about", about_command; "init", init_command; "status", status_command ]
+    [ "about", about_command
+    ; "init", init_command
+    ; "plan", plan_command
+    ; "resume", resume_command
+    ; "status", status_command
+    ]
 ;;
 
 let () = Command_unix.run command
