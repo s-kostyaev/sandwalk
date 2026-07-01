@@ -226,7 +226,7 @@ module Atomic_file = struct
         let open Option.Let_syntax in
         let%bind line = In_channel.input_line channel in
         let%bind value =
-          String.chop_prefix line ~prefix:"<!-- sandwalk-plan-revision: "
+          String.chop_prefix line ~prefix:"<!-- sandwalk-projection-version: "
         in
         let%bind value = String.chop_suffix value ~suffix:" -->" in
         Int.of_string_opt value)

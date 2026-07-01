@@ -62,6 +62,43 @@ VALUES (1, ?1, 'initialized', '2026-01-01 00:00:00Z', '2026-01-01 00:00:00Z')
       check database (Sqlite3.step statement))
 ;;
 
+let create_v2 database slug =
+  create_v1 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE plan_steps (
+  step_key TEXT PRIMARY KEY CHECK (
+    length(step_key) BETWEEN 1 AND 63
+    AND step_key NOT GLOB '*[^a-z0-9-]*'
+    AND step_key NOT GLOB '-*'
+    AND step_key NOT GLOB '*-'
+    AND step_key NOT GLOB '*--*'
+  ),
+  title TEXT NOT NULL CHECK (
+    length(CAST(title AS BLOB)) BETWEEN 1 AND 200
+    AND title = trim(title)
+  ),
+  position INTEGER NOT NULL UNIQUE CHECK (position >= 1),
+  required INTEGER NOT NULL CHECK (required IN (0, 1)),
+  created_at TEXT NOT NULL
+);
+CREATE TABLE plan_metadata (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  revision INTEGER NOT NULL CHECK (revision >= 0)
+);
+INSERT INTO plan_metadata (singleton, revision) VALUES (1, 1);
+INSERT INTO plan_steps (step_key, title, position, required, created_at)
+VALUES ('fixture-step', 'Fixture step', 1, 1, '2026-01-01 00:00:00Z');
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (2, '2026-01-01 00:00:00Z');
+UPDATE workspaces SET phase = 'planning';
+PRAGMA user_version = 2;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -70,17 +107,20 @@ let inspect database =
 ;;
 
 let () =
-  let create, path, slug =
+  let version, path, slug =
     match Sys.argv with
-    | [| _; "--create-v1"; path; slug |] -> true, path, Some slug
-    | [| _; path |] -> false, path, None
+    | [| _; "--create-v1"; path; slug |] -> Some 1, path, Some slug
+    | [| _; "--create-v2"; path; slug |] -> Some 2, path, Some slug
+    | [| _; path |] -> None, path, None
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
   in
   let database = Sqlite3.db_open path in
   Fun.protect
     ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
     (fun () ->
-      if create
-      then create_v1 database (Option.get slug)
-      else inspect database)
+      match version with
+      | Some 1 -> create_v1 database (Option.get slug)
+      | Some 2 -> create_v2 database (Option.get slug)
+      | Some _ -> assert false
+      | None -> inspect database)
 ;;

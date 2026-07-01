@@ -165,6 +165,10 @@ through the legal `initialized → scoping → planning` transitions. A mutation
 from `scoping` or `reconnaissance` advances to `planning`; later phases reject
 direct plan mutation.
 
+Plan validation requires at least one step and records the exact plan revision.
+Appending a step increments the revision, making an earlier validation stale.
+Repeated validation of an unchanged revision is idempotent.
+
 After work begins, existing steps are immutable. New steps are added through an
 append-only plan revision with a recorded reason.
 

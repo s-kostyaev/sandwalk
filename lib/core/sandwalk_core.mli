@@ -85,9 +85,12 @@ module Planning : sig
 end
 
 module Plan_projection : sig
+  val version : revision:int -> validated:bool -> int
+
   val render
     :  phase:Phase.t
     -> revision:int
+    -> validated:bool
     -> steps:(Plan_step.Key.t * string * bool * int) list
     -> string
 end

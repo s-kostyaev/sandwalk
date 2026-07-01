@@ -182,7 +182,9 @@ module Planning = struct
 end
 
 module Plan_projection = struct
-  let render ~phase ~revision ~steps =
+  let version ~revision ~validated = (revision * 2) + if validated then 1 else 0
+
+  let render ~phase ~revision ~validated ~steps =
     let step_lines =
       match steps with
       | [] -> [ "No steps." ]
@@ -198,10 +200,14 @@ module Plan_projection = struct
     in
     String.concat
       ~sep:"\n"
-      ([ sprintf "<!-- sandwalk-plan-revision: %d -->" revision
+      ([ sprintf
+           "<!-- sandwalk-projection-version: %d -->"
+           (version ~revision ~validated)
+       ; sprintf "<!-- sandwalk-plan-revision: %d -->" revision
        ; "# Research plan"
        ; ""
        ; sprintf "Phase: %s" (Phase.to_string phase)
+       ; sprintf "Validation: %s" (if validated then "current" else "pending")
        ; ""
        ]
        @ step_lines
@@ -509,4 +515,17 @@ let%expect_test "plan mutation follows only legal phase transitions" =
     reconnaissance -> planning
     planning ->
     researching -> rejected |}]
+;;
+
+let%test_unit "validated projections outrank pending projections at one revision" =
+  Quickcheck.test Int.quickcheck_generator ~f:(fun revision ->
+    if revision >= 0 && revision < Int.max_value / 2
+    then (
+      let pending = Plan_projection.version ~revision ~validated:false in
+      let validated = Plan_projection.version ~revision ~validated:true in
+      [%test_pred: int] (fun value -> value < validated) pending;
+      [%test_pred: int]
+        (fun value ->
+          value < Plan_projection.version ~revision:(revision + 1) ~validated:false)
+        validated))
 ;;

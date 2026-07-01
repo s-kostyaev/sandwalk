@@ -12,6 +12,8 @@ module Error = struct
         }
     | Duplicate_plan_step of string
     | Plan_mutation_wrong_phase of Sandwalk_core.Phase.t
+    | Empty_plan
+    | Plan_validation_wrong_phase of Sandwalk_core.Phase.t
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -28,6 +30,22 @@ module Stored_plan_step = struct
   let title t = t.title
   let required t = t.required
   let position t = t.position
+end
+
+module Validate_plan_result = struct
+  type t =
+    { previous_schema_version : int
+    ; phase : Sandwalk_core.Phase.t
+    ; revision : int
+    ; already_validated : bool
+    ; steps : Stored_plan_step.t list
+    }
+
+  let previous_schema_version t = t.previous_schema_version
+  let phase t = t.phase
+  let revision t = t.revision
+  let already_validated t = t.already_validated
+  let steps t = t.steps
 end
 
 module Add_plan_step_result = struct
@@ -60,7 +78,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 2
+let current_schema_version = 3
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -156,6 +174,14 @@ PRAGMA user_version = 2;
 |}
 ;;
 
+let migration_v3 =
+  {|
+ALTER TABLE plan_metadata ADD COLUMN validated_revision INTEGER;
+ALTER TABLE plan_metadata ADD COLUMN validated_at TEXT;
+PRAGMA user_version = 3;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -192,7 +218,13 @@ let migrate database ~from_version ~now =
     if from_version < 2
     then (
       let%bind () = execute database migration_v2 in
-      insert_migration database ~version:2 ~now)
+      let%bind () = insert_migration database ~version:2 ~now in
+      let%bind () = execute database migration_v3 in
+      insert_migration database ~version:3 ~now)
+    else if from_version < 3
+    then (
+      let%bind () = execute database migration_v3 in
+      insert_migration database ~version:3 ~now)
     else Ok ())
 ;;
 
@@ -391,6 +423,39 @@ let increment_plan_revision database =
         check database return_code |> Result.map ~f:(Fn.const 0))
 ;;
 
+let query_plan_validation database =
+  with_statement
+    database
+    "SELECT revision, validated_revision FROM plan_metadata WHERE singleton = 1"
+    ~f:(fun statement ->
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        Ok
+          ( Sqlite3.column_int statement 0
+          , if Sqlite3.column_is_null statement 1
+            then None
+            else Some (Sqlite3.column_int statement 1) )
+      | Sqlite3.Rc.DONE ->
+        Error (Error.Database_error "Missing plan metadata")
+      | return_code ->
+        check database return_code |> Result.map ~f:(Fn.const (0, None)))
+;;
+
+let mark_plan_validated database ~revision ~now =
+  with_statement
+    database
+    {|
+UPDATE plan_metadata
+SET validated_revision = ?1, validated_at = ?2
+WHERE singleton = 1
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () = check database (Sqlite3.bind_int statement 1 revision) in
+      let%bind () = bind_text database statement 2 now in
+      step_done database statement)
+;;
+
 let query_plan_steps database =
   let steps = ref [] in
   let open Result.Let_syntax in
@@ -527,6 +592,87 @@ let add_plan_step
             ; revision
             ; steps
             }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let validate_plan
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind previous_schema_version = query_schema_version database in
+            let%bind () =
+              migrate database ~from_version:previous_schema_version ~now
+            in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if Sandwalk_core.Phase.equal phase Planning
+              then Ok ()
+              else Error (Error.Plan_validation_wrong_phase phase)
+            in
+            let%bind steps = query_plan_steps database in
+            let%bind () =
+              if List.is_empty steps then Error Error.Empty_plan else Ok ()
+            in
+            let%bind revision, validated_revision =
+              query_plan_validation database
+            in
+            let already_validated =
+              Option.value_map
+                validated_revision
+                ~default:false
+                ~f:(Int.equal revision)
+            in
+            let%bind () =
+              if already_validated
+              then Ok ()
+              else mark_plan_validated database ~revision ~now
+            in
+            Ok
+              { Validate_plan_result.previous_schema_version
+              ; phase
+              ; revision
+              ; already_validated
+              ; steps
+              }
           in
           (match outcome with
            | Ok result ->
