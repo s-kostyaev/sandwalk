@@ -3,8 +3,27 @@ open! Core
 module Error = struct
   type t =
     | Already_initialized
+    | Not_initialized
+    | Unsupported_schema_version of int
+    | Invalid_persisted_phase of string
+    | Workspace_slug_mismatch of
+        { expected : string
+        ; actual : string
+        }
     | Database_error of string
   [@@deriving sexp_of]
+end
+
+module Workspace_status = struct
+  type t =
+    { slug : Sandwalk_core.Slug.t
+    ; phase : Sandwalk_core.Phase.t
+    ; schema_version : int
+    }
+
+  let slug t = t.slug
+  let phase t = t.phase
+  let schema_version t = t.schema_version
 end
 
 let current_schema_version = 1
@@ -131,4 +150,74 @@ let initialize ?(busy_timeout_ms = 5_000) ~database_path ~slug ~now () =
       with
       | exn -> Error (Error.Database_error (Exn.to_string exn)))
     ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+;;
+
+let query_schema_version database =
+  with_statement database "PRAGMA user_version" ~f:(fun statement ->
+    match Sqlite3.step statement with
+    | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+    | Sqlite3.Rc.DONE -> Error Error.Not_initialized
+    | return_code ->
+      check database return_code
+      |> Result.map ~f:(fun () -> current_schema_version))
+;;
+
+let query_workspace database =
+  with_statement
+    database
+    "SELECT slug, phase FROM workspaces WHERE singleton = 1"
+    ~f:(fun statement ->
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        Ok (Sqlite3.column_text statement 0, Sqlite3.column_text statement 1)
+      | Sqlite3.Rc.DONE -> Error Error.Not_initialized
+      | return_code ->
+        check database return_code
+        |> Result.map ~f:(fun () -> assert false))
+;;
+
+let read_status
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          let%bind () =
+            if schema_version = current_schema_version
+            then Ok ()
+            else Error (Error.Unsupported_schema_version schema_version)
+          in
+          let%bind slug_text, phase_text = query_workspace database in
+          let expected = Sandwalk_core.Slug.to_string expected_slug in
+          let%bind () =
+            if String.equal expected slug_text
+            then Ok ()
+            else
+              Error
+                (Error.Workspace_slug_mismatch
+                   { expected; actual = slug_text })
+          in
+          let%bind phase =
+            Sandwalk_core.Phase.of_string phase_text
+            |> Result.of_option
+                 ~error:(Error.Invalid_persisted_phase phase_text)
+          in
+          Ok
+            { Workspace_status.slug = expected_slug
+            ; phase
+            ; schema_version
+            }
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
 ;;

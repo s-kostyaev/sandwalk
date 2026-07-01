@@ -85,6 +85,7 @@ not select an implicit `latest` workspace.
 
 ```console
 sandwalk init --slug <slug> [--directory-prefix <path>]
+sandwalk status --slug <slug> [--directory-prefix <path>]
 ```
 
 SQLite uses WAL mode and a configurable busy timeout. Independent commands use

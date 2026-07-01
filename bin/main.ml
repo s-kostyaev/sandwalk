@@ -107,7 +107,7 @@ let init_command =
                  | Ok () -> "success", None
                  | Error Sandwalk_store.Error.Already_initialized ->
                    "failure", Some "WORKSPACE_EXISTS"
-                 | Error (Sandwalk_store.Error.Database_error _) ->
+                 | Error _ ->
                    "failure", Some "DATABASE_ERROR"
                in
                let%bind finished =
@@ -163,16 +163,163 @@ let init_command =
                      print_failure_and_exit
                        ~code:"WORKSPACE_EXISTS"
                        ~message:"Workspace already exists."
-                   | Error (Sandwalk_store.Error.Database_error _) ->
+                   | Error _ ->
                      print_failure_and_exit
                        ~code:"DATABASE_ERROR"
                        ~message:"Could not initialize workspace database.")))))
 ;;
 
+let status_error = function
+  | Sandwalk_store.Error.Not_initialized ->
+    "WORKSPACE_NOT_INITIALIZED", "Workspace database is not initialized."
+  | Unsupported_schema_version _ ->
+    "SCHEMA_VERSION_UNSUPPORTED", "Workspace schema version is not supported."
+  | Invalid_persisted_phase _ | Workspace_slug_mismatch _ ->
+    "WORKSPACE_INVALID", "Workspace state is invalid."
+  | Database_error _ ->
+    "DATABASE_ERROR", "Could not read workspace database."
+  | Already_initialized ->
+    "DATABASE_ERROR", "Could not read workspace database."
+;;
+
+let status_command =
+  Async.Command.async
+    ~summary:"Print the current state of a Sandwalk workspace."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag
+         "--directory-prefix"
+         (optional string)
+         ~doc:"PATH Parent directory for Sandwalk workspaces"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let arguments = parsed_arguments ~slug ~directory_prefix in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let started_at = Time_float_unix.now () in
+           let%bind invocation_id =
+             In_thread.run (fun () ->
+               Sandwalk_runtime.invocation_id ~now:started_at)
+           in
+           let%bind started =
+             Sandwalk_runtime.Audit.append
+               ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+               (Sandwalk_protocol.Audit_event.create
+                  ~invocation_id
+                  ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                  ~kind:`Started
+                  ~command:"status"
+                  ~arguments
+                  ~phase:None
+                  ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                  ~state_changes:[]
+                  ())
+           in
+           match started with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"AUDIT_LOG_ERROR"
+               ~message:"Could not append workspace audit log."
+           | Ok () ->
+             let%bind status =
+               In_thread.run (fun () ->
+                 Sandwalk_store.read_status
+                   ~database_path:
+                     (Sandwalk_runtime.Workspace.database_path workspace)
+                   ~expected_slug:slug
+                   ())
+             in
+             let phase =
+               Result.ok status
+               |> Option.map ~f:(fun status ->
+                 Sandwalk_store.Workspace_status.phase status
+                 |> Sandwalk_core.Phase.to_string)
+             in
+             let error =
+               Result.error status |> Option.map ~f:status_error
+             in
+             let finished_at = Time_float_unix.now () in
+             let duration_ms =
+               Time_float.diff finished_at started_at
+               |> Time_float.Span.to_ms
+               |> Float.iround_nearest_exn
+             in
+             let%bind finished =
+               Sandwalk_runtime.Audit.append
+                 ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                 (Sandwalk_protocol.Audit_event.create
+                    ~invocation_id
+                    ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                    ~kind:(if Result.is_ok status then `Finished else `Failed)
+                    ~command:"status"
+                    ~arguments
+                    ~phase
+                    ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                    ~state_changes:[]
+                    ~duration_ms
+                    ~outcome:
+                      (if Result.is_ok status then "success" else "failure")
+                    ?error_code:(Option.map error ~f:fst)
+                    ())
+             in
+             (match finished with
+              | Error _ ->
+                print_failure_and_exit
+                  ~code:"AUDIT_LOG_ERROR"
+                  ~message:"Could not append workspace audit log."
+              | Ok () ->
+                (match status with
+                 | Error error ->
+                   let code, message = status_error error in
+                   print_failure_and_exit ~code ~message
+                 | Ok status ->
+                   let result =
+                     `Assoc
+                       [ ( "slug"
+                         , `String
+                             (Sandwalk_store.Workspace_status.slug status
+                              |> Sandwalk_core.Slug.to_string) )
+                       ; ( "phase"
+                         , `String
+                             (Sandwalk_store.Workspace_status.phase status
+                              |> Sandwalk_core.Phase.to_string) )
+                       ; ( "schema_version"
+                         , `Int
+                             (Sandwalk_store.Workspace_status.schema_version
+                                status) )
+                       ]
+                   in
+                   Sandwalk_protocol.Envelope.success ~result ()
+                   |> Sandwalk_protocol.Envelope.render
+                   |> print_endline;
+                   Deferred.unit))))
+;;
+
 let command =
   Async.Command.group
     ~summary:"Deterministic research orchestration for AI agents."
-    [ "about", about_command; "init", init_command ]
+    [ "about", about_command; "init", init_command; "status", status_command ]
 ;;
 
 let () = Command_unix.run command

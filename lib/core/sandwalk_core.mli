@@ -32,6 +32,7 @@ module Phase : sig
   [@@deriving compare, equal, sexp]
 
   val to_string : t -> string
+  val of_string : string -> t option
   val can_transition : from:t -> into:t -> bool
 end
 

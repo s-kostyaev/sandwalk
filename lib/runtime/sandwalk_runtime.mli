@@ -4,6 +4,11 @@ open! Async
 module Workspace : sig
   type t
 
+  val resolve
+    :  directory_prefix:string
+    -> slug:Sandwalk_core.Slug.t
+    -> t
+
   val create_layout
     :  directory_prefix:string
     -> slug:Sandwalk_core.Slug.t

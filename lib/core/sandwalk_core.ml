@@ -74,6 +74,20 @@ module Phase = struct
     | Completed -> "completed"
   ;;
 
+  let of_string = function
+    | "initialized" -> Some Initialized
+    | "scoping" -> Some Scoping
+    | "reconnaissance" -> Some Reconnaissance
+    | "planning" -> Some Planning
+    | "researching" -> Some Researching
+    | "evidence-review" -> Some Evidence_review
+    | "drafting" -> Some Drafting
+    | "draft-review" -> Some Draft_review
+    | "finalizing" -> Some Finalizing
+    | "completed" -> Some Completed
+    | _ -> None
+  ;;
+
   let can_transition ~from ~into =
     match from, into with
     | Initialized, Scoping
@@ -161,4 +175,22 @@ let%expect_test "allows the planning and reconnaissance loop" =
     (Ok planning)
     (Ok reconnaissance)
     (Error ((from Completed) (into Planning))) |}]
+;;
+
+let%test_unit "phase persistence strings round-trip" =
+  [ Phase.Initialized
+  ; Scoping
+  ; Reconnaissance
+  ; Planning
+  ; Researching
+  ; Evidence_review
+  ; Drafting
+  ; Draft_review
+  ; Finalizing
+  ; Completed
+  ]
+  |> List.iter ~f:(fun phase ->
+    [%test_eq: Phase.t option]
+      (Some phase)
+      (Phase.of_string (Phase.to_string phase)))
 ;;

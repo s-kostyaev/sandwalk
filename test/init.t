@@ -21,12 +21,27 @@
   $ wc -l < workspaces/typed-harness/logs/events.jsonl
          2
 
+  $ sandwalk status --slug typed-harness --directory-prefix workspaces
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":1}}
+
+  $ wc -l < workspaces/typed-harness/logs/events.jsonl
+         4
+
   $ sandwalk init --slug typed-harness --directory-prefix workspaces
   {"ok":false,"error":{"code":"WORKSPACE_EXISTS","message":"Workspace already exists."}}
   [1]
 
   $ wc -l < workspaces/typed-harness/logs/events.jsonl
-         4
+         6
+
+  $ SANDWALK_DIRECTORY_PREFIX=workspaces sandwalk status --slug typed-harness
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":1}}
+
+  $ sandwalk status --slug missing --directory-prefix workspaces
+  {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}
+  [1]
+
+  $ test ! -e workspaces/missing
 
   $ sandwalk init --slug ../escape --directory-prefix workspaces
   {"ok":false,"error":{"code":"INVALID_SLUG","message":"Slug must use lowercase letters or digits, separated by single hyphens."}}

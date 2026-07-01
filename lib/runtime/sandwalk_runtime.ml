@@ -12,10 +12,18 @@ module Workspace = struct
   let database_path t = t.database_path
   let events_path t = t.events_path
 
-  let create_layout ~directory_prefix ~slug =
+  let resolve ~directory_prefix ~slug =
     let root =
       Filename.concat directory_prefix (Sandwalk_core.Slug.to_string slug)
     in
+    { root
+    ; database_path = Filename.concat root "database/sandwalk.sqlite3"
+    ; events_path = Filename.concat root "logs/events.jsonl"
+    }
+  ;;
+
+  let create_layout ~directory_prefix ~slug =
+    let t = resolve ~directory_prefix ~slug in
     let directories =
       [ "database"
       ; "artifacts/snapshots"
@@ -27,15 +35,12 @@ module Workspace = struct
       ]
     in
     Deferred.Or_error.try_with (fun () ->
-      let%bind () = Unix.mkdir ~p:() root in
+      let%bind () = Unix.mkdir ~p:() t.root in
       let%map () =
         Deferred.List.iter directories ~how:`Sequential ~f:(fun directory ->
-          Unix.mkdir ~p:() (Filename.concat root directory))
+          Unix.mkdir ~p:() (Filename.concat t.root directory))
       in
-      { root
-      ; database_path = Filename.concat root "database/sandwalk.sqlite3"
-      ; events_path = Filename.concat root "logs/events.jsonl"
-      })
+      t)
   ;;
 end
 
