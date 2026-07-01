@@ -289,6 +289,46 @@ module Claim_decision = struct
   ;;
 end
 
+module Checkpoint = struct
+  module Error = struct
+    type t =
+      | Empty_summary
+      | Empty_next
+      | Summary_too_large
+      | Next_too_large
+    [@@deriving sexp_of]
+
+    let message = function
+      | Empty_summary -> "Checkpoint summary must not be empty."
+      | Empty_next -> "Checkpoint next action must not be empty."
+      | Summary_too_large -> "Checkpoint summary file exceeds 65536 bytes."
+      | Next_too_large -> "Checkpoint next-action file exceeds 65536 bytes."
+    ;;
+  end
+
+  type t =
+    { summary : string
+    ; next : string
+    }
+
+  let maximum_file_bytes = 65_536
+
+  let create ~summary ~next =
+    if String.is_empty (String.strip summary)
+    then Error Error.Empty_summary
+    else if String.is_empty (String.strip next)
+    then Error Error.Empty_next
+    else if String.length summary > maximum_file_bytes
+    then Error Error.Summary_too_large
+    else if String.length next > maximum_file_bytes
+    then Error Error.Next_too_large
+    else Ok { summary; next }
+  ;;
+
+  let summary t = t.summary
+  let next t = t.next
+end
+
 let%expect_test "claim decisions enforce active leases and terminal steps" =
   let check state lease_expired =
     Claim_decision.decide ~state ~lease_expired
@@ -352,6 +392,7 @@ module Resume_pack = struct
         ~schema_version
         ~plan_steps
         ~active_claims
+        ~latest_checkpoint
         ~recent_commands
         ~unmatched_commands
         ~events_path
@@ -383,6 +424,21 @@ module Resume_pack = struct
             (Claim_id.to_string claim_id)
             attempt
             expires_at)
+    in
+    let bounded value =
+      if String.length value <= 4_096
+      then value
+      else String.prefix value 4_096 ^ "\n[truncated]"
+    in
+    let latest_checkpoint_lines =
+      match latest_checkpoint with
+      | None -> [ "None." ]
+      | Some (step_key, summary, next, created_at) ->
+        [ sprintf "- Step: %S" (Plan_step.Key.to_string step_key)
+        ; sprintf "- Created: %S" created_at
+        ; sprintf "- Summary: %S" (bounded summary)
+        ; sprintf "- Next: %S" (bounded next)
+        ]
     in
     let command_lines =
       match recent_commands with
@@ -433,9 +489,10 @@ module Resume_pack = struct
          ; ""
          ; "## Latest checkpoint"
          ; ""
-         ; "None."
-         ; ""
-         ; "## Durable entities"
+         ]
+         @ latest_checkpoint_lines
+         @ [ ""
+           ; "## Durable entities"
          ; ""
          ]
          @ durable_entity_lines
@@ -495,6 +552,7 @@ let%expect_test "renders a bounded mechanical resume pack" =
         ~schema_version:1
         ~plan_steps:[]
         ~active_claims:[]
+        ~latest_checkpoint:None
         ~recent_commands:[ "init", "success", None ]
         ~unmatched_commands:[]
         ~events_path:"workspace/logs/events.jsonl"

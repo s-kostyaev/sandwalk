@@ -261,6 +261,35 @@ module Atomic_file = struct
   ;;
 end
 
+module File_input = struct
+  type t =
+    { path : string
+    ; content : string
+    ; size : int
+    ; md5 : string
+    }
+
+  let path t = t.path
+  let content t = t.content
+  let size t = t.size
+  let md5 t = t.md5
+
+  let read ~path ~maximum_bytes =
+    Deferred.Or_error.try_with (fun () ->
+      In_thread.run (fun () ->
+        let content = In_channel.read_all path in
+        let size = String.length content in
+        if size > maximum_bytes
+        then
+          failwithf
+            "File %s exceeds the %d-byte limit"
+            path
+            maximum_bytes
+            ();
+        { path; content; size; md5 = Md5.digest_string content |> Md5.to_hex }))
+  ;;
+end
+
 let default_directory_prefix () =
   match Sys.getenv "XDG_DATA_HOME" with
   | Some directory -> Filename.concat directory "sandwalk"

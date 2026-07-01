@@ -204,6 +204,10 @@ sandwalk step checkpoint --slug <slug> --claim <claim> \
   --summary-file <path> --next-file <path>
 ```
 
+Checkpoint files are non-empty and individually limited to 64 KiB. Saving a
+checkpoint requires the active, unexpired claim and renews its original lease
+duration from the checkpoint time.
+
 Sandwalk always creates a mechanical resume pack from durable state and logs.
 An explicit checkpoint adds the agent's current interpretation, hypotheses, and
 next intended action.

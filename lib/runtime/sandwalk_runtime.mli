@@ -56,6 +56,16 @@ module Atomic_file : sig
     -> unit Deferred.Or_error.t
 end
 
+module File_input : sig
+  type t
+
+  val read : path:string -> maximum_bytes:int -> t Deferred.Or_error.t
+  val path : t -> string
+  val content : t -> string
+  val size : t -> int
+  val md5 : t -> string
+end
+
 val default_directory_prefix : unit -> string
 val resolve_directory_prefix : command_line:string option -> string
 val timestamp_utc : Time_float.t -> string

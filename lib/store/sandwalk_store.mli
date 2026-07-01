@@ -26,8 +26,29 @@ module Error : sig
     | Step_completed of string
     | Claim_id_collision
     | Invalid_step_state of string
+    | Claim_not_found
+    | Claim_not_active
+    | Claim_expired of string
     | Database_error of string
   [@@deriving sexp_of]
+end
+
+module Save_checkpoint_result : sig
+  type t
+
+  val previous_schema_version : t -> int
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val checkpoint_number : t -> int
+  val lease_expires_unix_seconds : t -> int64
+end
+
+module Latest_checkpoint : sig
+  type t
+
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val summary : t -> string
+  val next : t -> string
+  val created_at : t -> string
 end
 
 module Claim_step_result : sig
@@ -157,6 +178,7 @@ val claim_step
   -> now_unix_seconds:int64
   -> lease_expires_at:string
   -> lease_expires_unix_seconds:int64
+  -> lease_duration_seconds:int
   -> unit
   -> (Claim_step_result.t, Error.t) Result.t
 
@@ -165,3 +187,26 @@ val read_active_claims
   -> database_path:string
   -> unit
   -> (Active_claim.t list, Error.t) Result.t
+
+val save_checkpoint
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> checkpoint:Sandwalk_core.Checkpoint.t
+  -> summary_path:string
+  -> summary_md5:string
+  -> summary_size:int
+  -> next_path:string
+  -> next_md5:string
+  -> next_size:int
+  -> now:string
+  -> now_unix_seconds:int64
+  -> unit
+  -> (Save_checkpoint_result.t, Error.t) Result.t
+
+val read_latest_checkpoint
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> unit
+  -> (Latest_checkpoint.t option, Error.t) Result.t

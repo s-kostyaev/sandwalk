@@ -137,6 +137,26 @@ module Claim_decision : sig
     -> (t, Error.t) Result.t
 end
 
+module Checkpoint : sig
+  module Error : sig
+    type t =
+      | Empty_summary
+      | Empty_next
+      | Summary_too_large
+      | Next_too_large
+    [@@deriving sexp_of]
+
+    val message : t -> string
+  end
+
+  type t
+
+  val maximum_file_bytes : int
+  val create : summary:string -> next:string -> (t, Error.t) Result.t
+  val summary : t -> string
+  val next : t -> string
+end
+
 module Transition_error : sig
   type t =
     { from : Phase.t
@@ -163,6 +183,7 @@ module Resume_pack : sig
     -> schema_version:int
     -> plan_steps:(Plan_step.Key.t * string * bool * int) list
     -> active_claims:(Plan_step.Key.t * Claim_id.t * int * string) list
+    -> latest_checkpoint:(Plan_step.Key.t * string * string * string) option
     -> recent_commands:(string * string * string option) list
     -> unmatched_commands:string list
     -> events_path:string

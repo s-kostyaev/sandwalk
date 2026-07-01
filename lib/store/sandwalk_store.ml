@@ -26,8 +26,39 @@ module Error = struct
     | Step_completed of string
     | Claim_id_collision
     | Invalid_step_state of string
+    | Claim_not_found
+    | Claim_not_active
+    | Claim_expired of string
     | Database_error of string
   [@@deriving sexp_of]
+end
+
+module Save_checkpoint_result = struct
+  type t =
+    { previous_schema_version : int
+    ; step_key : Sandwalk_core.Plan_step.Key.t
+    ; checkpoint_number : int
+    ; lease_expires_unix_seconds : int64
+    }
+
+  let previous_schema_version t = t.previous_schema_version
+  let step_key t = t.step_key
+  let checkpoint_number t = t.checkpoint_number
+  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
+end
+
+module Latest_checkpoint = struct
+  type t =
+    { step_key : Sandwalk_core.Plan_step.Key.t
+    ; summary : string
+    ; next : string
+    ; created_at : string
+    }
+
+  let step_key t = t.step_key
+  let summary t = t.summary
+  let next t = t.next
+  let created_at t = t.created_at
 end
 
 module Claim_step_result = struct
@@ -140,7 +171,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 5
+let current_schema_version = 6
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -292,6 +323,33 @@ PRAGMA user_version = 5;
 |}
 ;;
 
+let migration_v6 =
+  {|
+ALTER TABLE claims ADD COLUMN lease_duration_seconds INTEGER
+  CHECK (lease_duration_seconds BETWEEN 30 AND 86400);
+UPDATE claims
+SET lease_duration_seconds = 900
+WHERE lease_duration_seconds IS NULL;
+CREATE TABLE checkpoints (
+  checkpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+  checkpoint_number INTEGER NOT NULL CHECK (checkpoint_number >= 1),
+  created_at TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  next TEXT NOT NULL,
+  summary_path TEXT NOT NULL,
+  summary_md5 TEXT NOT NULL,
+  summary_size INTEGER NOT NULL CHECK (summary_size >= 0),
+  next_path TEXT NOT NULL,
+  next_md5 TEXT NOT NULL,
+  next_size INTEGER NOT NULL CHECK (next_size >= 0),
+  UNIQUE (step_key, checkpoint_number)
+);
+PRAGMA user_version = 6;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -346,10 +404,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:4 ~now)
       else Ok ()
     in
-    if from_version < 5
+    let%bind () =
+      if from_version < 5
+      then (
+        let%bind () = execute database migration_v5 in
+        insert_migration database ~version:5 ~now)
+      else Ok ()
+    in
+    if from_version < 6
     then (
-      let%bind () = execute database migration_v5 in
-      insert_migration database ~version:5 ~now)
+      let%bind () = execute database migration_v6 in
+      insert_migration database ~version:6 ~now)
     else Ok ())
 ;;
 
@@ -1060,15 +1125,16 @@ let insert_claim
       ~now
       ~lease_expires_at
       ~lease_expires_unix_seconds
+      ~lease_duration_seconds
   =
   with_statement
     database
     {|
 INSERT INTO claims (
   claim_id, step_key, attempt, issued_at, lease_expires_at,
-  lease_expires_unix_seconds
+  lease_expires_unix_seconds, lease_duration_seconds
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 |}
     ~f:(fun statement ->
       let open Result.Let_syntax in
@@ -1093,6 +1159,9 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6)
         check
           database
           (Sqlite3.bind_int64 statement 6 lease_expires_unix_seconds)
+      in
+      let%bind () =
+        check database (Sqlite3.bind_int statement 7 lease_duration_seconds)
       in
       step_done database statement)
 ;;
@@ -1149,6 +1218,7 @@ let claim_step
       ~now_unix_seconds
       ~lease_expires_at
       ~lease_expires_unix_seconds
+      ~lease_duration_seconds
       ()
   =
   try
@@ -1229,6 +1299,7 @@ let claim_step
                 ~now
                 ~lease_expires_at
                 ~lease_expires_unix_seconds
+                ~lease_duration_seconds
             in
             let%bind () =
               activate_claim
@@ -1313,6 +1384,388 @@ let read_active_claims ?(busy_timeout_ms = 5_000) ~database_path () =
           else if schema_version > current_schema_version
           then Error (Error.Unsupported_schema_version schema_version)
           else query_active_claims database
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let query_claim_for_checkpoint database claim_id =
+  with_statement
+    database
+    {|
+SELECT c.step_key, e.state, e.active_claim_id,
+       e.lease_expires_unix_seconds, c.lease_duration_seconds
+FROM claims c
+JOIN step_executions e ON e.step_key = c.step_key
+WHERE c.claim_id = ?1
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Claim_id.to_string claim_id)
+      in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        let step_key_text = Sqlite3.column_text statement 0 in
+        let%bind step_key =
+          Sandwalk_core.Plan_step.Key.of_string step_key_text
+          |> Result.map_error ~f:(fun _ ->
+            Error.Database_error "Invalid persisted checkpoint step key")
+        in
+        let state_text = Sqlite3.column_text statement 1 in
+        let%map state =
+          Sandwalk_core.Step_state.of_string state_text
+          |> Result.of_option ~error:(Error.Invalid_step_state state_text)
+        in
+        let active_claim_id =
+          if Sqlite3.column_is_null statement 2
+          then None
+          else Some (Sqlite3.column_text statement 2)
+        in
+        let lease_expires =
+          if Sqlite3.column_is_null statement 3
+          then None
+          else Some (Sqlite3.column_int64 statement 3)
+        in
+        let lease_duration =
+          if Sqlite3.column_is_null statement 4
+          then 900
+          else Sqlite3.column_int statement 4
+        in
+        step_key, state, active_claim_id, lease_expires, lease_duration
+      | Sqlite3.Rc.DONE -> Error Error.Claim_not_found
+      | return_code ->
+        check database return_code
+        |> Result.map ~f:(fun () -> assert false))
+;;
+
+let expire_step_execution database ~step_key =
+  with_statement
+    database
+    {|
+UPDATE step_executions
+SET state = 'expired',
+    active_claim_id = NULL,
+    lease_expires_unix_seconds = NULL
+WHERE step_key = ?1
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Plan_step.Key.to_string step_key)
+      in
+      step_done database statement)
+;;
+
+let next_checkpoint_number database ~step_key =
+  with_statement
+    database
+    {|
+SELECT COALESCE(MAX(checkpoint_number), 0) + 1
+FROM checkpoints
+WHERE step_key = ?1
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Plan_step.Key.to_string step_key)
+      in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+      | Sqlite3.Rc.DONE -> Ok 1
+      | return_code -> check database return_code |> Result.map ~f:(Fn.const 1))
+;;
+
+let insert_checkpoint
+      database
+      ~step_key
+      ~claim_id
+      ~checkpoint_number
+      ~checkpoint
+      ~summary_path
+      ~summary_md5
+      ~summary_size
+      ~next_path
+      ~next_md5
+      ~next_size
+      ~now
+  =
+  with_statement
+    database
+    {|
+INSERT INTO checkpoints (
+  step_key, claim_id, checkpoint_number, created_at, summary, next,
+  summary_path, summary_md5, summary_size, next_path, next_md5, next_size
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let bind_int index value =
+        check database (Sqlite3.bind_int statement index value)
+      in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Plan_step.Key.to_string step_key)
+      in
+      let%bind () =
+        bind_text
+          database
+          statement
+          2
+          (Sandwalk_core.Claim_id.to_string claim_id)
+      in
+      let%bind () = bind_int 3 checkpoint_number in
+      let%bind () = bind_text database statement 4 now in
+      let%bind () =
+        bind_text database statement 5 (Sandwalk_core.Checkpoint.summary checkpoint)
+      in
+      let%bind () =
+        bind_text database statement 6 (Sandwalk_core.Checkpoint.next checkpoint)
+      in
+      let%bind () = bind_text database statement 7 summary_path in
+      let%bind () = bind_text database statement 8 summary_md5 in
+      let%bind () = bind_int 9 summary_size in
+      let%bind () = bind_text database statement 10 next_path in
+      let%bind () = bind_text database statement 11 next_md5 in
+      let%bind () = bind_int 12 next_size in
+      step_done database statement)
+;;
+
+let renew_claim database ~claim_id ~step_key ~lease_expires_unix_seconds =
+  let open Result.Let_syntax in
+  let%bind () =
+    with_statement
+      database
+      {|
+UPDATE claims
+SET lease_expires_unix_seconds = ?1,
+    lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?1, 'unixepoch')
+WHERE claim_id = ?2
+|}
+      ~f:(fun statement ->
+        let%bind () =
+          check
+            database
+            (Sqlite3.bind_int64 statement 1 lease_expires_unix_seconds)
+        in
+        let%bind () =
+          bind_text
+            database
+            statement
+            2
+            (Sandwalk_core.Claim_id.to_string claim_id)
+        in
+        step_done database statement)
+  in
+  with_statement
+    database
+    {|
+UPDATE step_executions
+SET lease_expires_unix_seconds = ?1
+WHERE step_key = ?2 AND active_claim_id = ?3
+|}
+    ~f:(fun statement ->
+      let%bind () =
+        check
+          database
+          (Sqlite3.bind_int64 statement 1 lease_expires_unix_seconds)
+      in
+      let%bind () =
+        bind_text
+          database
+          statement
+          2
+          (Sandwalk_core.Plan_step.Key.to_string step_key)
+      in
+      let%bind () =
+        bind_text
+          database
+          statement
+          3
+          (Sandwalk_core.Claim_id.to_string claim_id)
+      in
+      step_done database statement)
+;;
+
+let save_checkpoint
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~claim_id
+      ~checkpoint
+      ~summary_path
+      ~summary_md5
+      ~summary_size
+      ~next_path
+      ~next_md5
+      ~next_size
+      ~now
+      ~now_unix_seconds
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind previous_schema_version = query_schema_version database in
+            let%bind () =
+              migrate database ~from_version:previous_schema_version ~now
+            in
+            let%bind slug_text, _phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind step_key, state, active_claim_id, lease_expires, duration =
+              query_claim_for_checkpoint database claim_id
+            in
+            let claim_text = Sandwalk_core.Claim_id.to_string claim_id in
+            let%bind () =
+              if
+                Sandwalk_core.Step_state.equal
+                  state
+                  Sandwalk_core.Step_state.Claimed
+                && Option.value_map
+                     active_claim_id
+                     ~default:false
+                     ~f:(String.equal claim_text)
+              then Ok ()
+              else Error Error.Claim_not_active
+            in
+            let lease_expires = Option.value_exn lease_expires in
+            if Int64.(lease_expires <= now_unix_seconds)
+            then (
+              let%bind () = expire_claim database ~claim_id:claim_text ~now in
+              let%map () = expire_step_execution database ~step_key in
+              `Expired step_key)
+            else (
+              let%bind checkpoint_number =
+                next_checkpoint_number database ~step_key
+              in
+              let%bind () =
+                insert_checkpoint
+                  database
+                  ~step_key
+                  ~claim_id
+                  ~checkpoint_number
+                  ~checkpoint
+                  ~summary_path
+                  ~summary_md5
+                  ~summary_size
+                  ~next_path
+                  ~next_md5
+                  ~next_size
+                  ~now
+              in
+              let lease_expires_unix_seconds =
+                Int64.(now_unix_seconds + of_int duration)
+              in
+              let%map () =
+                renew_claim
+                  database
+                  ~claim_id
+                  ~step_key
+                  ~lease_expires_unix_seconds
+              in
+              `Saved
+                { Save_checkpoint_result.previous_schema_version
+                ; step_key
+                ; checkpoint_number
+                ; lease_expires_unix_seconds
+                })
+          in
+          (match outcome with
+           | Ok (`Saved result) ->
+             let%map () = execute database "COMMIT" in
+             Ok result
+           | Ok (`Expired step_key) ->
+             let%map () = execute database "COMMIT" in
+             Error
+               (Error.Claim_expired
+                  (Sandwalk_core.Plan_step.Key.to_string step_key))
+           | Error error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             Ok (Error error))
+          |> Result.join
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let query_latest_checkpoint database =
+  with_statement
+    database
+    {|
+SELECT step_key, summary, next, created_at
+FROM checkpoints
+ORDER BY checkpoint_id DESC
+LIMIT 1
+|}
+    ~f:(fun statement ->
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        let step_key =
+          Sqlite3.column_text statement 0
+          |> Sandwalk_core.Plan_step.Key.of_string
+          |> Result.ok
+          |> Option.value_exn
+        in
+        Ok
+          (Some
+             { Latest_checkpoint.step_key
+             ; summary = Sqlite3.column_text statement 1
+             ; next = Sqlite3.column_text statement 2
+             ; created_at = Sqlite3.column_text statement 3
+             })
+      | Sqlite3.Rc.DONE -> Ok None
+      | return_code -> check database return_code |> Result.map ~f:(Fn.const None))
+;;
+
+let read_latest_checkpoint ?(busy_timeout_ms = 5_000) ~database_path () =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          if schema_version < 6
+          then Ok None
+          else if schema_version > current_schema_version
+          then Error (Error.Unsupported_schema_version schema_version)
+          else query_latest_checkpoint database
         with
         | exn -> Error (Error.Database_error (Exn.to_string exn)))
       ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
