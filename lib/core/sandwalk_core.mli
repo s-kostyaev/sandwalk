@@ -96,6 +96,47 @@ module Plan_projection : sig
     -> string
 end
 
+module Claim_id : sig
+  type t
+
+  val of_string : string -> t option
+  val to_string : t -> string
+end
+
+module Step_state : sig
+  type t =
+    | Pending
+    | Claimed
+    | Suspended
+    | Expired
+    | Blocked
+    | Completed
+  [@@deriving equal, sexp]
+
+  val to_string : t -> string
+  val of_string : string -> t option
+end
+
+module Claim_decision : sig
+  module Error : sig
+    type t =
+      | Active_claim
+      | Step_completed
+    [@@deriving sexp_of]
+  end
+
+  type t =
+    { previous_state : Step_state.t
+    ; expired_active_claim : bool
+    }
+  [@@deriving sexp_of]
+
+  val decide
+    :  state:Step_state.t
+    -> lease_expired:bool
+    -> (t, Error.t) Result.t
+end
+
 module Transition_error : sig
   type t =
     { from : Phase.t
@@ -121,6 +162,7 @@ module Resume_pack : sig
     -> phase:Phase.t
     -> schema_version:int
     -> plan_steps:(Plan_step.Key.t * string * bool * int) list
+    -> active_claims:(Plan_step.Key.t * Claim_id.t * int * string) list
     -> recent_commands:(string * string * string option) list
     -> unmatched_commands:string list
     -> events_path:string

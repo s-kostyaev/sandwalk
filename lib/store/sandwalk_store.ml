@@ -20,8 +20,46 @@ module Error = struct
         ; current_revision : int
         }
     | Plan_seal_wrong_phase of Sandwalk_core.Phase.t
+    | Plan_step_not_found of string
+    | Step_claim_wrong_phase of Sandwalk_core.Phase.t
+    | Step_already_claimed of int64
+    | Step_completed of string
+    | Claim_id_collision
+    | Invalid_step_state of string
     | Database_error of string
   [@@deriving sexp_of]
+end
+
+module Claim_step_result = struct
+  type t =
+    { previous_schema_version : int
+    ; claim_id : Sandwalk_core.Claim_id.t
+    ; step_key : Sandwalk_core.Plan_step.Key.t
+    ; attempt : int
+    ; previous_state : Sandwalk_core.Step_state.t
+    ; expired_active_claim : bool
+    }
+
+  let previous_schema_version t = t.previous_schema_version
+  let claim_id t = t.claim_id
+  let step_key t = t.step_key
+  let attempt t = t.attempt
+  let previous_state t = t.previous_state
+  let expired_active_claim t = t.expired_active_claim
+end
+
+module Active_claim = struct
+  type t =
+    { claim_id : Sandwalk_core.Claim_id.t
+    ; step_key : Sandwalk_core.Plan_step.Key.t
+    ; attempt : int
+    ; lease_expires_at : string
+    }
+
+  let claim_id t = t.claim_id
+  let step_key t = t.step_key
+  let attempt t = t.attempt
+  let lease_expires_at t = t.lease_expires_at
 end
 
 module Stored_plan_step = struct
@@ -102,7 +140,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 4
+let current_schema_version = 5
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -214,6 +252,46 @@ PRAGMA user_version = 4;
 |}
 ;;
 
+let migration_v5 =
+  {|
+CREATE TABLE step_executions (
+  step_key TEXT PRIMARY KEY REFERENCES plan_steps(step_key),
+  state TEXT NOT NULL CHECK (
+    state IN ('pending', 'claimed', 'suspended', 'expired', 'blocked', 'completed')
+  ),
+  active_claim_id TEXT UNIQUE,
+  lease_expires_unix_seconds INTEGER,
+  attempt INTEGER NOT NULL CHECK (attempt >= 0),
+  CHECK (
+    (state = 'claimed' AND active_claim_id IS NOT NULL
+      AND lease_expires_unix_seconds IS NOT NULL)
+    OR
+    (state <> 'claimed' AND active_claim_id IS NULL
+      AND lease_expires_unix_seconds IS NULL)
+  )
+);
+CREATE TABLE claims (
+  claim_id TEXT PRIMARY KEY CHECK (
+    length(claim_id) = 38
+    AND substr(claim_id, 1, 6) = 'claim_'
+    AND substr(claim_id, 7) NOT GLOB '*[^a-f0-9]*'
+  ),
+  step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  attempt INTEGER NOT NULL CHECK (attempt >= 1),
+  issued_at TEXT NOT NULL,
+  lease_expires_at TEXT NOT NULL,
+  lease_expires_unix_seconds INTEGER NOT NULL,
+  ended_at TEXT,
+  end_reason TEXT CHECK (
+    end_reason IS NULL OR end_reason IN ('expired', 'suspended', 'blocked', 'completed')
+  )
+);
+INSERT INTO step_executions (step_key, state, attempt)
+SELECT step_key, 'pending', 0 FROM plan_steps;
+PRAGMA user_version = 5;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -247,24 +325,31 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:1 ~now)
       else Ok ()
     in
-    if from_version < 2
+    let%bind () =
+      if from_version < 2
+      then (
+        let%bind () = execute database migration_v2 in
+        insert_migration database ~version:2 ~now)
+      else Ok ()
+    in
+    let%bind () =
+      if from_version < 3
+      then (
+        let%bind () = execute database migration_v3 in
+        insert_migration database ~version:3 ~now)
+      else Ok ()
+    in
+    let%bind () =
+      if from_version < 4
+      then (
+        let%bind () = execute database migration_v4 in
+        insert_migration database ~version:4 ~now)
+      else Ok ()
+    in
+    if from_version < 5
     then (
-      let%bind () = execute database migration_v2 in
-      let%bind () = insert_migration database ~version:2 ~now in
-      let%bind () = execute database migration_v3 in
-      let%bind () = insert_migration database ~version:3 ~now in
-      let%bind () = execute database migration_v4 in
-      insert_migration database ~version:4 ~now)
-    else if from_version < 3
-    then (
-      let%bind () = execute database migration_v3 in
-      let%bind () = insert_migration database ~version:3 ~now in
-      let%bind () = execute database migration_v4 in
-      insert_migration database ~version:4 ~now)
-    else if from_version < 4
-    then (
-      let%bind () = execute database migration_v4 in
-      insert_migration database ~version:4 ~now)
+      let%bind () = execute database migration_v5 in
+      insert_migration database ~version:5 ~now)
     else Ok ())
 ;;
 
@@ -428,6 +513,26 @@ VALUES (?1, ?2, ?3, ?4, ?5)
              (if Sandwalk_core.Plan_step.required step then 1 else 0))
       in
       let%bind () = bind_text database statement 5 now in
+      step_done database statement)
+;;
+
+let insert_step_execution database ~step =
+  with_statement
+    database
+    {|
+INSERT INTO step_executions (step_key, state, attempt)
+VALUES (?1, 'pending', 0)
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Plan_step.key step
+           |> Sandwalk_core.Plan_step.Key.to_string)
+      in
       step_done database statement)
 ;;
 
@@ -647,6 +752,7 @@ let add_plan_step
             in
             let%bind position = next_plan_position database in
             let%bind () = insert_plan_step database ~step ~position ~now in
+            let%bind () = insert_step_execution database ~step in
             let phase =
               List.last phase_path |> Option.value ~default:current_phase
             in
@@ -866,6 +972,347 @@ let seal_plan
            | Error _ as error ->
              ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
              error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let query_step_execution database ~step_key =
+  with_statement
+    database
+    {|
+SELECT state, active_claim_id, lease_expires_unix_seconds, attempt
+FROM step_executions
+WHERE step_key = ?1
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let key = Sandwalk_core.Plan_step.Key.to_string step_key in
+      let%bind () = bind_text database statement 1 key in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        let state_text = Sqlite3.column_text statement 0 in
+        let%map state =
+          Sandwalk_core.Step_state.of_string state_text
+          |> Result.of_option ~error:(Error.Invalid_step_state state_text)
+        in
+        let active_claim_id =
+          if Sqlite3.column_is_null statement 1
+          then None
+          else Some (Sqlite3.column_text statement 1)
+        in
+        let lease_expires =
+          if Sqlite3.column_is_null statement 2
+          then None
+          else Some (Sqlite3.column_int64 statement 2)
+        in
+        state, active_claim_id, lease_expires, Sqlite3.column_int statement 3
+      | Sqlite3.Rc.DONE -> Error (Error.Plan_step_not_found key)
+      | return_code ->
+        check database return_code
+        |> Result.map
+             ~f:
+               (Fn.const
+                  (Sandwalk_core.Step_state.Pending, None, None, 0)))
+;;
+
+let claim_id_exists database claim_id =
+  with_statement
+    database
+    "SELECT 1 FROM claims WHERE claim_id = ?1"
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Claim_id.to_string claim_id)
+      in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW -> Ok true
+      | Sqlite3.Rc.DONE -> Ok false
+      | return_code -> check database return_code |> Result.map ~f:(Fn.const false))
+;;
+
+let expire_claim database ~claim_id ~now =
+  with_statement
+    database
+    {|
+UPDATE claims
+SET ended_at = ?1, end_reason = 'expired'
+WHERE claim_id = ?2 AND ended_at IS NULL
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () = bind_text database statement 1 now in
+      let%bind () = bind_text database statement 2 claim_id in
+      step_done database statement)
+;;
+
+let insert_claim
+      database
+      ~claim_id
+      ~step_key
+      ~attempt
+      ~now
+      ~lease_expires_at
+      ~lease_expires_unix_seconds
+  =
+  with_statement
+    database
+    {|
+INSERT INTO claims (
+  claim_id, step_key, attempt, issued_at, lease_expires_at,
+  lease_expires_unix_seconds
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Claim_id.to_string claim_id)
+      in
+      let%bind () =
+        bind_text
+          database
+          statement
+          2
+          (Sandwalk_core.Plan_step.Key.to_string step_key)
+      in
+      let%bind () = check database (Sqlite3.bind_int statement 3 attempt) in
+      let%bind () = bind_text database statement 4 now in
+      let%bind () = bind_text database statement 5 lease_expires_at in
+      let%bind () =
+        check
+          database
+          (Sqlite3.bind_int64 statement 6 lease_expires_unix_seconds)
+      in
+      step_done database statement)
+;;
+
+let activate_claim
+      database
+      ~claim_id
+      ~step_key
+      ~attempt
+      ~lease_expires_unix_seconds
+  =
+  with_statement
+    database
+    {|
+UPDATE step_executions
+SET state = 'claimed',
+    active_claim_id = ?1,
+    lease_expires_unix_seconds = ?2,
+    attempt = ?3
+WHERE step_key = ?4
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Claim_id.to_string claim_id)
+      in
+      let%bind () =
+        check
+          database
+          (Sqlite3.bind_int64 statement 2 lease_expires_unix_seconds)
+      in
+      let%bind () = check database (Sqlite3.bind_int statement 3 attempt) in
+      let%bind () =
+        bind_text
+          database
+          statement
+          4
+          (Sandwalk_core.Plan_step.Key.to_string step_key)
+      in
+      step_done database statement)
+;;
+
+let claim_step
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~step_key
+      ~claim_id
+      ~now
+      ~now_unix_seconds
+      ~lease_expires_at
+      ~lease_expires_unix_seconds
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind previous_schema_version = query_schema_version database in
+            let%bind () =
+              migrate database ~from_version:previous_schema_version ~now
+            in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if
+                Sandwalk_core.Phase.equal
+                  phase
+                  Sandwalk_core.Phase.Researching
+              then Ok ()
+              else Error (Error.Step_claim_wrong_phase phase)
+            in
+            let%bind state, active_claim_id, active_expiry, previous_attempt =
+              query_step_execution database ~step_key
+            in
+            let lease_expired =
+              Option.value_map
+                active_expiry
+                ~default:false
+                ~f:(fun expiry -> Int64.(expiry <= now_unix_seconds))
+            in
+            let%bind decision =
+              Sandwalk_core.Claim_decision.decide ~state ~lease_expired
+              |> Result.map_error ~f:(function
+                | Sandwalk_core.Claim_decision.Error.Active_claim ->
+                  Error.Step_already_claimed (Option.value_exn active_expiry)
+                | Sandwalk_core.Claim_decision.Error.Step_completed ->
+                  Error.Step_completed
+                    (Sandwalk_core.Plan_step.Key.to_string step_key))
+            in
+            let%bind collision = claim_id_exists database claim_id in
+            let%bind () =
+              if collision then Error Error.Claim_id_collision else Ok ()
+            in
+            let%bind () =
+              if decision.expired_active_claim
+              then
+                expire_claim
+                  database
+                  ~claim_id:(Option.value_exn active_claim_id)
+                  ~now
+              else Ok ()
+            in
+            let attempt = previous_attempt + 1 in
+            let%bind () =
+              insert_claim
+                database
+                ~claim_id
+                ~step_key
+                ~attempt
+                ~now
+                ~lease_expires_at
+                ~lease_expires_unix_seconds
+            in
+            let%bind () =
+              activate_claim
+                database
+                ~claim_id
+                ~step_key
+                ~attempt
+                ~lease_expires_unix_seconds
+            in
+            Ok
+              { Claim_step_result.previous_schema_version
+              ; claim_id
+              ; step_key
+              ; attempt
+              ; previous_state = decision.previous_state
+              ; expired_active_claim = decision.expired_active_claim
+              }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let query_active_claims database =
+  let claims = ref [] in
+  let open Result.Let_syntax in
+  let%map () =
+    check
+      database
+      (Sqlite3.exec
+         database
+         {|
+SELECT c.claim_id, c.step_key, c.attempt, c.lease_expires_at
+FROM step_executions e
+JOIN claims c ON c.claim_id = e.active_claim_id
+WHERE e.state = 'claimed'
+ORDER BY c.step_key
+|}
+         ~cb:(fun row _headers ->
+           match row with
+           | [| Some claim_id; Some step_key; Some attempt; Some lease_expires_at |] ->
+             let claim_id =
+               Sandwalk_core.Claim_id.of_string claim_id |> Option.value_exn
+             in
+             let step_key =
+               match Sandwalk_core.Plan_step.Key.of_string step_key with
+               | Ok step_key -> step_key
+               | Error _ -> failwith "Invalid persisted plan step key"
+             in
+             claims :=
+               { Active_claim.claim_id = claim_id
+               ; step_key
+               ; attempt = Int.of_string attempt
+               ; lease_expires_at
+               }
+               :: !claims
+           | _ -> failwith "Invalid persisted active claim row"))
+  in
+  List.rev !claims
+;;
+
+let read_active_claims ?(busy_timeout_ms = 5_000) ~database_path () =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          if schema_version < 5
+          then Ok []
+          else if schema_version > current_schema_version
+          then Error (Error.Unsupported_schema_version schema_version)
+          else query_active_claims database
         with
         | exn -> Error (Error.Database_error (Exn.to_string exn)))
       ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))

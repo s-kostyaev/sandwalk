@@ -181,6 +181,14 @@ append-only plan revision with a recorded reason.
 A plan step is the durable unit of work. A claim is a temporary capability to
 execute it. There is no public work identifier or permanent worker identifier.
 
+```console
+sandwalk step claim --slug <slug> --step <key> [--lease-seconds <seconds>]
+```
+
+The default lease is 900 seconds. Explicit leases range from 30 seconds to 24
+hours. Claim identifiers contain the `claim_` prefix and 128 bits of random
+entropy. Clocks and identifier generation are supplied at the runtime boundary.
+
 ```text
 pending → claimed → suspended | expired | blocked → claimed → completed
 ```

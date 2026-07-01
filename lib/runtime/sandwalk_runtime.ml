@@ -283,8 +283,7 @@ let timestamp_utc time =
   Time_float_unix.to_string_abs time ~zone:Time_float.Zone.utc
 ;;
 
-let invocation_id ~now =
-  let random_bits =
+let random_bits () =
     let file_descriptor =
       Core_unix.openfile "/dev/urandom" ~mode:[ O_RDONLY; O_CLOEXEC ] ~perm:0
     in
@@ -307,10 +306,22 @@ let invocation_id ~now =
         read_all 0;
         Bytes.to_string bytes)
       ~finally:(fun () -> Core_unix.close file_descriptor)
-  in
+;;
+
+let invocation_id ~now =
+  let random_bits = random_bits () in
   Md5.digest_string
     (Float.to_string
        (Time_float.to_span_since_epoch now |> Time_float.Span.to_sec)
      ^ random_bits)
   |> Md5.to_hex
+;;
+
+let claim_id () =
+  let suffix =
+    random_bits ()
+    |> String.concat_map ~f:(fun character ->
+      sprintf "%02x" (Char.to_int character))
+  in
+  Sandwalk_core.Claim_id.of_string ("claim_" ^ suffix) |> Option.value_exn
 ;;

@@ -218,6 +218,106 @@ module Plan_projection = struct
   ;;
 end
 
+module Claim_id = struct
+  type t = string
+
+  let has_hex_suffix value =
+    String.length value = 38
+    && String.is_prefix value ~prefix:"claim_"
+    && String.drop_prefix value 6
+       |> String.for_all ~f:(function
+         | '0' .. '9' | 'a' .. 'f' -> true
+         | _ -> false)
+  ;;
+
+  let of_string value = if has_hex_suffix value then Some value else None
+  let to_string t = t
+end
+
+module Step_state = struct
+  type t =
+    | Pending
+    | Claimed
+    | Suspended
+    | Expired
+    | Blocked
+    | Completed
+  [@@deriving equal, sexp]
+
+  let to_string = function
+    | Pending -> "pending"
+    | Claimed -> "claimed"
+    | Suspended -> "suspended"
+    | Expired -> "expired"
+    | Blocked -> "blocked"
+    | Completed -> "completed"
+  ;;
+
+  let of_string = function
+    | "pending" -> Some Pending
+    | "claimed" -> Some Claimed
+    | "suspended" -> Some Suspended
+    | "expired" -> Some Expired
+    | "blocked" -> Some Blocked
+    | "completed" -> Some Completed
+    | _ -> None
+  ;;
+end
+
+module Claim_decision = struct
+  module Error = struct
+    type t =
+      | Active_claim
+      | Step_completed
+    [@@deriving sexp_of]
+  end
+
+  type t =
+    { previous_state : Step_state.t
+    ; expired_active_claim : bool
+    }
+  [@@deriving sexp_of]
+
+  let decide ~state ~lease_expired =
+    match state with
+    | Step_state.Pending | Suspended | Expired | Blocked ->
+      Ok { previous_state = state; expired_active_claim = false }
+    | Claimed when lease_expired ->
+      Ok { previous_state = Expired; expired_active_claim = true }
+    | Claimed -> Error Error.Active_claim
+    | Completed -> Error Error.Step_completed
+  ;;
+end
+
+let%expect_test "claim decisions enforce active leases and terminal steps" =
+  let check state lease_expired =
+    Claim_decision.decide ~state ~lease_expired
+    |> [%sexp_of: (Claim_decision.t, Claim_decision.Error.t) Result.t]
+    |> print_s
+  in
+  check Step_state.Pending false;
+  check Claimed false;
+  check Claimed true;
+  check Completed true;
+  [%expect
+    {|
+    (Ok ((previous_state Pending) (expired_active_claim false)))
+    (Error Active_claim)
+    (Ok ((previous_state Expired) (expired_active_claim true)))
+    (Error Step_completed) |}]
+;;
+
+let%test_unit "claim references require a canonical 128-bit suffix" =
+  let valid = "claim_0123456789abcdef0123456789abcdef" in
+  assert (Option.is_some (Claim_id.of_string valid));
+  [ "claim_0123"
+  ; "claim_0123456789ABCDEF0123456789ABCDEF"
+  ; "other_0123456789abcdef0123456789abcdef"
+  ]
+  |> List.iter ~f:(fun value ->
+    assert (Option.is_none (Claim_id.of_string value)))
+;;
+
 module Transition_error = struct
   type t =
     { from : Phase.t
@@ -251,6 +351,7 @@ module Resume_pack = struct
         ~phase
         ~schema_version
         ~plan_steps
+        ~active_claims
         ~recent_commands
         ~unmatched_commands
         ~events_path
@@ -270,6 +371,18 @@ module Resume_pack = struct
             (Plan_step.Key.to_string key)
             title
             (if required then "required" else "optional"))
+    in
+    let active_claim_lines =
+      match List.take active_claims 10 with
+      | [] -> [ "- None." ]
+      | claims ->
+        List.map claims ~f:(fun (step_key, claim_id, attempt, expires_at) ->
+          sprintf
+            "- Step %S: %S, attempt %d, expires %S"
+            (Plan_step.Key.to_string step_key)
+            (Claim_id.to_string claim_id)
+            attempt
+            expires_at)
     in
     let command_lines =
       match recent_commands with
@@ -327,6 +440,11 @@ module Resume_pack = struct
          ]
          @ durable_entity_lines
          @ [ ""
+           ; "## Active claims"
+           ; ""
+           ]
+         @ active_claim_lines
+         @ [ ""
            ; "## Recent commands"
          ; ""
          ]
@@ -376,6 +494,7 @@ let%expect_test "renders a bounded mechanical resume pack" =
         ~phase:Phase.Initialized
         ~schema_version:1
         ~plan_steps:[]
+        ~active_claims:[]
         ~recent_commands:[ "init", "success", None ]
         ~unmatched_commands:[]
         ~events_path:"workspace/logs/events.jsonl"
@@ -404,6 +523,10 @@ let%expect_test "renders a bounded mechanical resume pack" =
     ## Durable entities
 
     The workspace record is initialized. No plan entities exist yet.
+
+    ## Active claims
+
+    - None.
 
     ## Recent commands
 

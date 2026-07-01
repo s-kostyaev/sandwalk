@@ -116,6 +116,24 @@ PRAGMA user_version = 3;
 |})
 ;;
 
+let create_v4 database slug =
+  create_v3 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+ALTER TABLE plan_metadata ADD COLUMN sealed_revision INTEGER;
+ALTER TABLE plan_metadata ADD COLUMN sealed_at TEXT;
+UPDATE plan_metadata
+SET sealed_revision = 1, sealed_at = '2026-01-01 00:00:00Z';
+UPDATE workspaces SET phase = 'researching';
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (4, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 4;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -123,23 +141,62 @@ let inspect database =
   print_query database "PRAGMA integrity_check"
 ;;
 
+let inspect_claims database =
+  print_query
+    database
+    {|
+SELECT step_key, state, attempt, length(active_claim_id),
+       lease_expires_unix_seconds IS NOT NULL
+FROM step_executions
+ORDER BY step_key
+|};
+  print_query
+    database
+    {|
+SELECT step_key, attempt, COALESCE(end_reason, 'NULL')
+FROM claims
+ORDER BY step_key, attempt
+|}
+;;
+
 let () =
-  let version, path, slug =
+  let action, path =
     match Sys.argv with
-    | [| _; "--create-v1"; path; slug |] -> Some 1, path, Some slug
-    | [| _; "--create-v2"; path; slug |] -> Some 2, path, Some slug
-    | [| _; "--create-v3"; path; slug |] -> Some 3, path, Some slug
-    | [| _; path |] -> None, path, None
+    | [| _; "--create-v1"; path; slug |] -> `Create (1, slug), path
+    | [| _; "--create-v2"; path; slug |] -> `Create (2, slug), path
+    | [| _; "--create-v3"; path; slug |] -> `Create (3, slug), path
+    | [| _; "--create-v4"; path; slug |] -> `Create (4, slug), path
+    | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
+    | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
+    | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
   in
   let database = Sqlite3.db_open path in
   Fun.protect
     ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
     (fun () ->
-      match version with
-      | Some 1 -> create_v1 database (Option.get slug)
-      | Some 2 -> create_v2 database (Option.get slug)
-      | Some 3 -> create_v3 database (Option.get slug)
-      | Some _ -> assert false
-      | None -> inspect database)
+      match action with
+      | `Create (1, slug) -> create_v1 database slug
+      | `Create (2, slug) -> create_v2 database slug
+      | `Create (3, slug) -> create_v3 database slug
+      | `Create (4, slug) -> create_v4 database slug
+      | `Create _ -> assert false
+      | `Inspect -> inspect database
+      | `Inspect_claims -> inspect_claims database
+      | `Expire_claim step ->
+        let statement =
+          Sqlite3.prepare
+            database
+            {|
+UPDATE step_executions
+SET lease_expires_unix_seconds = 0
+WHERE state = 'claimed' AND step_key = ?1
+|}
+        in
+        Fun.protect
+          ~finally:(fun () ->
+            ignore (Sqlite3.finalize statement : Sqlite3.Rc.t))
+          (fun () ->
+            check database (Sqlite3.bind_text statement 1 step);
+            check database (Sqlite3.step statement)))
 ;;

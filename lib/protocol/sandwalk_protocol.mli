@@ -41,6 +41,10 @@ module Audit_event : sig
     -> raw_argv:string list
     -> arguments:Yojson.Safe.t
     -> state_changes:Yojson.Safe.t list
+    -> ?claim:string
+    -> ?step:string
+    -> ?consumed_references:string list
+    -> ?created_references:string list
     -> ?duration_ms:int
     -> ?outcome:string
     -> ?error_code:string

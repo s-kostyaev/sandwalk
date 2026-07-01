@@ -117,6 +117,10 @@ module Audit_event = struct
         ~raw_argv
         ~arguments
         ~state_changes
+        ?claim
+        ?step
+        ?(consumed_references = [])
+        ?(created_references = [])
         ?duration_ms
         ?outcome
         ?error_code
@@ -142,14 +146,26 @@ module Audit_event = struct
              ( "phase"
              , Option.value_map phase ~default:`Null ~f:(fun value -> `String value)
              )
-         ; Some ("claim", `Null)
-         ; Some ("step", `Null)
+         ; Some
+             ( "claim"
+             , Option.value_map claim ~default:`Null ~f:(fun value -> `String value)
+             )
+         ; Some
+             ( "step"
+             , Option.value_map step ~default:`Null ~f:(fun value -> `String value)
+             )
          ; Some
              ( "raw_argv"
              , `List (List.map raw_argv ~f:(fun argument -> `String argument)) )
          ; Some ("arguments", arguments)
-         ; Some ("consumed_references", `List [])
-         ; Some ("created_references", `List [])
+         ; Some
+             ( "consumed_references"
+             , `List
+                 (List.map consumed_references ~f:(fun value -> `String value)) )
+         ; Some
+             ( "created_references"
+             , `List
+                 (List.map created_references ~f:(fun value -> `String value)) )
          ; Some ("state_changes", `List state_changes)
          ; optional
              "duration_ms"
@@ -237,4 +253,29 @@ let%expect_test "shell commands quote every word" =
   |> print_endline;
   [%expect
     {| 'sandwalk' 'status' '--slug' 'researcher'\''s-notes' |}]
+;;
+
+let%test_unit "claim audit events carry capability and step context" =
+  let claim = "claim_0123456789abcdef0123456789abcdef" in
+  let json =
+    Audit_event.create
+      ~invocation_id:"invocation-1"
+      ~timestamp:"2026-07-02 12:00:00Z"
+      ~kind:`Finished
+      ~command:"step claim"
+      ~phase:(Some "researching")
+      ~claim
+      ~step:"primary"
+      ~raw_argv:[]
+      ~arguments:(`Assoc [])
+      ~state_changes:[]
+      ~created_references:[ claim ]
+      ()
+  in
+  let open Yojson.Safe.Util in
+  [%test_eq: string] (json |> member "claim" |> to_string) claim;
+  [%test_eq: string] (json |> member "step" |> to_string) "primary";
+  [%test_eq: string]
+    (json |> member "created_references" |> to_list |> List.hd_exn |> to_string)
+    claim
 ;;

@@ -20,8 +20,34 @@ module Error : sig
         ; current_revision : int
         }
     | Plan_seal_wrong_phase of Sandwalk_core.Phase.t
+    | Plan_step_not_found of string
+    | Step_claim_wrong_phase of Sandwalk_core.Phase.t
+    | Step_already_claimed of int64
+    | Step_completed of string
+    | Claim_id_collision
+    | Invalid_step_state of string
     | Database_error of string
   [@@deriving sexp_of]
+end
+
+module Claim_step_result : sig
+  type t
+
+  val previous_schema_version : t -> int
+  val claim_id : t -> Sandwalk_core.Claim_id.t
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val attempt : t -> int
+  val previous_state : t -> Sandwalk_core.Step_state.t
+  val expired_active_claim : t -> bool
+end
+
+module Active_claim : sig
+  type t
+
+  val claim_id : t -> Sandwalk_core.Claim_id.t
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val attempt : t -> int
+  val lease_expires_at : t -> string
 end
 
 module Stored_plan_step : sig
@@ -120,3 +146,22 @@ val seal_plan
   -> now:string
   -> unit
   -> (Seal_plan_result.t, Error.t) Result.t
+
+val claim_step
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> step_key:Sandwalk_core.Plan_step.Key.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> now:string
+  -> now_unix_seconds:int64
+  -> lease_expires_at:string
+  -> lease_expires_unix_seconds:int64
+  -> unit
+  -> (Claim_step_result.t, Error.t) Result.t
+
+val read_active_claims
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> unit
+  -> (Active_claim.t list, Error.t) Result.t

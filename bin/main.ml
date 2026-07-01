@@ -185,7 +185,13 @@ let status_error = function
   | Plan_validation_wrong_phase _
   | Plan_not_validated
   | Plan_validation_stale _
-  | Plan_seal_wrong_phase _ ->
+  | Plan_seal_wrong_phase _
+  | Plan_step_not_found _
+  | Step_claim_wrong_phase _
+  | Step_already_claimed _
+  | Step_completed _
+  | Claim_id_collision
+  | Invalid_step_state _ ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -441,29 +447,35 @@ let resume_command =
                 let phase =
                   Sandwalk_store.Workspace_status.phase status
                 in
-                let%bind plan_steps, history =
+                let%bind (plan_steps, active_claims), history =
                   Deferred.both
-                    (In_thread.run (fun () ->
-                       Sandwalk_store.read_plan_steps
-                         ~database_path:
-                           (Sandwalk_runtime.Workspace.database_path workspace)
-                         ()))
+                    (Deferred.both
+                       (In_thread.run (fun () ->
+                          Sandwalk_store.read_plan_steps
+                            ~database_path:
+                              (Sandwalk_runtime.Workspace.database_path workspace)
+                            ()))
+                       (In_thread.run (fun () ->
+                          Sandwalk_store.read_active_claims
+                            ~database_path:
+                              (Sandwalk_runtime.Workspace.database_path workspace)
+                            ())))
                     (Sandwalk_runtime.Audit.read_history
                        ~path:(Sandwalk_runtime.Workspace.events_path workspace)
                        ~exclude_invocation_id:invocation_id)
                 in
-                (match plan_steps, history with
-                 | Error _, _ ->
+                (match plan_steps, active_claims, history with
+                 | Error _, _, _ | _, Error _, _ ->
                    fail_with_audit
                      ~phase:(Some (Sandwalk_core.Phase.to_string phase))
                      ~code:"RECOVERY_STATE_ERROR"
                      ~message:"Could not read durable recovery state."
-                 | _, Error _ ->
+                 | _, _, Error _ ->
                    fail_with_audit
                      ~phase:(Some (Sandwalk_core.Phase.to_string phase))
                      ~code:"RECOVERY_LOG_ERROR"
                      ~message:"Could not read workspace audit history."
-                 | Ok plan_steps, Ok history ->
+                 | Ok plan_steps, Ok active_claims, Ok history ->
                    let recent_commands =
                      Sandwalk_runtime.Audit.recent_commands history
                      |> List.map ~f:(fun summary ->
@@ -490,6 +502,13 @@ let resume_command =
                             , Sandwalk_store.Stored_plan_step.title stored
                             , Sandwalk_store.Stored_plan_step.required stored
                             , Sandwalk_store.Stored_plan_step.position stored )))
+                       ~active_claims:
+                         (List.map active_claims ~f:(fun active ->
+                            ( Sandwalk_store.Active_claim.step_key active
+                            , Sandwalk_store.Active_claim.claim_id active
+                            , Sandwalk_store.Active_claim.attempt active
+                            , Sandwalk_store.Active_claim.lease_expires_at
+                                active )))
                        ~recent_commands
                        ~unmatched_commands:
                          (Sandwalk_runtime.Audit.unmatched_commands history)
@@ -1375,6 +1394,297 @@ let plan_command =
     ]
 ;;
 
+let claim_error = function
+  | Sandwalk_store.Error.Plan_step_not_found key ->
+    "PLAN_STEP_NOT_FOUND", sprintf "Plan step %S does not exist." key
+  | Step_claim_wrong_phase _ ->
+    "STEP_CLAIM_NOT_ALLOWED", "Steps can only be claimed while researching."
+  | Step_already_claimed _ ->
+    "STEP_ALREADY_CLAIMED", "Plan step already has an active claim."
+  | Step_completed key ->
+    "STEP_COMPLETED", sprintf "Plan step %S is already completed." key
+  | Claim_id_collision ->
+    "CLAIM_ID_COLLISION", "Could not allocate a unique claim identifier."
+  | error -> status_error error
+;;
+
+let step_claim_command =
+  Async.Command.async
+    ~summary:"Acquire a temporary lease for one plan step."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag
+         "--directory-prefix"
+         (optional string)
+         ~doc:"PATH Parent directory for Sandwalk workspaces"
+     and step_text =
+       flag "--step" (required string) ~doc:"KEY Plan step key"
+     and lease_seconds =
+       flag
+         "--lease-seconds"
+         (optional_with_default 900 int)
+         ~doc:"SECONDS Lease duration from 30 to 86400 seconds"
+     in
+     fun () ->
+       match
+         ( Sandwalk_core.Slug.of_string slug_text
+         , Sandwalk_core.Plan_step.Key.of_string step_text )
+       with
+       | Error error, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_PLAN_STEP_KEY"
+           ~message:(Sandwalk_core.Plan_step.Key.Error.message error)
+       | Ok slug, Ok step_key ->
+         if lease_seconds < 30 || lease_seconds > 86_400
+         then
+           print_failure_and_exit
+             ~code:"INVALID_LEASE"
+             ~message:"Lease duration must be between 30 and 86400 seconds."
+         else (
+           let directory_prefix =
+             Sandwalk_runtime.resolve_directory_prefix
+               ~command_line:directory_prefix
+           in
+           let workspace =
+             Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+           in
+           let arguments =
+             `Assoc
+               [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+               ; "directory_prefix", `String directory_prefix
+               ; ( "step"
+                 , `String
+                     (Sandwalk_core.Plan_step.Key.to_string step_key) )
+               ; "lease_seconds", `Int lease_seconds
+               ]
+           in
+           let%bind database_exists =
+             Async.Sys.file_exists_exn
+               (Sandwalk_runtime.Workspace.database_path workspace)
+           in
+           if not database_exists
+           then
+             print_failure_and_exit
+               ~code:"WORKSPACE_NOT_FOUND"
+               ~message:"Workspace does not exist."
+           else (
+             let started_at = Time_float_unix.now () in
+             let lease_expires =
+               Time_float.add
+                 started_at
+                 (Time_float.Span.of_sec (Float.of_int lease_seconds))
+             in
+             let now_unix_seconds =
+               Time_float.to_span_since_epoch started_at
+               |> Time_float.Span.to_sec
+               |> Float.iround_down_exn
+               |> Int64.of_int
+             in
+             let lease_expires_unix_seconds =
+               Int64.(now_unix_seconds + of_int lease_seconds)
+             in
+             let lease_expires_at =
+               Sandwalk_runtime.timestamp_utc lease_expires
+             in
+             let%bind invocation_id =
+               In_thread.run (fun () ->
+                 Sandwalk_runtime.invocation_id ~now:started_at)
+             in
+             let append_event
+                   ~kind
+                   ~timestamp
+                   ~phase
+                   ~state_changes
+                   ?claim
+                   ?created_references
+                   ?duration_ms
+                   ?outcome
+                   ?error_code
+                   ()
+               =
+               Sandwalk_runtime.Audit.append
+                 ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                 (Sandwalk_protocol.Audit_event.create
+                    ~invocation_id
+                    ~timestamp
+                    ~kind
+                    ~command:"step claim"
+                    ~arguments
+                    ~phase
+                    ~step:(Sandwalk_core.Plan_step.Key.to_string step_key)
+                    ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                    ~state_changes
+                    ?claim
+                    ?created_references
+                    ?duration_ms
+                    ?outcome
+                    ?error_code
+                    ())
+             in
+             let fail_with_audit ~phase ~code ~message =
+               let finished_at = Time_float_unix.now () in
+               let duration_ms =
+                 Time_float.diff finished_at started_at
+                 |> Time_float.Span.to_ms
+                 |> Float.iround_nearest_exn
+               in
+               let%bind logged =
+                 append_event
+                   ~kind:`Failed
+                   ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                   ~phase
+                   ~state_changes:[]
+                   ~duration_ms
+                   ~outcome:"failure"
+                   ~error_code:code
+                   ()
+               in
+               match logged with
+               | Error _ ->
+                 print_failure_and_exit
+                   ~code:"AUDIT_LOG_ERROR"
+                   ~message:"Could not append workspace audit log."
+               | Ok () -> print_failure_and_exit ~code ~message
+             in
+             let%bind started =
+               append_event
+                 ~kind:`Started
+                 ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                 ~phase:None
+                 ~state_changes:[]
+                 ()
+             in
+             match started with
+             | Error _ ->
+               print_failure_and_exit
+                 ~code:"AUDIT_LOG_ERROR"
+                 ~message:"Could not append workspace audit log."
+             | Ok () ->
+               let rec allocate retries =
+                 let%bind claim_id =
+                   In_thread.run Sandwalk_runtime.claim_id
+                 in
+                 let%bind result =
+                   In_thread.run (fun () ->
+                     Sandwalk_store.claim_step
+                       ~database_path:
+                         (Sandwalk_runtime.Workspace.database_path workspace)
+                       ~expected_slug:slug
+                       ~step_key
+                       ~claim_id
+                       ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                       ~now_unix_seconds
+                       ~lease_expires_at
+                       ~lease_expires_unix_seconds
+                       ())
+                 in
+                 match result with
+                 | Error Sandwalk_store.Error.Claim_id_collision
+                   when retries > 0 -> allocate (retries - 1)
+                 | result -> Deferred.return result
+               in
+               let%bind claimed = allocate 2 in
+               (match claimed with
+                | Error error ->
+                  let code, message = claim_error error in
+                  let phase =
+                    match error with
+                    | Sandwalk_store.Error.Step_claim_wrong_phase phase ->
+                      Some (Sandwalk_core.Phase.to_string phase)
+                    | _ -> Some "researching"
+                  in
+                  fail_with_audit ~phase ~code ~message
+                | Ok claimed ->
+                  let claim_id =
+                    Sandwalk_store.Claim_step_result.claim_id claimed
+                    |> Sandwalk_core.Claim_id.to_string
+                  in
+                  let previous_state =
+                    Sandwalk_store.Claim_step_result.previous_state claimed
+                  in
+                  let previous_schema_version =
+                    Sandwalk_store.Claim_step_result.previous_schema_version
+                      claimed
+                  in
+                  let state_changes =
+                    (if previous_schema_version
+                        < Sandwalk_store.current_schema_version
+                     then
+                       [ `Assoc
+                           [ "entity", `String "workspace.schema"
+                           ; "from", `Int previous_schema_version
+                           ; "to", `Int Sandwalk_store.current_schema_version
+                           ]
+                       ]
+                     else [])
+                    @ [ `Assoc
+                          [ ( "entity"
+                            , `String
+                                ("step."
+                                 ^ Sandwalk_core.Plan_step.Key.to_string step_key
+                                 ^ ".state") )
+                          ; ( "from"
+                            , `String
+                                (Sandwalk_core.Step_state.to_string previous_state)
+                            )
+                          ; "to", `String "claimed"
+                          ]
+                      ]
+                  in
+                  let finished_at = Time_float_unix.now () in
+                  let duration_ms =
+                    Time_float.diff finished_at started_at
+                    |> Time_float.Span.to_ms
+                    |> Float.iround_nearest_exn
+                  in
+                  let%bind logged =
+                    append_event
+                      ~kind:`Finished
+                      ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                      ~phase:(Some "researching")
+                      ~state_changes
+                      ~claim:claim_id
+                      ~created_references:[ claim_id ]
+                      ~duration_ms
+                      ~outcome:"success"
+                      ()
+                  in
+                  (match logged with
+                   | Error _ ->
+                     print_failure_and_exit
+                       ~code:"AUDIT_LOG_ERROR"
+                       ~message:"Could not append workspace audit log."
+                   | Ok () ->
+                     let result =
+                       `Assoc
+                         [ "claim", `String claim_id
+                         ; ( "step"
+                           , `String
+                               (Sandwalk_core.Plan_step.Key.to_string step_key) )
+                         ; ( "attempt"
+                           , `Int
+                               (Sandwalk_store.Claim_step_result.attempt
+                                  claimed) )
+                         ; "lease_expires_at", `String lease_expires_at
+                         ]
+                     in
+                     Sandwalk_protocol.Envelope.success ~result ()
+                     |> Sandwalk_protocol.Envelope.render
+                     |> print_endline;
+                     Deferred.unit)))))
+;;
+
+let step_command =
+  Async.Command.group
+    ~summary:"Manage durable plan-step execution."
+    [ "claim", step_claim_command ]
+;;
+
 let command =
   Async.Command.group
     ~summary:"Deterministic research orchestration for AI agents."
@@ -1383,6 +1693,7 @@ let command =
     ; "plan", plan_command
     ; "resume", resume_command
     ; "status", status_command
+    ; "step", step_command
     ]
 ;;
 
