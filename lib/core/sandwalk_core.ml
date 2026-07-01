@@ -182,9 +182,11 @@ module Planning = struct
 end
 
 module Plan_projection = struct
-  let version ~revision ~validated = (revision * 2) + if validated then 1 else 0
+  let version ~revision ~validated ~sealed =
+    (revision * 3) + if sealed then 2 else if validated then 1 else 0
+  ;;
 
-  let render ~phase ~revision ~validated ~steps =
+  let render ~phase ~revision ~validated ~sealed ~steps =
     let step_lines =
       match steps with
       | [] -> [ "No steps." ]
@@ -202,12 +204,13 @@ module Plan_projection = struct
       ~sep:"\n"
       ([ sprintf
            "<!-- sandwalk-projection-version: %d -->"
-           (version ~revision ~validated)
+           (version ~revision ~validated ~sealed)
        ; sprintf "<!-- sandwalk-plan-revision: %d -->" revision
        ; "# Research plan"
        ; ""
        ; sprintf "Phase: %s" (Phase.to_string phase)
        ; sprintf "Validation: %s" (if validated then "current" else "pending")
+       ; sprintf "Sealed: %s" (if sealed then "yes" else "no")
        ; ""
        ]
        @ step_lines
@@ -521,11 +524,23 @@ let%test_unit "validated projections outrank pending projections at one revision
   Quickcheck.test Int.quickcheck_generator ~f:(fun revision ->
     if revision >= 0 && revision < Int.max_value / 2
     then (
-      let pending = Plan_projection.version ~revision ~validated:false in
-      let validated = Plan_projection.version ~revision ~validated:true in
+      let pending =
+        Plan_projection.version ~revision ~validated:false ~sealed:false
+      in
+      let validated =
+        Plan_projection.version ~revision ~validated:true ~sealed:false
+      in
+      let sealed =
+        Plan_projection.version ~revision ~validated:true ~sealed:true
+      in
       [%test_pred: int] (fun value -> value < validated) pending;
+      [%test_pred: int] (fun value -> value < sealed) validated;
       [%test_pred: int]
         (fun value ->
-          value < Plan_projection.version ~revision:(revision + 1) ~validated:false)
-        validated))
+          value
+          < Plan_projection.version
+              ~revision:(revision + 1)
+              ~validated:false
+              ~sealed:false)
+        sealed))
 ;;

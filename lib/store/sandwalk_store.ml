@@ -14,6 +14,12 @@ module Error = struct
     | Plan_mutation_wrong_phase of Sandwalk_core.Phase.t
     | Empty_plan
     | Plan_validation_wrong_phase of Sandwalk_core.Phase.t
+    | Plan_not_validated
+    | Plan_validation_stale of
+        { validated_revision : int
+        ; current_revision : int
+        }
+    | Plan_seal_wrong_phase of Sandwalk_core.Phase.t
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -48,6 +54,24 @@ module Validate_plan_result = struct
   let steps t = t.steps
 end
 
+module Seal_plan_result = struct
+  type t =
+    { previous_schema_version : int
+    ; previous_phase : Sandwalk_core.Phase.t
+    ; phase : Sandwalk_core.Phase.t
+    ; revision : int
+    ; already_sealed : bool
+    ; steps : Stored_plan_step.t list
+    }
+
+  let previous_schema_version t = t.previous_schema_version
+  let previous_phase t = t.previous_phase
+  let phase t = t.phase
+  let revision t = t.revision
+  let already_sealed t = t.already_sealed
+  let steps t = t.steps
+end
+
 module Add_plan_step_result = struct
   type t =
     { previous_schema_version : int
@@ -78,7 +102,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 3
+let current_schema_version = 4
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -182,6 +206,14 @@ PRAGMA user_version = 3;
 |}
 ;;
 
+let migration_v4 =
+  {|
+ALTER TABLE plan_metadata ADD COLUMN sealed_revision INTEGER;
+ALTER TABLE plan_metadata ADD COLUMN sealed_at TEXT;
+PRAGMA user_version = 4;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -220,11 +252,19 @@ let migrate database ~from_version ~now =
       let%bind () = execute database migration_v2 in
       let%bind () = insert_migration database ~version:2 ~now in
       let%bind () = execute database migration_v3 in
-      insert_migration database ~version:3 ~now)
+      let%bind () = insert_migration database ~version:3 ~now in
+      let%bind () = execute database migration_v4 in
+      insert_migration database ~version:4 ~now)
     else if from_version < 3
     then (
       let%bind () = execute database migration_v3 in
-      insert_migration database ~version:3 ~now)
+      let%bind () = insert_migration database ~version:3 ~now in
+      let%bind () = execute database migration_v4 in
+      insert_migration database ~version:4 ~now)
+    else if from_version < 4
+    then (
+      let%bind () = execute database migration_v4 in
+      insert_migration database ~version:4 ~now)
     else Ok ())
 ;;
 
@@ -456,6 +496,48 @@ WHERE singleton = 1
       step_done database statement)
 ;;
 
+let query_plan_seal database =
+  with_statement
+    database
+    {|
+SELECT revision, validated_revision, sealed_revision
+FROM plan_metadata
+WHERE singleton = 1
+|}
+    ~f:(fun statement ->
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        let optional_int column =
+          if Sqlite3.column_is_null statement column
+          then None
+          else Some (Sqlite3.column_int statement column)
+        in
+        Ok
+          ( Sqlite3.column_int statement 0
+          , optional_int 1
+          , optional_int 2 )
+      | Sqlite3.Rc.DONE ->
+        Error (Error.Database_error "Missing plan metadata")
+      | return_code ->
+        check database return_code
+        |> Result.map ~f:(Fn.const (0, None, None)))
+;;
+
+let mark_plan_sealed database ~revision ~now =
+  with_statement
+    database
+    {|
+UPDATE plan_metadata
+SET sealed_revision = ?1, sealed_at = ?2
+WHERE singleton = 1
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () = check database (Sqlite3.bind_int statement 1 revision) in
+      let%bind () = bind_text database statement 2 now in
+      step_done database statement)
+;;
+
 let query_plan_steps database =
   let steps = ref [] in
   let open Result.Let_syntax in
@@ -671,6 +753,109 @@ let validate_plan
               ; phase
               ; revision
               ; already_validated
+              ; steps
+              }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let seal_plan
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind previous_schema_version = query_schema_version database in
+            let%bind () =
+              migrate database ~from_version:previous_schema_version ~now
+            in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind previous_phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind steps = query_plan_steps database in
+            let%bind () =
+              if List.is_empty steps then Error Error.Empty_plan else Ok ()
+            in
+            let%bind revision, validated_revision, sealed_revision =
+              query_plan_seal database
+            in
+            let already_sealed =
+              Sandwalk_core.Phase.equal previous_phase Researching
+              && Option.value_map
+                   sealed_revision
+                   ~default:false
+                   ~f:(Int.equal revision)
+            in
+            let%bind () =
+              if already_sealed
+              then Ok ()
+              else if not (Sandwalk_core.Phase.equal previous_phase Planning)
+              then Error (Error.Plan_seal_wrong_phase previous_phase)
+              else (
+                match validated_revision with
+                | None -> Error Error.Plan_not_validated
+                | Some validated_revision
+                  when not (Int.equal validated_revision revision) ->
+                  Error
+                    (Error.Plan_validation_stale
+                       { validated_revision; current_revision = revision })
+                | Some _ -> Ok ())
+            in
+            let phase = Sandwalk_core.Phase.Researching in
+            let%bind () =
+              if already_sealed
+              then Ok ()
+              else (
+                let%bind _ =
+                  Sandwalk_core.transition
+                    ~from:previous_phase
+                    ~into:phase
+                  |> Result.map_error ~f:(fun _ ->
+                    Error.Plan_seal_wrong_phase previous_phase)
+                in
+                let%bind () = mark_plan_sealed database ~revision ~now in
+                update_phase database ~phase ~now)
+            in
+            Ok
+              { Seal_plan_result.previous_schema_version
+              ; previous_phase
+              ; phase
+              ; revision
+              ; already_sealed
               ; steps
               }
           in

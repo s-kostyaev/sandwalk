@@ -1,35 +1,41 @@
   $ sandwalk init --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"initialized","schema_version":3}}
+  {"ok":true,"result":{"slug":"plan-test","phase":"initialized","schema_version":4}}
 
   $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
   >   --key primary-sources --title "Review primary sources"
   {"ok":true,"result":{"key":"primary-sources","title":"Review primary sources","required":true,"position":1,"phase":"planning","plan_path":"workspaces/plan-test/exports/research-plan.md"}}
 
   $ cat workspaces/plan-test/exports/research-plan.md
-  <!-- sandwalk-projection-version: 2 -->
+  <!-- sandwalk-projection-version: 3 -->
   <!-- sandwalk-plan-revision: 1 -->
   # Research plan
   
   Phase: planning
   Validation: pending
+  Sealed: no
   
   1. `primary-sources` (required)
      Title: "Review primary sources"
 
   $ sandwalk status --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"planning","schema_version":3}}
+  {"ok":true,"result":{"slug":"plan-test","phase":"planning","schema_version":4}}
+
+  $ sandwalk plan seal --slug plan-test --directory-prefix workspaces
+  {"ok":false,"error":{"code":"PLAN_NOT_VALIDATED","message":"Plan must be validated before sealing."}}
+  [1]
 
   $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
   >   --key background --title "Collect background" --optional
   {"ok":true,"result":{"key":"background","title":"Collect background","required":false,"position":2,"phase":"planning","plan_path":"workspaces/plan-test/exports/research-plan.md"}}
 
   $ cat workspaces/plan-test/exports/research-plan.md
-  <!-- sandwalk-projection-version: 4 -->
+  <!-- sandwalk-projection-version: 6 -->
   <!-- sandwalk-plan-revision: 2 -->
   # Research plan
   
   Phase: planning
   Validation: pending
+  Sealed: no
   
   1. `primary-sources` (required)
      Title: "Review primary sources"
@@ -52,6 +58,10 @@
   $ grep '^Validation:' workspaces/plan-test/exports/research-plan.md
   Validation: pending
 
+  $ sandwalk plan seal --slug plan-test --directory-prefix workspaces
+  {"ok":false,"error":{"code":"PLAN_VALIDATION_STALE","message":"Plan changed after its last validation."}}
+  [1]
+
   $ sandwalk plan validate --slug plan-test --directory-prefix workspaces
   {"ok":true,"result":{"revision":3,"validated":true,"already_validated":false,"phase":"planning","plan_path":"workspaces/plan-test/exports/research-plan.md"}}
 
@@ -61,7 +71,33 @@
   [1]
 
   $ wc -l < workspaces/plan-test/logs/events.jsonl
-        18
+        22
+
+  $ sandwalk plan seal --slug plan-test --directory-prefix workspaces
+  {"ok":true,"result":{"revision":3,"sealed":true,"already_sealed":false,"phase":"researching","plan_path":"workspaces/plan-test/exports/research-plan.md"}}
+
+  $ grep -E '^(Phase|Validation|Sealed):' workspaces/plan-test/exports/research-plan.md
+  Phase: researching
+  Validation: current
+  Sealed: yes
+
+  $ sandwalk plan seal --slug plan-test --directory-prefix workspaces
+  {"ok":true,"result":{"revision":3,"sealed":true,"already_sealed":true,"phase":"researching","plan_path":"workspaces/plan-test/exports/research-plan.md"}}
+
+  $ sandwalk status --slug plan-test --directory-prefix workspaces
+  {"ok":true,"result":{"slug":"plan-test","phase":"researching","schema_version":4}}
+
+  $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
+  >   --key too-late --title "Too late"
+  {"ok":false,"error":{"code":"PLAN_MUTATION_NOT_ALLOWED","message":"Plan cannot be changed in the current phase."}}
+  [1]
+
+  $ sandwalk plan validate --slug plan-test --directory-prefix workspaces
+  {"ok":false,"error":{"code":"PLAN_VALIDATION_NOT_ALLOWED","message":"Plan cannot be validated in the current phase."}}
+  [1]
+
+  $ wc -l < workspaces/plan-test/logs/events.jsonl
+        32
 
   $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
   >   --key Bad/key --title "Invalid"
@@ -69,7 +105,7 @@
   [1]
 
   $ sandwalk resume --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"planning","resume_path":"workspaces/plan-test/artifacts/resume/workspace.md"}}
+  {"ok":true,"result":{"slug":"plan-test","phase":"researching","resume_path":"workspaces/plan-test/artifacts/resume/workspace.md"}}
 
   $ sed -n '/## Durable entities/,+6p' workspaces/plan-test/artifacts/resume/workspace.md
   ## Durable entities
@@ -95,11 +131,29 @@ Create a released-schema v1 fixture and prove the first plan mutation upgrades i
 
   $ ./inspect_workspace.exe legacy/legacy-test/database/sandwalk.sqlite3
   legacy-test|planning
-  3
+  4
   wal
   ok
 
-Create a released-schema v2 fixture and validate it through the v3 migration.
+Create a released-schema v3 fixture and seal it through the v4 migration.
+
+  $ mkdir -p legacy-v3/v3-test/database legacy-v3/v3-test/logs \
+  >   legacy-v3/v3-test/exports legacy-v3/v3-test/artifacts/temporary
+  $ ./inspect_workspace.exe --create-v3 legacy-v3/v3-test/database/sandwalk.sqlite3 v3-test
+
+  $ sandwalk status --slug v3-test --directory-prefix legacy-v3
+  {"ok":true,"result":{"slug":"v3-test","phase":"planning","schema_version":3}}
+
+  $ sandwalk plan seal --slug v3-test --directory-prefix legacy-v3
+  {"ok":true,"result":{"revision":1,"sealed":true,"already_sealed":false,"phase":"researching","plan_path":"legacy-v3/v3-test/exports/research-plan.md"}}
+
+  $ ./inspect_workspace.exe legacy-v3/v3-test/database/sandwalk.sqlite3
+  v3-test|researching
+  4
+  wal
+  ok
+
+Create a released-schema v2 fixture and validate it through the v4 migration.
 
   $ mkdir -p legacy-v2/v2-test/database legacy-v2/v2-test/logs \
   >   legacy-v2/v2-test/exports legacy-v2/v2-test/artifacts/temporary
@@ -113,6 +167,6 @@ Create a released-schema v2 fixture and validate it through the v3 migration.
 
   $ ./inspect_workspace.exe legacy-v2/v2-test/database/sandwalk.sqlite3
   v2-test|planning
-  3
+  4
   wal
   ok

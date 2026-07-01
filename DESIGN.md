@@ -169,6 +169,10 @@ Plan validation requires at least one step and records the exact plan revision.
 Appending a step increments the revision, making an earlier validation stale.
 Repeated validation of an unchanged revision is idempotent.
 
+Plan sealing requires validation of the current revision, records that revision,
+and performs the checked `planning → researching` transition. Repeating a seal
+of the same revision is idempotent.
+
 After work begins, existing steps are immutable. New steps are added through an
 append-only plan revision with a recorded reason.
 

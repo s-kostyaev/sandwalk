@@ -182,7 +182,10 @@ let status_error = function
   | Duplicate_plan_step _
   | Plan_mutation_wrong_phase _
   | Empty_plan
-  | Plan_validation_wrong_phase _ ->
+  | Plan_validation_wrong_phase _
+  | Plan_not_validated
+  | Plan_validation_stale _
+  | Plan_seal_wrong_phase _ ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -565,6 +568,12 @@ let plan_error = function
   | Empty_plan -> "PLAN_EMPTY", "Plan must contain at least one step."
   | Plan_validation_wrong_phase _ ->
     "PLAN_VALIDATION_NOT_ALLOWED", "Plan cannot be validated in the current phase."
+  | Plan_not_validated ->
+    "PLAN_NOT_VALIDATED", "Plan must be validated before sealing."
+  | Plan_validation_stale _ ->
+    "PLAN_VALIDATION_STALE", "Plan changed after its last validation."
+  | Plan_seal_wrong_phase _ ->
+    "PLAN_SEAL_NOT_ALLOWED", "Plan cannot be sealed in the current phase."
   | error -> status_error error
 ;;
 
@@ -787,6 +796,7 @@ let plan_add_step_command =
                        ~phase
                        ~revision
                        ~validated:false
+                       ~sealed:false
                        ~steps:
                          (List.map steps ~f:(fun stored ->
                             ( Sandwalk_store.Stored_plan_step.key stored
@@ -807,7 +817,8 @@ let plan_add_step_command =
                        ~version:
                          (Sandwalk_core.Plan_projection.version
                             ~revision
-                            ~validated:false)
+                            ~validated:false
+                            ~sealed:false)
                        projection
                    in
                    (match written with
@@ -1044,6 +1055,7 @@ let plan_validate_command =
                     ~phase
                     ~revision
                     ~validated:true
+                    ~sealed:false
                     ~steps:
                       (List.map steps ~f:(fun stored ->
                          ( Sandwalk_store.Stored_plan_step.key stored
@@ -1063,7 +1075,8 @@ let plan_validate_command =
                     ~version:
                       (Sandwalk_core.Plan_projection.version
                          ~revision
-                         ~validated:true)
+                         ~validated:true
+                         ~sealed:false)
                     projection
                 in
                 (match written with
@@ -1110,10 +1123,256 @@ let plan_validate_command =
                       Deferred.unit)))))
 ;;
 
+let plan_seal_command =
+  Async.Command.async
+    ~summary:"Seal the validated plan and begin research."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag
+         "--directory-prefix"
+         (optional string)
+         ~doc:"PATH Parent directory for Sandwalk workspaces"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let arguments = parsed_arguments ~slug ~directory_prefix in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let started_at = Time_float_unix.now () in
+           let%bind invocation_id =
+             In_thread.run (fun () ->
+               Sandwalk_runtime.invocation_id ~now:started_at)
+           in
+           let append_event
+                 ~kind
+                 ~timestamp
+                 ~phase
+                 ~state_changes
+                 ?duration_ms
+                 ?outcome
+                 ?error_code
+                 ()
+             =
+             Sandwalk_runtime.Audit.append
+               ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+               (Sandwalk_protocol.Audit_event.create
+                  ~invocation_id
+                  ~timestamp
+                  ~kind
+                  ~command:"plan seal"
+                  ~arguments
+                  ~phase
+                  ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                  ~state_changes
+                  ?duration_ms
+                  ?outcome
+                  ?error_code
+                  ())
+           in
+           let fail_with_audit ~phase ~state_changes ~code ~message =
+             let finished_at = Time_float_unix.now () in
+             let duration_ms =
+               Time_float.diff finished_at started_at
+               |> Time_float.Span.to_ms
+               |> Float.iround_nearest_exn
+             in
+             let%bind logged =
+               append_event
+                 ~kind:`Failed
+                 ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                 ~phase
+                 ~state_changes
+                 ~duration_ms
+                 ~outcome:"failure"
+                 ~error_code:code
+                 ()
+             in
+             match logged with
+             | Error _ ->
+               print_failure_and_exit
+                 ~code:"AUDIT_LOG_ERROR"
+                 ~message:"Could not append workspace audit log."
+             | Ok () -> print_failure_and_exit ~code ~message
+           in
+           let%bind started =
+             append_event
+               ~kind:`Started
+               ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+               ~phase:None
+               ~state_changes:[]
+               ()
+           in
+           match started with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"AUDIT_LOG_ERROR"
+               ~message:"Could not append workspace audit log."
+           | Ok () ->
+             let%bind sealed =
+               In_thread.run (fun () ->
+                 Sandwalk_store.seal_plan
+                   ~database_path:
+                     (Sandwalk_runtime.Workspace.database_path workspace)
+                   ~expected_slug:slug
+                   ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                   ())
+             in
+             (match sealed with
+              | Error error ->
+                let code, message = plan_error error in
+                let phase =
+                  match error with
+                  | Sandwalk_store.Error.Plan_seal_wrong_phase phase ->
+                    Some (Sandwalk_core.Phase.to_string phase)
+                  | _ -> None
+                in
+                fail_with_audit ~phase ~state_changes:[] ~code ~message
+              | Ok sealed ->
+                let previous_schema_version =
+                  Sandwalk_store.Seal_plan_result.previous_schema_version sealed
+                in
+                let previous_phase =
+                  Sandwalk_store.Seal_plan_result.previous_phase sealed
+                in
+                let phase = Sandwalk_store.Seal_plan_result.phase sealed in
+                let revision =
+                  Sandwalk_store.Seal_plan_result.revision sealed
+                in
+                let already_sealed =
+                  Sandwalk_store.Seal_plan_result.already_sealed sealed
+                in
+                let state_changes =
+                  (if previous_schema_version
+                      < Sandwalk_store.current_schema_version
+                   then
+                     [ `Assoc
+                         [ "entity", `String "workspace.schema"
+                         ; "from", `Int previous_schema_version
+                         ; "to", `Int Sandwalk_store.current_schema_version
+                         ]
+                     ]
+                   else [])
+                  @ if already_sealed
+                    then []
+                    else
+                      [ `Assoc
+                          [ "entity", `String "plan.sealed"
+                          ; "from", `Null
+                          ; "to", `Int revision
+                          ]
+                      ; `Assoc
+                          [ "entity", `String "workspace.phase"
+                          ; ( "from"
+                            , `String
+                                (Sandwalk_core.Phase.to_string previous_phase) )
+                          ; "to", `String (Sandwalk_core.Phase.to_string phase)
+                          ]
+                      ]
+                in
+                let steps = Sandwalk_store.Seal_plan_result.steps sealed in
+                let projection =
+                  Sandwalk_core.Plan_projection.render
+                    ~phase
+                    ~revision
+                    ~validated:true
+                    ~sealed:true
+                    ~steps:
+                      (List.map steps ~f:(fun stored ->
+                         ( Sandwalk_store.Stored_plan_step.key stored
+                         , Sandwalk_store.Stored_plan_step.title stored
+                         , Sandwalk_store.Stored_plan_step.required stored
+                         , Sandwalk_store.Stored_plan_step.position stored )))
+                in
+                let plan_path =
+                  Sandwalk_runtime.Workspace.research_plan_path workspace
+                in
+                let projection_version =
+                  Sandwalk_core.Plan_projection.version
+                    ~revision
+                    ~validated:true
+                    ~sealed:true
+                in
+                let%bind written =
+                  Sandwalk_runtime.Atomic_file.write_versioned
+                    ~path:plan_path
+                    ~lock_path:
+                      (Sandwalk_runtime.Workspace.research_plan_lock_path workspace)
+                    ~temporary_suffix:invocation_id
+                    ~version:projection_version
+                    projection
+                in
+                (match written with
+                 | Error _ ->
+                   fail_with_audit
+                     ~phase:(Some (Sandwalk_core.Phase.to_string phase))
+                     ~state_changes
+                     ~code:"WORKSPACE_IO_ERROR"
+                     ~message:"Could not write research plan projection."
+                 | Ok () ->
+                   let finished_at = Time_float_unix.now () in
+                   let duration_ms =
+                     Time_float.diff finished_at started_at
+                     |> Time_float.Span.to_ms
+                     |> Float.iround_nearest_exn
+                   in
+                   let%bind logged =
+                     append_event
+                       ~kind:`Finished
+                       ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                       ~phase:(Some (Sandwalk_core.Phase.to_string phase))
+                       ~state_changes
+                       ~duration_ms
+                       ~outcome:"success"
+                       ()
+                   in
+                   (match logged with
+                    | Error _ ->
+                      print_failure_and_exit
+                        ~code:"AUDIT_LOG_ERROR"
+                        ~message:"Could not append workspace audit log."
+                    | Ok () ->
+                      let result =
+                        `Assoc
+                          [ "revision", `Int revision
+                          ; "sealed", `Bool true
+                          ; "already_sealed", `Bool already_sealed
+                          ; "phase", `String (Sandwalk_core.Phase.to_string phase)
+                          ; "plan_path", `String plan_path
+                          ]
+                      in
+                      Sandwalk_protocol.Envelope.success ~result ()
+                      |> Sandwalk_protocol.Envelope.render
+                      |> print_endline;
+                      Deferred.unit)))))
+;;
+
 let plan_command =
   Async.Command.group
     ~summary:"Manage the canonical research plan."
-    [ "add-step", plan_add_step_command; "validate", plan_validate_command ]
+    [ "add-step", plan_add_step_command
+    ; "seal", plan_seal_command
+    ; "validate", plan_validate_command
+    ]
 ;;
 
 let command =

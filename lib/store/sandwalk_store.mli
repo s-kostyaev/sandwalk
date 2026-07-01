@@ -14,6 +14,12 @@ module Error : sig
     | Plan_mutation_wrong_phase of Sandwalk_core.Phase.t
     | Empty_plan
     | Plan_validation_wrong_phase of Sandwalk_core.Phase.t
+    | Plan_not_validated
+    | Plan_validation_stale of
+        { validated_revision : int
+        ; current_revision : int
+        }
+    | Plan_seal_wrong_phase of Sandwalk_core.Phase.t
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -25,6 +31,17 @@ module Stored_plan_step : sig
   val title : t -> string
   val required : t -> bool
   val position : t -> int
+end
+
+module Seal_plan_result : sig
+  type t
+
+  val previous_schema_version : t -> int
+  val previous_phase : t -> Sandwalk_core.Phase.t
+  val phase : t -> Sandwalk_core.Phase.t
+  val revision : t -> int
+  val already_sealed : t -> bool
+  val steps : t -> Stored_plan_step.t list
 end
 
 module Validate_plan_result : sig
@@ -95,3 +112,11 @@ val validate_plan
   -> now:string
   -> unit
   -> (Validate_plan_result.t, Error.t) Result.t
+
+val seal_plan
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> now:string
+  -> unit
+  -> (Seal_plan_result.t, Error.t) Result.t

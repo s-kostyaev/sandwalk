@@ -99,6 +99,23 @@ PRAGMA user_version = 2;
 |})
 ;;
 
+let create_v3 database slug =
+  create_v2 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+ALTER TABLE plan_metadata ADD COLUMN validated_revision INTEGER;
+ALTER TABLE plan_metadata ADD COLUMN validated_at TEXT;
+UPDATE plan_metadata
+SET validated_revision = 1, validated_at = '2026-01-01 00:00:00Z';
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (3, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 3;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -111,6 +128,7 @@ let () =
     match Sys.argv with
     | [| _; "--create-v1"; path; slug |] -> Some 1, path, Some slug
     | [| _; "--create-v2"; path; slug |] -> Some 2, path, Some slug
+    | [| _; "--create-v3"; path; slug |] -> Some 3, path, Some slug
     | [| _; path |] -> None, path, None
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
   in
@@ -121,6 +139,7 @@ let () =
       match version with
       | Some 1 -> create_v1 database (Option.get slug)
       | Some 2 -> create_v2 database (Option.get slug)
+      | Some 3 -> create_v3 database (Option.get slug)
       | Some _ -> assert false
       | None -> inspect database)
 ;;
