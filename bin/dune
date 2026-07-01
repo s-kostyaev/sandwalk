@@ -1,0 +1,6 @@
+(executable
+ (name main)
+ (public_name sandwalk)
+ (libraries core core_unix async async_unix sandwalk_protocol)
+ (preprocess
+  (pps ppx_jane)))
