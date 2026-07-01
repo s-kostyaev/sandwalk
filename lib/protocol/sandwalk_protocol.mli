@@ -15,3 +15,20 @@ module Envelope : sig
   val to_yojson : t -> Yojson.Safe.t
   val render : t -> string
 end
+
+module Audit_event : sig
+  val create
+    :  invocation_id:string
+    -> timestamp:string
+    -> kind:[ `Started | `Finished | `Failed ]
+    -> command:string
+    -> phase:string option
+    -> raw_argv:string list
+    -> arguments:Yojson.Safe.t
+    -> state_changes:Yojson.Safe.t list
+    -> ?duration_ms:int
+    -> ?outcome:string
+    -> ?error_code:string
+    -> unit
+    -> Yojson.Safe.t
+end

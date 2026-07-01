@@ -1,5 +1,22 @@
 open! Core
 
+module Slug : sig
+  type t
+
+  module Error : sig
+    type t =
+      | Empty
+      | Too_long
+      | Invalid_format
+    [@@deriving equal, sexp_of]
+
+    val message : t -> string
+  end
+
+  val of_string : string -> (t, Error.t) Result.t
+  val to_string : t -> string
+end
+
 module Phase : sig
   type t =
     | Initialized

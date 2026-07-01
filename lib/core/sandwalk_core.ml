@@ -1,5 +1,52 @@
 open! Core
 
+module Slug = struct
+  module Error = struct
+    type t =
+      | Empty
+      | Too_long
+      | Invalid_format
+    [@@deriving equal, sexp_of]
+
+    let message = function
+      | Empty -> "Slug must not be empty."
+      | Too_long -> "Slug must contain at most 63 characters."
+      | Invalid_format ->
+        "Slug must use lowercase letters or digits, separated by single hyphens."
+    ;;
+  end
+
+  type t = string
+
+  let is_lowercase_letter_or_digit = function
+    | 'a' .. 'z' | '0' .. '9' -> true
+    | _ -> false
+  ;;
+
+  let has_valid_format value =
+    String.for_alli value ~f:(fun index character ->
+      if Char.equal character '-'
+      then (
+        index > 0
+        && index < String.length value - 1
+        && is_lowercase_letter_or_digit value.[index - 1]
+        && is_lowercase_letter_or_digit value.[index + 1])
+      else is_lowercase_letter_or_digit character)
+  ;;
+
+  let of_string value =
+    if String.is_empty value
+    then Error Error.Empty
+    else if String.length value > 63
+    then Error Error.Too_long
+    else if not (has_valid_format value)
+    then Error Error.Invalid_format
+    else Ok value
+  ;;
+
+  let to_string t = t
+end
+
 module Phase = struct
   type t =
     | Initialized
@@ -64,6 +111,39 @@ let transition ~from ~into =
   if Phase.can_transition ~from ~into
   then Ok into
   else Error { Transition_error.from; into }
+;;
+
+let%expect_test "slug validation protects canonical workspace paths" =
+  [ ""; "a"; "typed-harness"; "-bad"; "bad-"; "bad--slug"; "Bad"; "../escape" ]
+  |> List.iter ~f:(fun value ->
+    match Slug.of_string value with
+    | Ok slug -> printf "%S -> %s\n" value (Slug.to_string slug)
+    | Error error -> printf "%S -> %s\n" value (Slug.Error.message error));
+  [%expect
+    {|
+    "" -> Slug must not be empty.
+    "a" -> a
+    "typed-harness" -> typed-harness
+    "-bad" -> Slug must use lowercase letters or digits, separated by single hyphens.
+    "bad-" -> Slug must use lowercase letters or digits, separated by single hyphens.
+    "bad--slug" -> Slug must use lowercase letters or digits, separated by single hyphens.
+    "Bad" -> Slug must use lowercase letters or digits, separated by single hyphens.
+    "../escape" -> Slug must use lowercase letters or digits, separated by single hyphens. |}]
+;;
+
+let%test_unit "accepted slugs contain no path separators" =
+  Quickcheck.test String.quickcheck_generator ~f:(fun value ->
+    match Slug.of_string value with
+    | Error _ -> ()
+    | Ok slug ->
+      let value = Slug.to_string slug in
+      [%test_pred: string]
+        (fun value -> not (String.is_substring value ~substring:"/"))
+        value;
+      [%test_pred: string]
+        (fun value -> not (String.is_substring value ~substring:"\\"))
+        value;
+      [%test_eq: string] value (Filename.basename value))
 ;;
 
 let%expect_test "allows the planning and reconnaissance loop" =

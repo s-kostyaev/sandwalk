@@ -38,6 +38,9 @@ the workflow while Sandwalk enforces it mechanically.
 A slug identifies one research workspace. There is no public run identifier.
 Independent research attempts use different slugs.
 
+Slugs are canonical path components: 1–63 lowercase ASCII letters or digits,
+with single hyphens allowed only between alphanumeric groups.
+
 Public opaque references exist only when possession proves provenance:
 
 - `hit_...`: a result returned by a search adapter.
@@ -79,6 +82,10 @@ The directory prefix is resolved in this order:
 
 Commands must identify the workspace explicitly by slug or path. Sandwalk must
 not select an implicit `latest` workspace.
+
+```console
+sandwalk init --slug <slug> [--directory-prefix <path>]
+```
 
 SQLite uses WAL mode and a configurable busy timeout. Independent commands use
 short transactions. Network and adapter processes must never run inside a

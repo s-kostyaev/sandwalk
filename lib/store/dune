@@ -1,0 +1,6 @@
+(library
+ (name sandwalk_store)
+ (public_name sandwalk.store)
+ (libraries core sqlite3 sandwalk_core)
+ (preprocess
+  (pps ppx_jane)))
