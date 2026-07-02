@@ -13,6 +13,13 @@
   fixture-step|small-claim|1|draft|32|45|The fixture result supports the small claim.
   
 
+  $ sandwalk finding seal \
+  >   --slug finding-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --finding fixture-step/small-claim
+  {"ok":false,"error":{"code":"FINDING_HAS_NO_EVIDENCE","message":"Finding \"fixture-step/small-claim\" must have evidence before sealing."}}
+  [1]
+
   $ ./inspect_workspace.exe workspace/finding-test/database/sandwalk.sqlite3
   finding-test|researching
   11

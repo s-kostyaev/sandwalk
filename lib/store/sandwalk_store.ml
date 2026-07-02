@@ -49,6 +49,7 @@ module Error = struct
     | Excerpt_not_found of string
     | Finding_excerpt_step_mismatch
     | Excerpt_stale of string
+    | Finding_has_no_evidence of string
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -128,6 +129,20 @@ module Attach_evidence_result = struct
   let revision t = t.revision
   let attached t = t.attached
   let revised t = t.revised
+  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
+end
+
+module Seal_finding_result = struct
+  type t =
+    { revision : int
+    ; already_sealed : bool
+    ; state : string
+    ; lease_expires_unix_seconds : int64
+    }
+
+  let revision t = t.revision
+  let already_sealed t = t.already_sealed
+  let state t = t.state
   let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
@@ -3442,6 +3457,197 @@ INSERT INTO finding_evidence (
               { Attach_evidence_result.revision = target_revision
               ; attached = not already_attached
               ; revised
+              ; lease_expires_unix_seconds
+              }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let seal_finding
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~claim_id
+      ~step_key
+      ~finding_key
+      ~now
+      ~now_unix_seconds
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Researching
+              then Ok ()
+              else Error (Error.Finding_wrong_phase phase)
+            in
+            let%bind claimed_step, state, active_claim_id, expiry, duration =
+              query_claim_for_checkpoint database claim_id
+            in
+            let claim_reference = Sandwalk_core.Claim_id.to_string claim_id in
+            let%bind () =
+              if
+                Sandwalk_core.Step_state.equal
+                  state
+                  Sandwalk_core.Step_state.Claimed
+                && Option.value_map
+                     active_claim_id
+                     ~default:false
+                     ~f:(String.equal claim_reference)
+              then Ok ()
+              else Error Error.Claim_not_active
+            in
+            let expiry = Option.value_exn expiry in
+            let%bind () =
+              if Int64.(expiry <= now_unix_seconds)
+              then
+                Error
+                  (Error.Claim_expired
+                     (Sandwalk_core.Plan_step.Key.to_string claimed_step))
+              else Ok ()
+            in
+            let step = Sandwalk_core.Plan_step.Key.to_string step_key in
+            let%bind () =
+              if
+                String.equal
+                  (Sandwalk_core.Plan_step.Key.to_string claimed_step)
+                  step
+              then Ok ()
+              else Error Error.Finding_step_mismatch
+            in
+            let key = Sandwalk_core.Finding_key.to_string finding_key in
+            let reference = step ^ "/" ^ key in
+            let%bind revision, finding_state =
+              with_statement
+                database
+                {|
+SELECT current_revision, state
+FROM findings
+WHERE step_key = ?1 AND finding_key = ?2
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 step in
+                  let%bind () = bind_text database statement 2 key in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW ->
+                    Ok
+                      ( Sqlite3.column_int statement 0
+                      , Sqlite3.column_text statement 1 )
+                  | Sqlite3.Rc.DONE ->
+                    Error (Error.Finding_not_found reference)
+                  | return_code ->
+                    check database return_code
+                    |> Result.map ~f:(fun () -> assert false))
+            in
+            let already_sealed = not (String.equal finding_state "draft") in
+            let%bind () =
+              if already_sealed
+              then Ok ()
+              else (
+                let%bind evidence_count =
+                  with_statement
+                    database
+                    {|
+SELECT COUNT(*) FROM finding_evidence
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
+|}
+                    ~f:(fun statement ->
+                      let%bind () = bind_text database statement 1 step in
+                      let%bind () = bind_text database statement 2 key in
+                      let%bind () =
+                        check database (Sqlite3.bind_int statement 3 revision)
+                      in
+                      match Sqlite3.step statement with
+                      | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+                      | return_code ->
+                        check database return_code
+                        |> Result.map ~f:(Fn.const 0))
+                in
+                let%bind () =
+                  if evidence_count = 0
+                  then Error (Error.Finding_has_no_evidence reference)
+                  else Ok ()
+                in
+                let%bind () =
+                  with_statement
+                    database
+                    {|
+UPDATE findings
+SET state = 'sealed', updated_at = ?3
+WHERE step_key = ?1 AND finding_key = ?2
+|}
+                    ~f:(fun statement ->
+                      let%bind () = bind_text database statement 1 step in
+                      let%bind () = bind_text database statement 2 key in
+                      let%bind () = bind_text database statement 3 now in
+                      step_done database statement)
+                in
+                with_statement
+                  database
+                  {|
+UPDATE finding_revisions
+SET sealed_at = ?4
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
+|}
+                  ~f:(fun statement ->
+                    let%bind () = bind_text database statement 1 step in
+                    let%bind () = bind_text database statement 2 key in
+                    let%bind () =
+                      check database (Sqlite3.bind_int statement 3 revision)
+                    in
+                    let%bind () = bind_text database statement 4 now in
+                    step_done database statement))
+            in
+            let lease_expires_unix_seconds =
+              Int64.(now_unix_seconds + of_int duration)
+            in
+            let%bind () =
+              renew_claim
+                database
+                ~claim_id
+                ~step_key
+                ~lease_expires_unix_seconds
+            in
+            Ok
+              { Seal_finding_result.revision
+              ; already_sealed
+              ; state = if already_sealed then finding_state else "sealed"
               ; lease_expires_unix_seconds
               }
           in

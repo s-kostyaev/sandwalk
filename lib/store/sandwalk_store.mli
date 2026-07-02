@@ -49,6 +49,7 @@ module Error : sig
     | Excerpt_not_found of string
     | Finding_excerpt_step_mismatch
     | Excerpt_stale of string
+    | Finding_has_no_evidence of string
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -101,6 +102,15 @@ module Attach_evidence_result : sig
   val revision : t -> int
   val attached : t -> bool
   val revised : t -> bool
+  val lease_expires_unix_seconds : t -> int64
+end
+
+module Seal_finding_result : sig
+  type t
+
+  val revision : t -> int
+  val already_sealed : t -> bool
+  val state : t -> string
   val lease_expires_unix_seconds : t -> int64
 end
 
@@ -395,3 +405,15 @@ val attach_evidence
   -> now_unix_seconds:int64
   -> unit
   -> (Attach_evidence_result.t, Error.t) Result.t
+
+val seal_finding
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> step_key:Sandwalk_core.Plan_step.Key.t
+  -> finding_key:Sandwalk_core.Finding_key.t
+  -> now:string
+  -> now_unix_seconds:int64
+  -> unit
+  -> (Seal_finding_result.t, Error.t) Result.t

@@ -214,7 +214,8 @@ let status_error = function
   | Finding_not_found _
   | Excerpt_not_found _
   | Finding_excerpt_step_mismatch
-  | Excerpt_stale _ ->
+  | Excerpt_stale _
+  | Finding_has_no_evidence _ ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -3242,6 +3243,9 @@ let finding_error = function
     "EVIDENCE_STEP_MISMATCH", "Excerpt belongs to another plan step."
   | Excerpt_stale reference ->
     "EXCERPT_STALE", sprintf "Excerpt %S no longer matches its snapshot." reference
+  | Finding_has_no_evidence reference ->
+    "FINDING_HAS_NO_EVIDENCE",
+    sprintf "Finding %S must have evidence before sealing." reference
   | error -> claim_error error
 ;;
 
@@ -3714,10 +3718,220 @@ let finding_attach_command =
                     Deferred.unit)))))
 ;;
 
+let finding_seal_command =
+  Async.Command.async
+    ~summary:"Seal an evidence-bearing finding revision."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and finding_text =
+       flag "--finding" (required string) ~doc:"STEP/KEY Finding reference"
+     and claim_text =
+       flag "--claim" (required string) ~doc:"CLAIM Active execution claim"
+     in
+     fun () ->
+       let finding =
+         match String.lsplit2 finding_text ~on:'/' with
+         | Some (step, key) ->
+           (match
+              Sandwalk_core.Plan_step.Key.of_string step,
+              Sandwalk_core.Finding_key.of_string key
+            with
+            | Ok step, Some key -> Some (step, key)
+            | _ -> None)
+         | None -> None
+       in
+       match
+         Sandwalk_core.Slug.of_string slug_text,
+         finding,
+         Sandwalk_core.Claim_id.of_string claim_text
+       with
+       | Error error, _, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, None, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_FINDING"
+           ~message:"Finding reference must be STEP/KEY."
+       | _, _, None ->
+         print_failure_and_exit
+           ~code:"INVALID_CLAIM"
+           ~message:"Claim identifier is invalid."
+       | Ok slug, Some (step_key, finding_key), Some claim_id ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let started_at = Time_float_unix.now () in
+           let now_unix_seconds =
+             Time_float.to_span_since_epoch started_at
+             |> Time_float.Span.to_sec
+             |> Float.iround_down_exn
+             |> Int64.of_int
+           in
+           let%bind invocation_id =
+             In_thread.run (fun () ->
+               Sandwalk_runtime.invocation_id ~now:started_at)
+           in
+           let arguments =
+             `Assoc
+               [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+               ; "directory_prefix", `String directory_prefix
+               ; "finding", `String finding_text
+               ; "claim", `String claim_text
+               ]
+           in
+           let append_event
+                 ~kind
+                 ~timestamp
+                 ~state_changes
+                 ?duration_ms
+                 ?outcome
+                 ?error_code
+                 ()
+             =
+             Sandwalk_runtime.Audit.append
+               ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+               (Sandwalk_protocol.Audit_event.create
+                  ~invocation_id
+                  ~timestamp
+                  ~kind
+                  ~command:"finding seal"
+                  ~arguments
+                  ~phase:(Some "researching")
+                  ~step:(Sandwalk_core.Plan_step.Key.to_string step_key)
+                  ~claim:claim_text
+                  ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                  ~state_changes
+                  ~consumed_references:[ claim_text; finding_text ]
+                  ?duration_ms
+                  ?outcome
+                  ?error_code
+                  ())
+           in
+           let%bind started =
+             append_event
+               ~kind:`Started
+               ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+               ~state_changes:[]
+               ()
+           in
+           (match started with
+            | Error _ ->
+              print_failure_and_exit
+                ~code:"AUDIT_LOG_ERROR"
+                ~message:"Could not append workspace audit log."
+            | Ok () ->
+              let%bind sealed =
+                In_thread.run (fun () ->
+                  Sandwalk_store.seal_finding
+                    ~database_path:
+                      (Sandwalk_runtime.Workspace.database_path workspace)
+                    ~expected_slug:slug
+                    ~claim_id
+                    ~step_key
+                    ~finding_key
+                    ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                    ~now_unix_seconds
+                    ())
+              in
+              let finished_at = Time_float_unix.now () in
+              let duration_ms =
+                Time_float.diff finished_at started_at
+                |> Time_float.Span.to_ms
+                |> Float.iround_nearest_exn
+              in
+              (match sealed with
+               | Error error ->
+                 let code, message = finding_error error in
+                 let%bind logged =
+                   append_event
+                     ~kind:`Failed
+                     ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                     ~state_changes:[]
+                     ~duration_ms
+                     ~outcome:"failure"
+                     ~error_code:code
+                     ()
+                 in
+                 (match logged with
+                  | Error _ ->
+                    print_failure_and_exit
+                      ~code:"AUDIT_LOG_ERROR"
+                      ~message:"Could not append workspace audit log."
+                  | Ok () -> print_failure_and_exit ~code ~message)
+               | Ok sealed ->
+                 let already_sealed =
+                   Sandwalk_store.Seal_finding_result.already_sealed sealed
+                 in
+                 let%bind logged =
+                   append_event
+                     ~kind:`Finished
+                     ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                     ~state_changes:
+                       (if already_sealed
+                        then []
+                        else
+                          [ `Assoc
+                              [ ( "entity"
+                                , `String ("finding." ^ finding_text ^ ".state")
+                                )
+                              ; "from", `String "draft"
+                              ; "to", `String "sealed"
+                              ]
+                          ])
+                     ~duration_ms
+                     ~outcome:"success"
+                     ()
+                 in
+                 (match logged with
+                  | Error _ ->
+                    print_failure_and_exit
+                      ~code:"AUDIT_LOG_ERROR"
+                      ~message:"Could not append workspace audit log."
+                  | Ok () ->
+                    let result =
+                      `Assoc
+                        [ "finding", `String finding_text
+                        ; ( "revision"
+                          , `Int
+                              (Sandwalk_store.Seal_finding_result.revision
+                                 sealed) )
+                        ; ( "state"
+                          , `String
+                              (Sandwalk_store.Seal_finding_result.state
+                                 sealed) )
+                        ; "already_sealed", `Bool already_sealed
+                        ]
+                    in
+                    Sandwalk_protocol.Envelope.success ~result ()
+                    |> Sandwalk_protocol.Envelope.render
+                    |> print_endline;
+                    Deferred.unit)))))
+;;
+
 let finding_command =
   Async.Command.group
     ~summary:"Create and manage evidence-backed findings."
-    [ "attach", finding_attach_command; "create", finding_create_command ]
+    [ "attach", finding_attach_command
+    ; "create", finding_create_command
+    ; "seal", finding_seal_command
+    ]
 ;;
 
 let step_command =

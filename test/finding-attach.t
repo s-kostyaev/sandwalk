@@ -19,6 +19,20 @@ Duplicate attachment is idempotent.
   >   --relation supports
   {"ok":true,"result":{"finding":"fixture-step/fixture-finding","revision":1,"attached":false,"revised":false}}
 
+  $ sandwalk finding seal \
+  >   --slug attach-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --finding fixture-step/fixture-finding
+  {"ok":true,"result":{"finding":"fixture-step/fixture-finding","revision":1,"state":"sealed","already_sealed":false}}
+
+Sealing is idempotent.
+
+  $ sandwalk finding seal \
+  >   --slug attach-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --finding fixture-step/fixture-finding
+  {"ok":true,"result":{"finding":"fixture-step/fixture-finding","revision":1,"state":"sealed","already_sealed":true}}
+
 Changing a sealed finding creates a new draft revision.
 
   $ sandwalk finding attach \
