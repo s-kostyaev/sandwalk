@@ -32,8 +32,28 @@ module Error : sig
     | Search_wrong_phase of Sandwalk_core.Phase.t
     | Search_requires_claim
     | Hit_id_collision
+    | Hit_not_found of string
+    | Hit_not_owned_by_claim of string
+    | Fetch_wrong_phase of Sandwalk_core.Phase.t
+    | Fetch_requires_claim
+    | Snapshot_id_collision
     | Database_error of string
   [@@deriving sexp_of]
+end
+
+module Hit_for_fetch : sig
+  type t
+
+  val hit_id : t -> Sandwalk_core.Hit_id.t
+  val url : t -> string
+end
+
+module Record_snapshot_result : sig
+  type t
+
+  val previous_schema_version : t -> int
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t option
+  val lease_expires_unix_seconds : t -> int64 option
 end
 
 module Stored_hit : sig
@@ -245,3 +265,28 @@ val record_search
   -> now_unix_seconds:int64
   -> unit
   -> (Record_search_result.t, Error.t) Result.t
+
+val hit_for_fetch
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> hit_id:Sandwalk_core.Hit_id.t
+  -> unit
+  -> (Hit_for_fetch.t, Error.t) Result.t
+
+val record_snapshot
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t option
+  -> hit_id:Sandwalk_core.Hit_id.t
+  -> snapshot_id:Sandwalk_core.Snapshot_id.t
+  -> artifact_path:string
+  -> final_url:string
+  -> input_sha256:string
+  -> markdown_sha256:string
+  -> manifest_json:string
+  -> now:string
+  -> now_unix_seconds:int64
+  -> unit
+  -> (Record_snapshot_result.t, Error.t) Result.t

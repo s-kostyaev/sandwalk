@@ -147,6 +147,13 @@ Searches in `researching` require the active step claim and renew its lease only
 after the bounded adapter response and minted hit references commit. Adapter
 execution occurs before the short persistence transaction.
 
+Fetches in `researching` likewise require the active claim for the step that
+owns the hit. The adapter runs outside SQLite, writes into
+`artifacts/temporary/`, and must publish a valid manifest and non-empty
+Markdown document. Sandwalk then atomically renames that directory to its
+immutable `snap_...` path before recording snapshot provenance and renewing the
+claim in one short transaction.
+
 ## Plan
 
 The plan is canonical structured state in SQLite. `exports/research-plan.md` is

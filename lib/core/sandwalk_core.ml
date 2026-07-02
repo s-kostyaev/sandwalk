@@ -252,6 +252,24 @@ module Hit_id = struct
   let to_string t = t
 end
 
+module Snapshot_id = struct
+  type t = string
+
+  let of_string value =
+    if
+      String.length value = 37
+      && String.is_prefix value ~prefix:"snap_"
+      && String.drop_prefix value 5
+         |> String.for_all ~f:(function
+           | '0' .. '9' | 'a' .. 'f' -> true
+           | _ -> false)
+    then Some value
+    else None
+  ;;
+
+  let to_string t = t
+end
+
 module Step_state = struct
   type t =
     | Pending

@@ -197,7 +197,12 @@ let status_error = function
   | Claim_expired _
   | Search_wrong_phase _
   | Search_requires_claim
-  | Hit_id_collision ->
+  | Hit_id_collision
+  | Hit_not_found _
+  | Hit_not_owned_by_claim _
+  | Fetch_wrong_phase _
+  | Fetch_requires_claim
+  | Snapshot_id_collision ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -2007,6 +2012,401 @@ let search_error = function
   | error -> claim_error error
 ;;
 
+let fetch_error = function
+  | Sandwalk_store.Error.Hit_not_found reference ->
+    "HIT_NOT_FOUND", sprintf "Search hit %S does not exist." reference
+  | Hit_not_owned_by_claim reference ->
+    "HIT_NOT_OWNED_BY_CLAIM",
+    sprintf "Search hit %S belongs to another research step." reference
+  | Fetch_wrong_phase _ ->
+    "FETCH_NOT_ALLOWED", "Fetch is not allowed in the current phase."
+  | Fetch_requires_claim ->
+    "FETCH_REQUIRES_CLAIM", "Research fetch requires an active claim."
+  | Snapshot_id_collision ->
+    "SNAPSHOT_ID_COLLISION", "Could not allocate a unique snapshot reference."
+  | error -> claim_error error
+;;
+
+let fetch_command =
+  Async.Command.async
+    ~summary:"Fetch one owned search hit into an immutable snapshot."
+    (let%map_open.Command hit_text = anon ("HIT" %: string)
+     and slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag
+         "--directory-prefix"
+         (optional string)
+         ~doc:"PATH Parent directory for Sandwalk workspaces"
+     and claim_text =
+       flag "--claim" (optional string) ~doc:"CLAIM Active research claim"
+     and adapter =
+       flag
+         "--adapter"
+         (optional_with_default "sandwalk-fetch-curl-pandoc" string)
+         ~doc:"PATH Fetch adapter executable"
+     in
+     fun () ->
+       match
+         Sandwalk_core.Slug.of_string slug_text, Sandwalk_core.Hit_id.of_string hit_text
+       with
+       | Error error, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, None ->
+         print_failure_and_exit
+           ~code:"INVALID_HIT"
+           ~message:"Search-hit reference is invalid."
+       | Ok slug, Some hit_id ->
+         let claim_id =
+           match claim_text with
+           | None -> Ok None
+           | Some value ->
+             Sandwalk_core.Claim_id.of_string value
+             |> Result.of_option ~error:"Claim identifier is invalid."
+             |> Result.map ~f:Option.some
+         in
+         (match claim_id with
+          | Error message ->
+            print_failure_and_exit ~code:"INVALID_CLAIM" ~message
+          | Ok claim_id ->
+            let directory_prefix =
+              Sandwalk_runtime.resolve_directory_prefix
+                ~command_line:directory_prefix
+            in
+            let workspace =
+              Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+            in
+            let%bind database_exists =
+              Async.Sys.file_exists_exn
+                (Sandwalk_runtime.Workspace.database_path workspace)
+            in
+            if not database_exists
+            then
+              print_failure_and_exit
+                ~code:"WORKSPACE_NOT_FOUND"
+                ~message:"Workspace does not exist."
+            else (
+              let%bind hit =
+                In_thread.run (fun () ->
+                  Sandwalk_store.hit_for_fetch
+                    ~database_path:
+                      (Sandwalk_runtime.Workspace.database_path workspace)
+                    ~expected_slug:slug
+                    ~hit_id
+                    ())
+              in
+              match hit with
+              | Error error ->
+                let code, message = fetch_error error in
+                print_failure_and_exit ~code ~message
+              | Ok hit ->
+                let%bind status =
+                  In_thread.run (fun () ->
+                    Sandwalk_store.read_status
+                      ~database_path:
+                        (Sandwalk_runtime.Workspace.database_path workspace)
+                      ~expected_slug:slug
+                      ())
+                in
+                (match status with
+                 | Error error ->
+                   let code, message = status_error error in
+                   print_failure_and_exit ~code ~message
+                 | Ok status
+                   when Sandwalk_core.Phase.equal
+                          (Sandwalk_store.Workspace_status.phase status)
+                          Sandwalk_core.Phase.Researching
+                        && Option.is_none claim_id ->
+                   print_failure_and_exit
+                     ~code:"FETCH_REQUIRES_CLAIM"
+                     ~message:"Research fetch requires an active claim."
+                 | Ok _ ->
+                   let started_at = Time_float_unix.now () in
+                   let%bind invocation_id, snapshot_id =
+                     Deferred.both
+                       (In_thread.run (fun () ->
+                          Sandwalk_runtime.invocation_id ~now:started_at))
+                       (In_thread.run Sandwalk_runtime.snapshot_id)
+                   in
+                   let temporary_path =
+                     Sandwalk_runtime.Workspace.temporary_fetch_path
+                       workspace
+                       ~invocation_id
+                   in
+                   let snapshot_path =
+                     Sandwalk_runtime.Workspace.snapshot_path workspace snapshot_id
+                   in
+                   let url = Sandwalk_store.Hit_for_fetch.url hit in
+                   let arguments =
+                     `Assoc
+                       [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                       ; "directory_prefix", `String directory_prefix
+                       ; "hit", `String hit_text
+                       ; "adapter", `String adapter
+                       ; ( "claim"
+                         , Option.value_map
+                             claim_text
+                             ~default:`Null
+                             ~f:(fun value -> `String value) )
+                       ]
+                   in
+                   let append_event
+                         ~kind
+                         ~timestamp
+                         ~phase
+                         ~state_changes
+                         ?created_references
+                         ?duration_ms
+                         ?outcome
+                         ?error_code
+                         ()
+                     =
+                     Sandwalk_runtime.Audit.append
+                       ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                       (Sandwalk_protocol.Audit_event.create
+                          ~invocation_id
+                          ~timestamp
+                          ~kind
+                          ~command:"fetch"
+                          ~arguments
+                          ~phase
+                          ?claim:claim_text
+                          ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                          ~state_changes
+                          ~consumed_references:
+                            (hit_text :: Option.to_list claim_text)
+                          ?created_references
+                          ?duration_ms
+                          ?outcome
+                          ?error_code
+                          ())
+                   in
+                   let fail_with_audit ~code ~message =
+                     let finished_at = Time_float_unix.now () in
+                     let duration_ms =
+                       Time_float.diff finished_at started_at
+                       |> Time_float.Span.to_ms
+                       |> Float.iround_nearest_exn
+                     in
+                     let%bind logged =
+                       append_event
+                         ~kind:`Failed
+                         ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                         ~phase:None
+                         ~state_changes:[]
+                         ~duration_ms
+                         ~outcome:"failure"
+                         ~error_code:code
+                         ()
+                     in
+                     match logged with
+                     | Error _ ->
+                       print_failure_and_exit
+                         ~code:"AUDIT_LOG_ERROR"
+                         ~message:"Could not append workspace audit log."
+                     | Ok () -> print_failure_and_exit ~code ~message
+                   in
+                   let%bind started =
+                     append_event
+                       ~kind:`Started
+                       ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                       ~phase:None
+                       ~state_changes:[]
+                       ()
+                   in
+                   (match started with
+                    | Error _ ->
+                      print_failure_and_exit
+                        ~code:"AUDIT_LOG_ERROR"
+                        ~message:"Could not append workspace audit log."
+                    | Ok () ->
+                      let%bind () =
+                        Unix.mkdir ~p:() (Filename.dirname snapshot_path)
+                      in
+                      let%bind () = Unix.mkdir ~p:() temporary_path in
+                      let request =
+                        Sandwalk_protocol.Fetch_adapter.request
+                          ~url
+                          ~output_directory:temporary_path
+                      in
+                      let%bind adapter_output =
+                        Sandwalk_runtime.Adapter.run_json
+                          ~executable:adapter
+                          ~request
+                          ~timeout:(Time_float.Span.of_sec 120.)
+                          ~maximum_output_bytes:65_536
+                      in
+                      (match adapter_output with
+                       | Error _ ->
+                         fail_with_audit
+                           ~code:"FETCH_ADAPTER_FAILED"
+                           ~message:"Fetch adapter failed."
+                       | Ok _ ->
+                         let manifest_path =
+                           Filename.concat temporary_path "manifest.json"
+                         in
+                         let document_path =
+                           Filename.concat temporary_path "document.md"
+                         in
+                         let%bind manifest_input, document_input =
+                           Deferred.both
+                             (Sandwalk_runtime.File_input.read
+                                ~path:manifest_path
+                                ~maximum_bytes:262_144)
+                             (Sandwalk_runtime.File_input.read
+                                ~path:document_path
+                                ~maximum_bytes:52_428_800)
+                         in
+                         (match manifest_input, document_input with
+                          | Error _, _ | _, Error _ ->
+                            fail_with_audit
+                              ~code:"FETCH_ARTIFACT_ERROR"
+                              ~message:"Fetch adapter omitted required artifacts."
+                          | Ok manifest_input, Ok document_input ->
+                            if Sandwalk_runtime.File_input.size document_input = 0
+                            then
+                              fail_with_audit
+                                ~code:"FETCH_ARTIFACT_ERROR"
+                                ~message:"Fetched Markdown document is empty."
+                            else (
+                              let manifest_json =
+                                Sandwalk_runtime.File_input.content manifest_input
+                              in
+                              let decoded =
+                                try
+                                  manifest_json
+                                  |> Yojson.Safe.from_string
+                                  |> Sandwalk_protocol.Fetch_adapter.manifest
+                                with
+                                | _ ->
+                                  Error
+                                    Sandwalk_protocol.Fetch_adapter.Invalid_manifest
+                              in
+                              match decoded with
+                              | Error _ ->
+                                fail_with_audit
+                                  ~code:"FETCH_PROTOCOL_ERROR"
+                                  ~message:"Fetch manifest is invalid."
+                              | Ok manifest ->
+                                let%bind published =
+                                  Deferred.Or_error.try_with (fun () ->
+                                    Unix.rename
+                                      ~src:temporary_path
+                                      ~dst:snapshot_path)
+                                in
+                                (match published with
+                                 | Error _ ->
+                                   fail_with_audit
+                                     ~code:"WORKSPACE_IO_ERROR"
+                                     ~message:
+                                       "Could not publish immutable snapshot."
+                                 | Ok () ->
+                                   let persisted_at = Time_float_unix.now () in
+                                   let now_unix_seconds =
+                                     Time_float.to_span_since_epoch persisted_at
+                                     |> Time_float.Span.to_sec
+                                     |> Float.iround_down_exn
+                                     |> Int64.of_int
+                                   in
+                                   let%bind persisted =
+                                     In_thread.run (fun () ->
+                                       Sandwalk_store.record_snapshot
+                                         ~database_path:
+                                           (Sandwalk_runtime.Workspace.database_path
+                                              workspace)
+                                         ~expected_slug:slug
+                                         ~claim_id
+                                         ~hit_id
+                                         ~snapshot_id
+                                         ~artifact_path:snapshot_path
+                                         ~final_url:
+                                           (Sandwalk_protocol.Fetch_adapter.final_url
+                                              manifest)
+                                         ~input_sha256:
+                                           (Sandwalk_protocol.Fetch_adapter
+                                            .input_sha256
+                                              manifest)
+                                         ~markdown_sha256:
+                                           (Sandwalk_protocol.Fetch_adapter
+                                            .markdown_sha256
+                                              manifest)
+                                         ~manifest_json
+                                         ~now:
+                                           (Sandwalk_runtime.timestamp_utc
+                                              persisted_at)
+                                         ~now_unix_seconds
+                                         ())
+                                   in
+                                   (match persisted with
+                                    | Error error ->
+                                      let code, message = fetch_error error in
+                                      fail_with_audit ~code ~message
+                                    | Ok persisted ->
+                                      let reference =
+                                        Sandwalk_core.Snapshot_id.to_string
+                                          snapshot_id
+                                      in
+                                      let phase =
+                                        Option.value_map
+                                          (Sandwalk_store.Record_snapshot_result
+                                           .step_key
+                                             persisted)
+                                          ~default:"reconnaissance"
+                                          ~f:(Fn.const "researching")
+                                      in
+                                      let finished_at = Time_float_unix.now () in
+                                      let duration_ms =
+                                        Time_float.diff finished_at started_at
+                                        |> Time_float.Span.to_ms
+                                        |> Float.iround_nearest_exn
+                                      in
+                                      let%bind logged =
+                                        append_event
+                                          ~kind:`Finished
+                                          ~timestamp:
+                                            (Sandwalk_runtime.timestamp_utc
+                                               finished_at)
+                                          ~phase:(Some phase)
+                                          ~state_changes:
+                                            [ `Assoc
+                                                [ ( "entity"
+                                                  , `String "snapshot" )
+                                                ; "from", `Null
+                                                ; "to", `String reference
+                                                ]
+                                            ]
+                                          ~created_references:[ reference ]
+                                          ~duration_ms
+                                          ~outcome:"success"
+                                          ()
+                                      in
+                                      (match logged with
+                                       | Error _ ->
+                                         print_failure_and_exit
+                                           ~code:"AUDIT_LOG_ERROR"
+                                           ~message:
+                                             "Could not append workspace audit log."
+                                       | Ok () ->
+                                         let result =
+                                           `Assoc
+                                             [ "snapshot", `String reference
+                                             ; ( "document_path"
+                                               , `String
+                                                   (Filename.concat
+                                                      snapshot_path
+                                                      "document.md") )
+                                             ]
+                                         in
+                                         Sandwalk_protocol.Envelope.success
+                                           ~result
+                                           ()
+                                         |> Sandwalk_protocol.Envelope.render
+                                         |> print_endline;
+                                         Deferred.unit)))))))))))
+;;
+
 let search_command =
   Async.Command.async
     ~summary:"Run a bounded search adapter and persist provenance-owned hits."
@@ -2326,6 +2726,7 @@ let command =
   Async.Command.group
     ~summary:"Deterministic research orchestration for AI agents."
     [ "about", about_command
+    ; "fetch", fetch_command
     ; "init", init_command
     ; "plan", plan_command
     ; "resume", resume_command

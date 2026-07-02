@@ -17,6 +17,15 @@ module Workspace = struct
   let resume_path t = t.resume_path
   let research_plan_path t = t.research_plan_path
   let research_plan_lock_path t = t.research_plan_lock_path
+  let temporary_fetch_path t ~invocation_id =
+    Filename.concat t.root ("artifacts/temporary/fetch-" ^ invocation_id)
+  ;;
+
+  let snapshot_path t snapshot_id =
+    Filename.concat
+      t.root
+      ("artifacts/snapshots/" ^ Sandwalk_core.Snapshot_id.to_string snapshot_id)
+  ;;
 
   let resolve ~directory_prefix ~slug =
     let root =
@@ -395,4 +404,13 @@ let hit_id () =
       sprintf "%02x" (Char.to_int character))
   in
   Sandwalk_core.Hit_id.of_string ("hit_" ^ suffix) |> Option.value_exn
+;;
+
+let snapshot_id () =
+  let suffix =
+    random_bits ()
+    |> String.concat_map ~f:(fun character ->
+      sprintf "%02x" (Char.to_int character))
+  in
+  Sandwalk_core.Snapshot_id.of_string ("snap_" ^ suffix) |> Option.value_exn
 ;;

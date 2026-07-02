@@ -20,6 +20,8 @@ module Workspace : sig
   val resume_path : t -> string
   val research_plan_path : t -> string
   val research_plan_lock_path : t -> string
+  val temporary_fetch_path : t -> invocation_id:string -> string
+  val snapshot_path : t -> Sandwalk_core.Snapshot_id.t -> string
 end
 
 module Audit : sig
@@ -81,3 +83,4 @@ val timestamp_utc : Time_float.t -> string
 val invocation_id : now:Time_float.t -> string
 val claim_id : unit -> Sandwalk_core.Claim_id.t
 val hit_id : unit -> Sandwalk_core.Hit_id.t
+val snapshot_id : unit -> Sandwalk_core.Snapshot_id.t

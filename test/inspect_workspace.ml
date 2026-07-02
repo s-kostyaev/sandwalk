@@ -224,6 +224,83 @@ PRAGMA user_version = 6;
 |})
 ;;
 
+let create_v7 database slug =
+  create_v6 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE search_queries (
+  query_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  query TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  claim_id TEXT REFERENCES claims(claim_id),
+  step_key TEXT REFERENCES plan_steps(step_key),
+  adapter TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE search_hits (
+  hit_ref TEXT PRIMARY KEY CHECK (
+    length(hit_ref) = 36
+    AND substr(hit_ref, 1, 4) = 'hit_'
+    AND substr(hit_ref, 5) NOT GLOB '*[^a-f0-9]*'
+  ),
+  query_id INTEGER NOT NULL REFERENCES search_queries(query_id),
+  position INTEGER NOT NULL CHECK (position >= 1),
+  url TEXT NOT NULL,
+  title TEXT NOT NULL,
+  snippet TEXT NOT NULL,
+  UNIQUE (query_id, position)
+);
+UPDATE plan_metadata
+SET revision = 2, validated_revision = 2, sealed_revision = 2;
+INSERT INTO plan_steps (step_key, title, position, required, created_at)
+VALUES (
+  'completed-step', 'Completed fixture step', 2, 1,
+  '2026-01-01 00:00:00Z'
+);
+INSERT INTO step_executions (
+  step_key, state, active_claim_id, lease_expires_unix_seconds, attempt
+) VALUES ('completed-step', 'completed', NULL, NULL, 1);
+INSERT INTO claims (
+  claim_id, step_key, attempt, issued_at, lease_expires_at,
+  lease_expires_unix_seconds, ended_at, end_reason, lease_duration_seconds
+) VALUES (
+  'claim_00000000000000000000000000000002', 'completed-step', 1,
+  '2026-01-01 00:00:00Z', '2026-01-01 00:15:00Z', 1767226500,
+  '2026-01-01 00:10:00Z', 'completed', 900
+);
+INSERT INTO search_queries (
+  query, phase, claim_id, step_key, adapter, created_at
+) VALUES (
+  'fixture query', 'researching',
+  'claim_00000000000000000000000000000001', 'fixture-step',
+  'fixture-search', '2026-01-01 00:00:00Z'
+);
+INSERT INTO search_hits (hit_ref, query_id, position, url, title, snippet)
+VALUES (
+  'hit_00000000000000000000000000000001', 1, 1,
+  'https://example.test/start', 'Fixture result', 'Fixture snippet.'
+);
+INSERT INTO search_queries (
+  query, phase, claim_id, step_key, adapter, created_at
+) VALUES (
+  'completed fixture query', 'researching',
+  'claim_00000000000000000000000000000002', 'completed-step',
+  'fixture-search', '2026-01-01 00:00:00Z'
+);
+INSERT INTO search_hits (hit_ref, query_id, position, url, title, snippet)
+VALUES (
+  'hit_00000000000000000000000000000002', 2, 1,
+  'https://example.test/completed', 'Completed result', 'Completed snippet.'
+);
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (7, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 7;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -270,6 +347,17 @@ ORDER BY position
 |}
 ;;
 
+let inspect_snapshots database =
+  print_query
+    database
+    {|
+SELECT length(snapshot_ref), hit_ref, final_url,
+       length(input_sha256), length(markdown_sha256), artifact_path
+FROM snapshots
+ORDER BY retrieved_at, snapshot_ref
+|}
+;;
+
 let () =
   let action, path =
     match Sys.argv with
@@ -279,9 +367,11 @@ let () =
     | [| _; "--create-v4"; path; slug |] -> `Create (4, slug), path
     | [| _; "--create-v5"; path; slug |] -> `Create (5, slug), path
     | [| _; "--create-v6"; path; slug |] -> `Create (6, slug), path
+    | [| _; "--create-v7"; path; slug |] -> `Create (7, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
+    | [| _; "--inspect-snapshots"; path |] -> `Inspect_snapshots, path
     | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
     | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
@@ -297,11 +387,13 @@ let () =
       | `Create (4, slug) -> create_v4 database slug
       | `Create (5, slug) -> create_v5 database slug
       | `Create (6, slug) -> create_v6 database slug
+      | `Create (7, slug) -> create_v7 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
       | `Inspect_checkpoints -> inspect_checkpoints database
       | `Inspect_hits -> inspect_hits database
+      | `Inspect_snapshots -> inspect_snapshots database
       | `Expire_claim step ->
         let statement =
           Sqlite3.prepare

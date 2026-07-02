@@ -32,8 +32,35 @@ module Error = struct
     | Search_wrong_phase of Sandwalk_core.Phase.t
     | Search_requires_claim
     | Hit_id_collision
+    | Hit_not_found of string
+    | Hit_not_owned_by_claim of string
+    | Fetch_wrong_phase of Sandwalk_core.Phase.t
+    | Fetch_requires_claim
+    | Snapshot_id_collision
     | Database_error of string
   [@@deriving sexp_of]
+end
+
+module Hit_for_fetch = struct
+  type t =
+    { hit_id : Sandwalk_core.Hit_id.t
+    ; url : string
+    }
+
+  let hit_id t = t.hit_id
+  let url t = t.url
+end
+
+module Record_snapshot_result = struct
+  type t =
+    { previous_schema_version : int
+    ; step_key : Sandwalk_core.Plan_step.Key.t option
+    ; lease_expires_unix_seconds : int64 option
+    }
+
+  let previous_schema_version t = t.previous_schema_version
+  let step_key t = t.step_key
+  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Stored_hit = struct
@@ -204,7 +231,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 7
+let current_schema_version = 8
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -411,6 +438,28 @@ PRAGMA user_version = 7;
 |}
 ;;
 
+let migration_v8 =
+  {|
+CREATE TABLE snapshots (
+  snapshot_ref TEXT PRIMARY KEY CHECK (
+    length(snapshot_ref) = 37
+    AND substr(snapshot_ref, 1, 5) = 'snap_'
+    AND substr(snapshot_ref, 6) NOT GLOB '*[^a-f0-9]*'
+  ),
+  hit_ref TEXT NOT NULL REFERENCES search_hits(hit_ref),
+  claim_id TEXT REFERENCES claims(claim_id),
+  step_key TEXT REFERENCES plan_steps(step_key),
+  artifact_path TEXT NOT NULL UNIQUE,
+  final_url TEXT NOT NULL,
+  input_sha256 TEXT NOT NULL,
+  markdown_sha256 TEXT NOT NULL,
+  manifest_json TEXT NOT NULL,
+  retrieved_at TEXT NOT NULL
+);
+PRAGMA user_version = 8;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -479,10 +528,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:6 ~now)
       else Ok ()
     in
-    if from_version < 7
+    let%bind () =
+      if from_version < 7
+      then (
+        let%bind () = execute database migration_v7 in
+        insert_migration database ~version:7 ~now)
+      else Ok ()
+    in
+    if from_version < 8
     then (
-      let%bind () = execute database migration_v7 in
-      insert_migration database ~version:7 ~now)
+      let%bind () = execute database migration_v8 in
+      insert_migration database ~version:8 ~now)
     else Ok ())
 ;;
 
@@ -2033,6 +2089,297 @@ let record_search
             Ok
               { Record_search_result.previous_schema_version
               ; hits = stored_hits
+              ; step_key
+              ; lease_expires_unix_seconds
+              }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let hit_for_fetch
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~hit_id
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind slug_text, _ = query_workspace database in
+          let expected = Sandwalk_core.Slug.to_string expected_slug in
+          let%bind () =
+            if String.equal expected slug_text
+            then Ok ()
+            else
+              Error
+                (Error.Workspace_slug_mismatch
+                   { expected; actual = slug_text })
+          in
+          with_statement
+            database
+            "SELECT url FROM search_hits WHERE hit_ref = ?1"
+            ~f:(fun statement ->
+              let reference = Sandwalk_core.Hit_id.to_string hit_id in
+              let%bind () = bind_text database statement 1 reference in
+              match Sqlite3.step statement with
+              | Sqlite3.Rc.ROW ->
+                Ok { Hit_for_fetch.hit_id; url = Sqlite3.column_text statement 0 }
+              | Sqlite3.Rc.DONE -> Error (Error.Hit_not_found reference)
+              | return_code ->
+                check database return_code
+                |> Result.map ~f:(fun () -> assert false))
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let snapshot_id_exists database snapshot_id =
+  with_statement
+    database
+    "SELECT 1 FROM snapshots WHERE snapshot_ref = ?1"
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Snapshot_id.to_string snapshot_id)
+      in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW -> Ok true
+      | Sqlite3.Rc.DONE -> Ok false
+      | return_code -> check database return_code |> Result.map ~f:(Fn.const false))
+;;
+
+let query_hit_step database hit_id =
+  with_statement
+    database
+    {|
+SELECT q.step_key
+FROM search_hits AS h
+JOIN search_queries AS q ON q.query_id = h.query_id
+WHERE h.hit_ref = ?1
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let reference = Sandwalk_core.Hit_id.to_string hit_id in
+      let%bind () = bind_text database statement 1 reference in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        (match Sqlite3.column statement 0 with
+         | Sqlite3.Data.NULL -> Ok None
+         | Sqlite3.Data.TEXT value ->
+           Sandwalk_core.Plan_step.Key.of_string value
+           |> Result.ok
+           |> Result.of_option
+                ~error:(Error.Database_error "Invalid persisted search-hit step.")
+           |> Result.map ~f:Option.some
+         | _ -> Error (Error.Database_error "Invalid persisted search-hit step."))
+      | Sqlite3.Rc.DONE -> Error (Error.Hit_not_found reference)
+      | return_code ->
+        check database return_code |> Result.map ~f:(Fn.const None))
+;;
+
+let insert_snapshot
+      database
+      ~hit_id
+      ~claim_id
+      ~step_key
+      ~snapshot_id
+      ~artifact_path
+      ~final_url
+      ~input_sha256
+      ~markdown_sha256
+      ~manifest_json
+      ~now
+  =
+  with_statement
+    database
+    {|
+INSERT INTO snapshots (
+  snapshot_ref, hit_ref, claim_id, step_key, artifact_path, final_url,
+  input_sha256, markdown_sha256, manifest_json, retrieved_at
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let optional_text index value =
+        check database (Sqlite3.bind statement index (Sqlite3.Data.opt_text value))
+      in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Snapshot_id.to_string snapshot_id)
+      in
+      let%bind () =
+        bind_text database statement 2 (Sandwalk_core.Hit_id.to_string hit_id)
+      in
+      let%bind () =
+        optional_text 3 (Option.map claim_id ~f:Sandwalk_core.Claim_id.to_string)
+      in
+      let%bind () =
+        optional_text
+          4
+          (Option.map step_key ~f:Sandwalk_core.Plan_step.Key.to_string)
+      in
+      let%bind () = bind_text database statement 5 artifact_path in
+      let%bind () = bind_text database statement 6 final_url in
+      let%bind () = bind_text database statement 7 input_sha256 in
+      let%bind () = bind_text database statement 8 markdown_sha256 in
+      let%bind () = bind_text database statement 9 manifest_json in
+      let%bind () = bind_text database statement 10 now in
+      step_done database statement)
+;;
+
+let record_snapshot
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~claim_id
+      ~hit_id
+      ~snapshot_id
+      ~artifact_path
+      ~final_url
+      ~input_sha256
+      ~markdown_sha256
+      ~manifest_json
+      ~now
+      ~now_unix_seconds
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind previous_schema_version = query_schema_version database in
+            let%bind () =
+              migrate database ~from_version:previous_schema_version ~now
+            in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind step_key, lease_expires_unix_seconds =
+              match phase, claim_id with
+              | Sandwalk_core.Phase.Reconnaissance, None -> Ok (None, None)
+              | Sandwalk_core.Phase.Researching, None ->
+                Error Error.Fetch_requires_claim
+              | Sandwalk_core.Phase.Researching, Some claim_id ->
+                let%bind step_key, state, active_claim_id, expiry, duration =
+                  query_claim_for_checkpoint database claim_id
+                in
+                let claim_text = Sandwalk_core.Claim_id.to_string claim_id in
+                let%bind () =
+                  if
+                    Sandwalk_core.Step_state.equal
+                      state
+                      Sandwalk_core.Step_state.Claimed
+                    && Option.value_map
+                         active_claim_id
+                         ~default:false
+                         ~f:(String.equal claim_text)
+                  then Ok ()
+                  else Error Error.Claim_not_active
+                in
+                let expiry = Option.value_exn expiry in
+                let%bind () =
+                  if Int64.(expiry <= now_unix_seconds)
+                  then
+                    Error
+                      (Error.Claim_expired
+                         (Sandwalk_core.Plan_step.Key.to_string step_key))
+                  else Ok ()
+                in
+                Ok
+                  ( Some step_key
+                  , Some Int64.(now_unix_seconds + of_int duration) )
+              | Sandwalk_core.Phase.Reconnaissance, Some _ ->
+                Error Error.Claim_not_active
+              | _ -> Error (Error.Fetch_wrong_phase phase)
+            in
+            let reference = Sandwalk_core.Hit_id.to_string hit_id in
+            let%bind hit_step_key = query_hit_step database hit_id in
+            let%bind () =
+              match step_key, hit_step_key with
+              | Some active_step, Some owner
+                when not
+                       (String.equal
+                          (Sandwalk_core.Plan_step.Key.to_string active_step)
+                          (Sandwalk_core.Plan_step.Key.to_string owner)) ->
+                Error (Error.Hit_not_owned_by_claim reference)
+              | Some _, None ->
+                Error (Error.Hit_not_owned_by_claim reference)
+              | None, _ | Some _, Some _ -> Ok ()
+            in
+            let%bind collision = snapshot_id_exists database snapshot_id in
+            let%bind () =
+              if collision then Error Error.Snapshot_id_collision else Ok ()
+            in
+            let%bind () =
+              insert_snapshot
+                database
+                ~hit_id
+                ~claim_id
+                ~step_key
+                ~snapshot_id
+                ~artifact_path
+                ~final_url
+                ~input_sha256
+                ~markdown_sha256
+                ~manifest_json
+                ~now
+            in
+            let%bind () =
+              match claim_id, step_key, lease_expires_unix_seconds with
+              | Some claim_id, Some step_key, Some expiry ->
+                renew_claim
+                  database
+                  ~claim_id
+                  ~step_key
+                  ~lease_expires_unix_seconds:expiry
+              | _ -> Ok ()
+            in
+            Ok
+              { Record_snapshot_result.previous_schema_version
               ; step_key
               ; lease_expires_unix_seconds
               }

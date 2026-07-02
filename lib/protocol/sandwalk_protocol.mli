@@ -75,6 +75,8 @@ module Search_adapter : sig
 end
 
 module Fetch_adapter : sig
+  type manifest
+
   type error =
     | Invalid_manifest
     | Unsupported_protocol
@@ -82,5 +84,9 @@ module Fetch_adapter : sig
   [@@deriving sexp_of]
 
   val request : url:string -> output_directory:string -> Yojson.Safe.t
+  val manifest : Yojson.Safe.t -> (manifest, error) Result.t
   val validate_manifest : Yojson.Safe.t -> (unit, error) Result.t
+  val final_url : manifest -> string
+  val input_sha256 : manifest -> string
+  val markdown_sha256 : manifest -> string
 end

@@ -253,6 +253,12 @@ module Search_adapter = struct
 end
 
 module Fetch_adapter = struct
+  type manifest =
+    { final_url : string
+    ; input_sha256 : string
+    ; markdown_sha256 : string
+    }
+
   type error =
     | Invalid_manifest
     | Unsupported_protocol
@@ -267,21 +273,63 @@ module Fetch_adapter = struct
       ]
   ;;
 
-  let validate_manifest = function
+  let assoc_field fields name =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`Assoc value) -> Some value
+    | Some _ | None -> None
+  ;;
+
+  let string_field fields name =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`String value) -> Some value
+    | Some _ | None -> None
+  ;;
+
+  let sha256 value =
+    String.length value = 64
+    && String.for_all value ~f:(function
+      | '0' .. '9' | 'a' .. 'f' -> true
+      | _ -> false)
+  ;;
+
+  let manifest = function
     | `Assoc fields ->
       (match List.Assoc.find fields "protocol" ~equal:String.equal with
        | Some (`String "sandwalk.fetch-manifest.v1") ->
-         (match List.Assoc.find fields "queryability_check" ~equal:String.equal with
-          | Some (`Assoc queryability) ->
-            (match List.Assoc.find queryability "ok" ~equal:String.equal with
-             | Some (`Bool true) -> Ok ()
-             | Some (`Bool false) -> Error Queryability_check_failed
-             | Some _ | None -> Error Invalid_manifest)
+         let open Option.Let_syntax in
+         let parsed =
+           let%bind final_url = string_field fields "final_url" in
+           let%bind hashes = assoc_field fields "hashes" in
+           let%bind input_sha256 = string_field hashes "input_sha256" in
+           let%bind markdown_sha256 =
+             string_field hashes "normalized_markdown_sha256"
+           in
+           let%bind queryability = assoc_field fields "queryability_check" in
+           let%bind queryable =
+             match List.Assoc.find queryability "ok" ~equal:String.equal with
+             | Some (`Bool value) -> Some value
+             | Some _ | None -> None
+           in
+           Some (final_url, input_sha256, markdown_sha256, queryable)
+         in
+         (match parsed with
+          | Some (_, _, _, false) -> Error Queryability_check_failed
+          | Some (final_url, input_sha256, markdown_sha256, true)
+            when (String.is_prefix final_url ~prefix:"http://"
+                  || String.is_prefix final_url ~prefix:"https://")
+                 && sha256 input_sha256
+                 && sha256 markdown_sha256 ->
+            Ok { final_url; input_sha256; markdown_sha256 }
           | Some _ | None -> Error Invalid_manifest)
        | Some (`String _) -> Error Unsupported_protocol
        | Some _ | None -> Error Invalid_manifest)
     | _ -> Error Invalid_manifest
   ;;
+
+  let validate_manifest json = manifest json |> Result.map ~f:ignore
+  let final_url t = t.final_url
+  let input_sha256 t = t.input_sha256
+  let markdown_sha256 t = t.markdown_sha256
 end
 
 let%expect_test "renders a compact failure with one next command" =
@@ -401,6 +449,12 @@ let%expect_test "search adapter responses are versioned and bounded" =
 let%expect_test "fetch manifests require a successful mq gate" =
   `Assoc
     [ "protocol", `String "sandwalk.fetch-manifest.v1"
+    ; "final_url", `String "https://example.test"
+    ; ( "hashes"
+      , `Assoc
+          [ "input_sha256", `String (String.make 64 'a')
+          ; "normalized_markdown_sha256", `String (String.make 64 'b')
+          ] )
     ; "queryability_check", `Assoc [ "ok", `Bool false ]
     ]
   |> Fetch_adapter.validate_manifest
