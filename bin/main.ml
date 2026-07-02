@@ -237,7 +237,9 @@ let status_error = function
   | Plan_dependency_wrong_phase _
   | Plan_dependency_self
   | Plan_dependency_exists
-  | Plan_dependency_cycle ->
+  | Plan_dependency_cycle
+  | Recon_start_wrong_phase _
+  | Recon_not_active _ ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -2133,6 +2135,304 @@ let plan_command =
     ; "seal", plan_seal_command
     ; "set-objective", plan_set_objective_command
     ; "validate", plan_validate_command
+    ]
+;;
+
+let recon_error = function
+  | Sandwalk_store.Error.Recon_start_wrong_phase _ ->
+    "RECON_START_NOT_ALLOWED", "Reconnaissance cannot start in this phase."
+  | Recon_not_active _ ->
+    "RECON_NOT_ACTIVE", "Reconnaissance is not active."
+  | error -> status_error error
+;;
+
+let recon_file_command kind =
+  let summary, file_flag, file_doc, command_name =
+    match kind with
+    | `Start ->
+      ( "Start bounded reconnaissance."
+      , "--goal-file"
+      , "PATH Reconnaissance goal"
+      , "recon start" )
+    | `Observation ->
+      ( "Add a bounded reconnaissance observation."
+      , "--text-file"
+      , "PATH Observation text"
+      , "recon add-observation" )
+    | `Finish ->
+      ( "Finish reconnaissance with a bounded summary."
+      , "--summary-file"
+      , "PATH Reconnaissance summary"
+      , "recon finish" )
+  in
+  Async.Command.async
+    ~summary
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and file_path = flag file_flag (required string) ~doc:file_doc in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let%bind input =
+             Sandwalk_runtime.File_input.read
+               ~path:file_path
+               ~maximum_bytes:Sandwalk_core.Recon_document.maximum_bytes
+           in
+           match input with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"RECON_FILE_ERROR"
+               ~message:"Could not read bounded reconnaissance text."
+           | Ok input ->
+             (match
+                Sandwalk_core.Recon_document.create
+                  (Sandwalk_runtime.File_input.content input)
+              with
+              | Error Empty ->
+                print_failure_and_exit
+                  ~code:"RECON_TEXT_EMPTY"
+                  ~message:"Reconnaissance text must not be empty."
+              | Error Too_large ->
+                print_failure_and_exit
+                  ~code:"RECON_TEXT_TOO_LARGE"
+                  ~message:"Reconnaissance text exceeds 65,536 bytes."
+              | Ok document ->
+                let started_at = Time_float_unix.now () in
+                let%bind invocation_id =
+                  In_thread.run (fun () ->
+                    Sandwalk_runtime.invocation_id ~now:started_at)
+                in
+                let arguments =
+                  `Assoc
+                    [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                    ; "directory_prefix", `String directory_prefix
+                    ; ( "file"
+                      , `Assoc
+                          [ "path", `String file_path
+                          ; "size", `Int (Sandwalk_runtime.File_input.size input)
+                          ; ( "hash"
+                            , `Assoc
+                                [ "algorithm", `String "md5"
+                                ; ( "value"
+                                  , `String
+                                      (Sandwalk_runtime.File_input.md5 input) )
+                                ] )
+                          ] )
+                    ]
+                in
+                let append_event
+                      ~kind:event_kind
+                      ~timestamp
+                      ~phase
+                      ~state_changes
+                      ?duration_ms
+                      ?outcome
+                      ?error_code
+                      ()
+                  =
+                  Sandwalk_runtime.Audit.append
+                    ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                    (Sandwalk_protocol.Audit_event.create
+                       ~invocation_id
+                       ~timestamp
+                       ~kind:event_kind
+                       ~command:command_name
+                       ~arguments
+                       ~phase
+                       ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                       ~state_changes
+                       ?duration_ms
+                       ?outcome
+                       ?error_code
+                       ())
+                in
+                let fail_with_audit ~code ~message =
+                  let finished_at = Time_float_unix.now () in
+                  let duration_ms =
+                    Time_float.diff finished_at started_at
+                    |> Time_float.Span.to_ms
+                    |> Float.iround_nearest_exn
+                  in
+                  let%bind logged =
+                    append_event
+                      ~kind:`Failed
+                      ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                      ~phase:None
+                      ~state_changes:[]
+                      ~duration_ms
+                      ~outcome:"failure"
+                      ~error_code:code
+                      ()
+                  in
+                  match logged with
+                  | Error _ ->
+                    print_failure_and_exit
+                      ~code:"AUDIT_LOG_ERROR"
+                      ~message:"Could not append workspace audit log."
+                  | Ok () -> print_failure_and_exit ~code ~message
+                in
+                let%bind started =
+                  append_event
+                    ~kind:`Started
+                    ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                    ~phase:None
+                    ~state_changes:[]
+                    ()
+                in
+                (match started with
+                 | Error _ ->
+                   print_failure_and_exit
+                     ~code:"AUDIT_LOG_ERROR"
+                     ~message:"Could not append workspace audit log."
+                 | Ok () ->
+                   let text = Sandwalk_core.Recon_document.text document in
+                   let md5 = Sandwalk_runtime.File_input.md5 input in
+                   let size = Sandwalk_runtime.File_input.size input in
+                   let now = Sandwalk_runtime.timestamp_utc started_at in
+                   let%bind result =
+                     In_thread.run (fun () ->
+                       match kind with
+                       | `Start ->
+                         Sandwalk_store.start_reconnaissance
+                           ~database_path:
+                             (Sandwalk_runtime.Workspace.database_path workspace)
+                           ~expected_slug:slug
+                           ~goal_text:text
+                           ~goal_path:file_path
+                           ~goal_md5:md5
+                           ~goal_size:size
+                           ~now
+                           ()
+                       | `Observation ->
+                         Sandwalk_store.add_reconnaissance_observation
+                           ~database_path:
+                             (Sandwalk_runtime.Workspace.database_path workspace)
+                           ~expected_slug:slug
+                           ~observation_text:text
+                           ~observation_path:file_path
+                           ~observation_md5:md5
+                           ~observation_size:size
+                           ~now
+                           ()
+                       | `Finish ->
+                         Sandwalk_store.finish_reconnaissance
+                           ~database_path:
+                             (Sandwalk_runtime.Workspace.database_path workspace)
+                           ~expected_slug:slug
+                           ~summary_text:text
+                           ~summary_path:file_path
+                           ~summary_md5:md5
+                           ~summary_size:size
+                           ~now
+                           ())
+                   in
+                   (match result with
+                    | Error error ->
+                      let code, message = recon_error error in
+                      fail_with_audit ~code ~message
+                    | Ok result ->
+                      let phase =
+                        Sandwalk_store.Recon_result.phase result
+                        |> Sandwalk_core.Phase.to_string
+                      in
+                      let finished_at = Time_float_unix.now () in
+                      let duration_ms =
+                        Time_float.diff finished_at started_at
+                        |> Time_float.Span.to_ms
+                        |> Float.iround_nearest_exn
+                      in
+                      let state_changes =
+                        match kind with
+                        | `Start ->
+                          [ `Assoc
+                              [ "entity", `String "workspace.phase"
+                              ; "from", `String "initialized"
+                              ; "to", `String phase
+                              ]
+                          ]
+                        | `Observation ->
+                          [ `Assoc
+                              [ "entity", `String "recon.observation"
+                              ; "from", `Null
+                              ; ( "to"
+                                , `Int
+                                    (Sandwalk_store.Recon_result
+                                     .observation_count
+                                       result) )
+                              ]
+                          ]
+                        | `Finish ->
+                          [ `Assoc
+                              [ "entity", `String "workspace.phase"
+                              ; "from", `String "reconnaissance"
+                              ; "to", `String phase
+                              ]
+                          ]
+                      in
+                      let%bind logged =
+                        append_event
+                          ~kind:`Finished
+                          ~timestamp:
+                            (Sandwalk_runtime.timestamp_utc finished_at)
+                          ~phase:(Some phase)
+                          ~state_changes
+                          ~duration_ms
+                          ~outcome:"success"
+                          ()
+                      in
+                      (match logged with
+                       | Error _ ->
+                         print_failure_and_exit
+                           ~code:"AUDIT_LOG_ERROR"
+                           ~message:"Could not append workspace audit log."
+                       | Ok () ->
+                         let result_json =
+                           `Assoc
+                             [ "phase", `String phase
+                             ; ( "observations"
+                               , `Int
+                                   (Sandwalk_store.Recon_result
+                                    .observation_count
+                                      result) )
+                             ]
+                         in
+                         Sandwalk_protocol.Envelope.success
+                           ~result:result_json
+                           ()
+                         |> Sandwalk_protocol.Envelope.render
+                         |> print_endline;
+                         Deferred.unit))))))
+;;
+
+let recon_command =
+  Async.Command.group
+    ~summary:"Manage bounded pre-plan reconnaissance."
+    [ "add-observation", recon_file_command `Observation
+    ; "finish", recon_file_command `Finish
+    ; "start", recon_file_command `Start
     ]
 ;;
 
@@ -6232,6 +6532,7 @@ let command =
     ; "finalize", finalize_command
     ; "init", init_command
     ; "plan", plan_command
+    ; "recon", recon_command
     ; "resume", resume_command
     ; "search", search_command
     ; "status", status_command

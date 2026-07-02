@@ -202,6 +202,27 @@ module Plan_objective = struct
   let text t = t
 end
 
+module Recon_document = struct
+  type t = string
+
+  type error =
+    | Empty
+    | Too_large
+  [@@deriving sexp_of]
+
+  let maximum_bytes = 65_536
+
+  let create text =
+    if String.is_empty (String.strip text)
+    then Error Empty
+    else if String.length text > maximum_bytes
+    then Error Too_large
+    else Ok text
+  ;;
+
+  let text t = t
+end
+
 module Plan_projection = struct
   let version ~revision ~validated ~sealed =
     (revision * 3) + if sealed then 2 else if validated then 1 else 0

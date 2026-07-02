@@ -72,6 +72,8 @@ module Error = struct
     | Plan_dependency_self
     | Plan_dependency_exists
     | Plan_dependency_cycle
+    | Recon_start_wrong_phase of Sandwalk_core.Phase.t
+    | Recon_not_active of Sandwalk_core.Phase.t
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -396,6 +398,16 @@ module Mutate_plan_result = struct
   let state t = t.state
 end
 
+module Recon_result = struct
+  type t =
+    { phase : Sandwalk_core.Phase.t
+    ; observation_count : int
+    }
+
+  let phase t = t.phase
+  let observation_count t = t.observation_count
+end
+
 module Validate_plan_result = struct
   type t =
     { previous_schema_version : int
@@ -472,7 +484,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 16
+let current_schema_version = 17
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -906,6 +918,35 @@ PRAGMA user_version = 16;
 |}
 ;;
 
+let migration_v17 =
+  {|
+CREATE TABLE reconnaissance (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  goal_text TEXT NOT NULL,
+  goal_path TEXT NOT NULL,
+  goal_md5 TEXT NOT NULL CHECK (length(goal_md5) = 32),
+  goal_size INTEGER NOT NULL CHECK (goal_size > 0 AND goal_size <= 65536),
+  started_at TEXT NOT NULL,
+  summary_text TEXT,
+  summary_path TEXT,
+  summary_md5 TEXT,
+  summary_size INTEGER,
+  finished_at TEXT
+);
+CREATE TABLE reconnaissance_observations (
+  observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  observation_text TEXT NOT NULL,
+  observation_path TEXT NOT NULL,
+  observation_md5 TEXT NOT NULL CHECK (length(observation_md5) = 32),
+  observation_size INTEGER NOT NULL CHECK (
+    observation_size > 0 AND observation_size <= 65536
+  ),
+  created_at TEXT NOT NULL
+);
+PRAGMA user_version = 17;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -1037,10 +1078,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:15 ~now)
       else Ok ()
     in
-    if from_version < 16
+    let%bind () =
+      if from_version < 16
+      then (
+        let%bind () = execute database migration_v16 in
+        insert_migration database ~version:16 ~now)
+      else Ok ()
+    in
+    if from_version < 17
     then (
-      let%bind () = execute database migration_v16 in
-      insert_migration database ~version:16 ~now)
+      let%bind () = execute database migration_v17 in
+      insert_migration database ~version:17 ~now)
     else Ok ())
 ;;
 
@@ -1730,6 +1778,297 @@ VALUES (?1, ?2, ?3)
             { Mutate_plan_result.previous_phase = phase
             ; phase_path = []
             ; state
+            }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let query_observation_count database =
+  with_statement
+    database
+    "SELECT COUNT(*) FROM reconnaissance_observations"
+    ~f:(fun statement ->
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+      | return_code ->
+        check database return_code |> Result.map ~f:(Fn.const 0))
+;;
+
+let start_reconnaissance
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~goal_text
+      ~goal_path
+      ~goal_md5
+      ~goal_size
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let path =
+              match phase with
+              | Sandwalk_core.Phase.Initialized ->
+                Ok
+                  [ Sandwalk_core.Phase.Scoping
+                  ; Sandwalk_core.Phase.Reconnaissance
+                  ]
+              | Sandwalk_core.Phase.Scoping ->
+                Ok [ Sandwalk_core.Phase.Reconnaissance ]
+              | _ -> Error (Error.Recon_start_wrong_phase phase)
+            in
+            let%bind path = path in
+            let%bind () =
+              List.fold_result path ~init:phase ~f:(fun from into ->
+                Sandwalk_core.transition ~from ~into
+                |> Result.map_error ~f:(fun _ ->
+                  Error.Recon_start_wrong_phase phase))
+              |> Result.map ~f:ignore
+            in
+            let%bind () =
+              with_statement
+                database
+                {|
+INSERT INTO reconnaissance (
+  singleton, goal_text, goal_path, goal_md5, goal_size, started_at
+) VALUES (1, ?1, ?2, ?3, ?4, ?5)
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 goal_text in
+                  let%bind () = bind_text database statement 2 goal_path in
+                  let%bind () = bind_text database statement 3 goal_md5 in
+                  let%bind () =
+                    check database (Sqlite3.bind_int statement 4 goal_size)
+                  in
+                  let%bind () = bind_text database statement 5 now in
+                  step_done database statement)
+            in
+            let%bind () =
+              update_phase
+                database
+                ~phase:Sandwalk_core.Phase.Reconnaissance
+                ~now
+            in
+            Ok
+              { Recon_result.phase = Sandwalk_core.Phase.Reconnaissance
+              ; observation_count = 0
+              }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let add_reconnaissance_observation
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~observation_text
+      ~observation_path
+      ~observation_md5
+      ~observation_size
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if
+                Sandwalk_core.Phase.equal
+                  phase
+                  Sandwalk_core.Phase.Reconnaissance
+              then Ok ()
+              else Error (Error.Recon_not_active phase)
+            in
+            let%bind () =
+              with_statement
+                database
+                {|
+INSERT INTO reconnaissance_observations (
+  observation_text, observation_path, observation_md5,
+  observation_size, created_at
+) VALUES (?1, ?2, ?3, ?4, ?5)
+|}
+                ~f:(fun statement ->
+                  let%bind () =
+                    bind_text database statement 1 observation_text
+                  in
+                  let%bind () =
+                    bind_text database statement 2 observation_path
+                  in
+                  let%bind () =
+                    bind_text database statement 3 observation_md5
+                  in
+                  let%bind () =
+                    check
+                      database
+                      (Sqlite3.bind_int statement 4 observation_size)
+                  in
+                  let%bind () = bind_text database statement 5 now in
+                  step_done database statement)
+            in
+            let%map observation_count = query_observation_count database in
+            { Recon_result.phase; observation_count }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let finish_reconnaissance
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~summary_text
+      ~summary_path
+      ~summary_md5
+      ~summary_size
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if
+                Sandwalk_core.Phase.equal
+                  phase
+                  Sandwalk_core.Phase.Reconnaissance
+              then Ok ()
+              else Error (Error.Recon_not_active phase)
+            in
+            let%bind _ =
+              Sandwalk_core.transition
+                ~from:phase
+                ~into:Sandwalk_core.Phase.Planning
+              |> Result.map_error ~f:(fun _ -> Error.Recon_not_active phase)
+            in
+            let%bind () =
+              with_statement
+                database
+                {|
+UPDATE reconnaissance
+SET summary_text = ?1, summary_path = ?2, summary_md5 = ?3,
+    summary_size = ?4, finished_at = ?5
+WHERE singleton = 1
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 summary_text in
+                  let%bind () = bind_text database statement 2 summary_path in
+                  let%bind () = bind_text database statement 3 summary_md5 in
+                  let%bind () =
+                    check database (Sqlite3.bind_int statement 4 summary_size)
+                  in
+                  let%bind () = bind_text database statement 5 now in
+                  step_done database statement)
+            in
+            let%bind observation_count = query_observation_count database in
+            let%map () =
+              update_phase database ~phase:Sandwalk_core.Phase.Planning ~now
+            in
+            { Recon_result.phase = Sandwalk_core.Phase.Planning
+            ; observation_count
             }
           in
           (match outcome with

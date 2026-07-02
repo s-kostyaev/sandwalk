@@ -97,6 +97,19 @@ module Plan_objective : sig
   val text : t -> string
 end
 
+module Recon_document : sig
+  type t
+
+  type error =
+    | Empty
+    | Too_large
+  [@@deriving sexp_of]
+
+  val maximum_bytes : int
+  val create : string -> (t, error) Result.t
+  val text : t -> string
+end
+
 module Plan_projection : sig
   val version : revision:int -> validated:bool -> sealed:bool -> int
 

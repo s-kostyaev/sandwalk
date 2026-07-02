@@ -693,6 +693,45 @@ PRAGMA user_version = 15;
 |})
 ;;
 
+let create_v16 database slug =
+  create_v15 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE plan_objective (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  objective_text TEXT NOT NULL,
+  objective_path TEXT NOT NULL,
+  objective_md5 TEXT NOT NULL CHECK (length(objective_md5) = 32),
+  objective_size INTEGER NOT NULL CHECK (
+    objective_size > 0 AND objective_size <= 65536
+  ),
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE plan_dependencies (
+  step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  dependency_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (step_key, dependency_key),
+  CHECK (step_key <> dependency_key)
+);
+INSERT INTO plan_objective (
+  singleton, objective_text, objective_path, objective_md5,
+  objective_size, updated_at
+) VALUES (
+  1, 'Fixture objective.', 'objective.md',
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 18, '2026-01-01 00:00:00Z'
+);
+INSERT INTO plan_dependencies (step_key, dependency_key, created_at)
+VALUES ('completed-step', 'fixture-step', '2026-01-01 00:00:00Z');
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (16, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 16;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -831,6 +870,22 @@ FROM finalizations
 |}
 ;;
 
+let inspect_recon database =
+  print_query
+    database
+    {|
+SELECT goal_text, summary_text, finished_at IS NOT NULL
+FROM reconnaissance
+|};
+  print_query
+    database
+    {|
+SELECT observation_id, observation_text
+FROM reconnaissance_observations
+ORDER BY observation_id
+|}
+;;
+
 let () =
   let action, path =
     match Sys.argv with
@@ -849,6 +904,7 @@ let () =
     | [| _; "--create-v13"; path; slug |] -> `Create (13, slug), path
     | [| _; "--create-v14"; path; slug |] -> `Create (14, slug), path
     | [| _; "--create-v15"; path; slug |] -> `Create (15, slug), path
+    | [| _; "--create-v16"; path; slug |] -> `Create (16, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
@@ -860,6 +916,7 @@ let () =
     | [| _; "--inspect-reports"; path |] -> `Inspect_reports, path
     | [| _; "--inspect-block-reviews"; path |] -> `Inspect_block_reviews, path
     | [| _; "--inspect-finalization"; path |] -> `Inspect_finalization, path
+    | [| _; "--inspect-recon"; path |] -> `Inspect_recon, path
     | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
     | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
@@ -884,6 +941,7 @@ let () =
       | `Create (13, slug) -> create_v13 database slug
       | `Create (14, slug) -> create_v14 database slug
       | `Create (15, slug) -> create_v15 database slug
+      | `Create (16, slug) -> create_v16 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
@@ -897,6 +955,7 @@ let () =
       | `Inspect_reports -> inspect_reports database
       | `Inspect_block_reviews -> inspect_block_reviews database
       | `Inspect_finalization -> inspect_finalization database
+      | `Inspect_recon -> inspect_recon database
       | `Expire_claim step ->
         let statement =
           Sqlite3.prepare

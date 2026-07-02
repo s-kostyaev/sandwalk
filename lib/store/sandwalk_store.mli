@@ -72,6 +72,8 @@ module Error : sig
     | Plan_dependency_self
     | Plan_dependency_exists
     | Plan_dependency_cycle
+    | Recon_start_wrong_phase of Sandwalk_core.Phase.t
+    | Recon_not_active of Sandwalk_core.Phase.t
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -280,6 +282,13 @@ module Mutate_plan_result : sig
   val state : t -> Plan_state.t
 end
 
+module Recon_result : sig
+  type t
+
+  val phase : t -> Sandwalk_core.Phase.t
+  val observation_count : t -> int
+end
+
 module Seal_plan_result : sig
   type t
 
@@ -386,6 +395,42 @@ val add_plan_dependency
   -> now:string
   -> unit
   -> (Mutate_plan_result.t, Error.t) Result.t
+
+val start_reconnaissance
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> goal_text:string
+  -> goal_path:string
+  -> goal_md5:string
+  -> goal_size:int
+  -> now:string
+  -> unit
+  -> (Recon_result.t, Error.t) Result.t
+
+val add_reconnaissance_observation
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> observation_text:string
+  -> observation_path:string
+  -> observation_md5:string
+  -> observation_size:int
+  -> now:string
+  -> unit
+  -> (Recon_result.t, Error.t) Result.t
+
+val finish_reconnaissance
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> summary_text:string
+  -> summary_path:string
+  -> summary_md5:string
+  -> summary_size:int
+  -> now:string
+  -> unit
+  -> (Recon_result.t, Error.t) Result.t
 
 val validate_plan
   :  ?busy_timeout_ms:int
