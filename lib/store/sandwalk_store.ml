@@ -72,6 +72,7 @@ module Error = struct
     | Plan_dependency_self
     | Plan_dependency_exists
     | Plan_dependency_cycle
+    | Plan_extension_wrong_phase of Sandwalk_core.Phase.t
     | Recon_start_wrong_phase of Sandwalk_core.Phase.t
     | Recon_not_active of Sandwalk_core.Phase.t
     | Gc_active_claims
@@ -369,6 +370,18 @@ module Stored_plan_step = struct
   let position t = t.position
 end
 
+module Stored_plan_extension = struct
+  type t =
+    { revision : int
+    ; step_key : Sandwalk_core.Plan_step.Key.t
+    ; reason : string
+    }
+
+  let revision t = t.revision
+  let step_key t = t.step_key
+  let reason t = t.reason
+end
+
 module Plan_state = struct
   type t =
     { phase : Sandwalk_core.Phase.t
@@ -378,6 +391,7 @@ module Plan_state = struct
     ; objective : string option
     ; steps : Stored_plan_step.t list
     ; dependencies : (string * string) list
+    ; extensions : Stored_plan_extension.t list
     }
 
   let phase t = t.phase
@@ -387,6 +401,7 @@ module Plan_state = struct
   let objective t = t.objective
   let steps t = t.steps
   let dependencies t = t.dependencies
+  let extensions t = t.extensions
 end
 
 module Mutate_plan_result = struct
@@ -489,6 +504,18 @@ module Add_plan_step_result = struct
   let dependencies t = t.dependencies
 end
 
+module Extend_plan_result = struct
+  type t =
+    { previous_schema_version : int
+    ; state : Plan_state.t
+    ; position : int
+    }
+
+  let previous_schema_version t = t.previous_schema_version
+  let state t = t.state
+  let position t = t.position
+end
+
 module Workspace_status = struct
   type t =
     { slug : Sandwalk_core.Slug.t
@@ -501,7 +528,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 18
+let current_schema_version = 19
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -978,6 +1005,25 @@ PRAGMA user_version = 18;
 |}
 ;;
 
+let migration_v19 =
+  {|
+CREATE TABLE plan_extensions (
+  revision INTEGER PRIMARY KEY CHECK (revision >= 1),
+  step_key TEXT NOT NULL UNIQUE REFERENCES plan_steps(step_key),
+  reason_text TEXT NOT NULL CHECK (
+    length(CAST(reason_text AS BLOB)) BETWEEN 1 AND 65536
+  ),
+  reason_path TEXT NOT NULL,
+  reason_md5 TEXT NOT NULL CHECK (length(reason_md5) = 32),
+  reason_size INTEGER NOT NULL CHECK (
+    reason_size > 0 AND reason_size <= 65536
+  ),
+  created_at TEXT NOT NULL
+);
+PRAGMA user_version = 19;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -1123,10 +1169,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:17 ~now)
       else Ok ()
     in
-    if from_version < 18
+    let%bind () =
+      if from_version < 18
+      then (
+        let%bind () = execute database migration_v18 in
+        insert_migration database ~version:18 ~now)
+      else Ok ()
+    in
+    if from_version < 19
     then (
-      let%bind () = execute database migration_v18 in
-      insert_migration database ~version:18 ~now)
+      let%bind () = execute database migration_v19 in
+      insert_migration database ~version:19 ~now)
     else Ok ())
 ;;
 
@@ -1574,6 +1627,38 @@ ORDER BY step_key, dependency_key
   List.rev !dependencies
 ;;
 
+let query_plan_extensions database =
+  let extensions = ref [] in
+  let open Result.Let_syntax in
+  let%map () =
+    check
+      database
+      (Sqlite3.exec
+         database
+         {|
+SELECT revision, step_key, reason_text
+FROM plan_extensions
+ORDER BY revision
+|}
+         ~cb:(fun row _headers ->
+           match row with
+           | [| Some revision; Some step_key; Some reason |] ->
+             let step_key =
+               match Sandwalk_core.Plan_step.Key.of_string step_key with
+               | Ok step_key -> step_key
+               | Error _ -> failwith "Invalid persisted extension step key."
+             in
+             extensions :=
+               { Stored_plan_extension.revision = Int.of_string revision
+               ; step_key
+               ; reason
+               }
+               :: !extensions
+           | _ -> failwith "Invalid persisted plan extension."))
+  in
+  List.rev !extensions
+;;
+
 let query_plan_state database ~schema_version =
   let open Result.Let_syntax in
   let%bind _, phase_text = query_workspace database in
@@ -1602,8 +1687,11 @@ let query_plan_state database ~schema_version =
   let%bind objective =
     if schema_version >= 16 then query_plan_objective database else Ok None
   in
-  let%map dependencies =
+  let%bind dependencies =
     if schema_version >= 16 then query_plan_dependencies database else Ok []
+  in
+  let%map extensions =
+    if schema_version >= 19 then query_plan_extensions database else Ok []
   in
   { Plan_state.phase
   ; revision
@@ -1612,6 +1700,7 @@ let query_plan_state database ~schema_version =
   ; objective
   ; steps
   ; dependencies
+  ; extensions
   }
 ;;
 
@@ -2275,6 +2364,148 @@ let add_plan_step
             ; steps
             ; objective
             ; dependencies
+            }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let extend_plan
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~step
+      ~dependencies
+      ~reason
+      ~reason_path
+      ~reason_md5
+      ~reason_size
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind previous_schema_version = query_schema_version database in
+            let%bind () =
+              migrate database ~from_version:previous_schema_version ~now
+            in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Researching
+              then Ok ()
+              else Error (Error.Plan_extension_wrong_phase phase)
+            in
+            let key =
+              Sandwalk_core.Plan_step.key step
+              |> Sandwalk_core.Plan_step.Key.to_string
+            in
+            let dependency_keys =
+              List.map dependencies ~f:Sandwalk_core.Plan_step.Key.to_string
+            in
+            let%bind exists = plan_step_exists database key in
+            let%bind () =
+              if exists
+              then Error (Error.Duplicate_plan_step key)
+              else if List.exists dependency_keys ~f:(String.equal key)
+              then Error Error.Plan_dependency_self
+              else if
+                Set.length (String.Set.of_list dependency_keys)
+                <> List.length dependency_keys
+              then Error Error.Plan_dependency_exists
+              else Ok ()
+            in
+            let%bind () =
+              List.fold_result dependency_keys ~init:() ~f:(fun () dependency ->
+                let%bind exists = plan_step_exists database dependency in
+                if exists
+                then Ok ()
+                else Error (Error.Plan_step_not_found dependency))
+            in
+            let%bind position = next_plan_position database in
+            let%bind () = insert_plan_step database ~step ~position ~now in
+            let%bind () = insert_step_execution database ~step in
+            let%bind () =
+              List.fold_result dependency_keys ~init:() ~f:(fun () dependency ->
+                with_statement
+                  database
+                  {|
+INSERT INTO plan_dependencies (step_key, dependency_key, created_at)
+VALUES (?1, ?2, ?3)
+|}
+                  ~f:(fun statement ->
+                    let%bind () = bind_text database statement 1 key in
+                    let%bind () = bind_text database statement 2 dependency in
+                    let%bind () = bind_text database statement 3 now in
+                    step_done database statement))
+            in
+            let%bind revision = increment_plan_revision database in
+            let%bind () =
+              with_statement
+                database
+                {|
+INSERT INTO plan_extensions (
+  revision, step_key, reason_text, reason_path, reason_md5,
+  reason_size, created_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+|}
+                ~f:(fun statement ->
+                  let%bind () =
+                    check database (Sqlite3.bind_int statement 1 revision)
+                  in
+                  let%bind () = bind_text database statement 2 key in
+                  let%bind () =
+                    bind_text
+                      database
+                      statement
+                      3
+                      (Sandwalk_core.Plan_extension_reason.text reason)
+                  in
+                  let%bind () = bind_text database statement 4 reason_path in
+                  let%bind () = bind_text database statement 5 reason_md5 in
+                  let%bind () =
+                    check database (Sqlite3.bind_int statement 6 reason_size)
+                  in
+                  let%bind () = bind_text database statement 7 now in
+                  step_done database statement)
+            in
+            let%bind () = mark_plan_validated database ~revision ~now in
+            let%bind () = mark_plan_sealed database ~revision ~now in
+            let%map state = query_plan_state database ~schema_version:19 in
+            { Extend_plan_result.previous_schema_version
+            ; state
+            ; position
             }
           in
           (match outcome with

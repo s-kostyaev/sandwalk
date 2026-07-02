@@ -1,5 +1,5 @@
   $ sandwalk init --slug dag-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"dag-test","phase":"initialized","schema_version":18}}
+  {"ok":true,"result":{"slug":"dag-test","phase":"initialized","schema_version":19}}
   $ printf 'Determine a small, well-sourced answer.\n' > objective.md
 
   $ sandwalk plan set-objective \
@@ -33,7 +33,7 @@ Cycles and self-dependencies are rejected transactionally.
   [1]
 
   $ sandwalk plan list --slug dag-test --directory-prefix workspaces
-  {"ok":true,"result":{"phase":"planning","revision":4,"objective":"Determine a small, well-sourced answer.\n","steps":[{"key":"collect","title":"Collect exact evidence","required":true,"position":1},{"key":"synthesize","title":"Synthesize the answer","required":true,"position":2}],"dependencies":[{"step":"synthesize","depends_on":"collect"}]}}
+  {"ok":true,"result":{"phase":"planning","revision":4,"objective":"Determine a small, well-sourced answer.\n","steps":[{"key":"collect","title":"Collect exact evidence","required":true,"position":1},{"key":"synthesize","title":"Synthesize the answer","required":true,"position":2}],"dependencies":[{"step":"synthesize","depends_on":"collect"}],"extensions":[]}}
 
   $ grep -E '^(##|Determine|1[.]|2[.]|- `)' \
   >   workspaces/dag-test/exports/research-plan.md

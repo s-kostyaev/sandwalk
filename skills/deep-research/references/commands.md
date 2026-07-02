@@ -14,6 +14,8 @@ sandwalk recon finish --slug <slug> --summary-file <summary.md>
 sandwalk plan set-objective --slug <slug> --file <objective.md>
 sandwalk plan add-step --slug <slug> --key <step> --title <title>
 sandwalk plan add-dependency <step> --slug <slug> --on <prerequisite>
+sandwalk plan extend --slug <slug> --key <new-step> --title <title> \
+  --reason-file <reason.md> [--on <prerequisite>]
 sandwalk plan list --slug <slug>
 sandwalk plan validate --slug <slug>
 sandwalk plan seal --slug <slug>
@@ -22,6 +24,9 @@ sandwalk plan seal --slug <slug>
 Reconnaissance is optional: adding the first plan step advances a newly
 initialized workspace to planning. Use lowercase hyphenated step and finding
 keys. Add all dependency edges before validation.
+
+After sealing, use `plan extend` only for a newly discovered direction. It
+atomically records one new step and its reason without changing existing steps.
 
 ## Research one step
 

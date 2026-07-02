@@ -768,6 +768,27 @@ PRAGMA user_version = 17;
 |})
 ;;
 
+let create_v18 database slug =
+  create_v17 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE raw_gc_plan (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  plan_path TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  plan_md5 TEXT NOT NULL CHECK (length(plan_md5) = 32),
+  created_at TEXT NOT NULL,
+  applied_at TEXT
+);
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (18, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 18;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -922,6 +943,16 @@ ORDER BY observation_id
 |}
 ;;
 
+let inspect_extensions database =
+  print_query
+    database
+    {|
+SELECT revision, step_key, reason_text, length(reason_md5), reason_size
+FROM plan_extensions
+ORDER BY revision
+|}
+;;
+
 let () =
   let action, path =
     match Sys.argv with
@@ -942,6 +973,7 @@ let () =
     | [| _; "--create-v15"; path; slug |] -> `Create (15, slug), path
     | [| _; "--create-v16"; path; slug |] -> `Create (16, slug), path
     | [| _; "--create-v17"; path; slug |] -> `Create (17, slug), path
+    | [| _; "--create-v18"; path; slug |] -> `Create (18, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
@@ -954,6 +986,7 @@ let () =
     | [| _; "--inspect-block-reviews"; path |] -> `Inspect_block_reviews, path
     | [| _; "--inspect-finalization"; path |] -> `Inspect_finalization, path
     | [| _; "--inspect-recon"; path |] -> `Inspect_recon, path
+    | [| _; "--inspect-extensions"; path |] -> `Inspect_extensions, path
     | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
     | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
@@ -980,6 +1013,7 @@ let () =
       | `Create (15, slug) -> create_v15 database slug
       | `Create (16, slug) -> create_v16 database slug
       | `Create (17, slug) -> create_v17 database slug
+      | `Create (18, slug) -> create_v18 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
@@ -994,6 +1028,7 @@ let () =
       | `Inspect_block_reviews -> inspect_block_reviews database
       | `Inspect_finalization -> inspect_finalization database
       | `Inspect_recon -> inspect_recon database
+      | `Inspect_extensions -> inspect_extensions database
       | `Expire_claim step ->
         let statement =
           Sqlite3.prepare

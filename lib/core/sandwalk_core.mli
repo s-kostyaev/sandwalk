@@ -97,6 +97,19 @@ module Plan_objective : sig
   val text : t -> string
 end
 
+module Plan_extension_reason : sig
+  type t
+
+  type error =
+    | Empty
+    | Too_large
+  [@@deriving sexp_of]
+
+  val maximum_bytes : int
+  val create : string -> (t, error) Result.t
+  val text : t -> string
+end
+
 module Recon_document : sig
   type t
 
@@ -116,6 +129,7 @@ module Plan_projection : sig
   val render
     :  ?objective:string
     -> ?dependencies:(string * string) list
+    -> ?extensions:(int * Plan_step.Key.t * string) list
     -> phase:Phase.t
     -> revision:int
     -> validated:bool

@@ -72,6 +72,7 @@ module Error : sig
     | Plan_dependency_self
     | Plan_dependency_exists
     | Plan_dependency_cycle
+    | Plan_extension_wrong_phase of Sandwalk_core.Phase.t
     | Recon_start_wrong_phase of Sandwalk_core.Phase.t
     | Recon_not_active of Sandwalk_core.Phase.t
     | Gc_active_claims
@@ -265,6 +266,14 @@ module Stored_plan_step : sig
   val position : t -> int
 end
 
+module Stored_plan_extension : sig
+  type t
+
+  val revision : t -> int
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val reason : t -> string
+end
+
 module Plan_state : sig
   type t
 
@@ -275,6 +284,7 @@ module Plan_state : sig
   val objective : t -> string option
   val steps : t -> Stored_plan_step.t list
   val dependencies : t -> (string * string) list
+  val extensions : t -> Stored_plan_extension.t list
 end
 
 module Mutate_plan_result : sig
@@ -339,6 +349,14 @@ module Add_plan_step_result : sig
   val dependencies : t -> (string * string) list
 end
 
+module Extend_plan_result : sig
+  type t
+
+  val previous_schema_version : t -> int
+  val state : t -> Plan_state.t
+  val position : t -> int
+end
+
 module Workspace_status : sig
   type t
 
@@ -372,6 +390,20 @@ val add_plan_step
   -> now:string
   -> unit
   -> (Add_plan_step_result.t, Error.t) Result.t
+
+val extend_plan
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> step:Sandwalk_core.Plan_step.t
+  -> dependencies:Sandwalk_core.Plan_step.Key.t list
+  -> reason:Sandwalk_core.Plan_extension_reason.t
+  -> reason_path:string
+  -> reason_md5:string
+  -> reason_size:int
+  -> now:string
+  -> unit
+  -> (Extend_plan_result.t, Error.t) Result.t
 
 val read_plan_steps
   :  ?busy_timeout_ms:int

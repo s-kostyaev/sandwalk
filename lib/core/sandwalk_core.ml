@@ -202,6 +202,27 @@ module Plan_objective = struct
   let text t = t
 end
 
+module Plan_extension_reason = struct
+  type t = string
+
+  type error =
+    | Empty
+    | Too_large
+  [@@deriving sexp_of]
+
+  let maximum_bytes = 65_536
+
+  let create text =
+    if String.is_empty (String.strip text)
+    then Error Empty
+    else if String.length text > maximum_bytes
+    then Error Too_large
+    else Ok text
+  ;;
+
+  let text t = t
+end
+
 module Recon_document = struct
   type t = string
 
@@ -231,6 +252,7 @@ module Plan_projection = struct
   let render
         ?objective
         ?(dependencies = [])
+        ?(extensions = [])
         ~phase
         ~revision
         ~validated
@@ -264,6 +286,20 @@ module Plan_projection = struct
           sprintf "- `%s` depends on `%s`" step dependency)
         @ [ "" ]
     in
+    let extension_lines =
+      if List.is_empty extensions
+      then []
+      else
+        [ "## Extensions"; "" ]
+        @ List.concat_map extensions ~f:(fun (revision, key, reason) ->
+          [ sprintf
+              "- Revision %d added `%s`"
+              revision
+              (Plan_step.Key.to_string key)
+          ; sprintf "  Reason: %S" (String.strip reason)
+          ])
+        @ [ "" ]
+    in
     String.concat
       ~sep:"\n"
       ([ sprintf
@@ -282,6 +318,7 @@ module Plan_projection = struct
        @ step_lines
        @ [ "" ]
        @ dependency_lines
+       @ extension_lines
        @ [ "" ])
   ;;
 end
@@ -1294,6 +1331,22 @@ let%test_unit "validated projections outrank pending projections at one revision
               ~validated:false
               ~sealed:false)
         sealed))
+;;
+
+let%test_unit "plan extension reasons are bounded and non-empty" =
+  (match Plan_extension_reason.create "  " with
+   | Error Empty -> ()
+   | _ -> failwith "expected empty extension reason rejection");
+  (match
+     Plan_extension_reason.create
+       (String.make (Plan_extension_reason.maximum_bytes + 1) 'x')
+   with
+   | Error Too_large -> ()
+   | _ -> failwith "expected oversized extension reason rejection");
+  (match Plan_extension_reason.create "New evidence gap." with
+   | Ok reason ->
+     [%test_eq: string] "New evidence gap." (Plan_extension_reason.text reason)
+   | Error _ -> failwith "expected valid extension reason")
 ;;
 
 let%test_unit "line excerpts preserve exact snapshot bytes" =

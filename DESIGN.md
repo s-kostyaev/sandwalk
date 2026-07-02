@@ -163,6 +163,8 @@ an atomically regenerated, read-only projection for humans and agents.
 sandwalk plan set-objective --slug <slug> --file <path>
 sandwalk plan add-step --slug <slug> --key <key> --title <title> [--optional]
 sandwalk plan add-dependency --slug <slug> <step> --on <dependency>
+sandwalk plan extend --slug <slug> --key <key> --title <title> \
+  --reason-file <path> [--on <dependency>]...
 sandwalk plan list --slug <slug>
 sandwalk plan validate --slug <slug>
 sandwalk plan seal --slug <slug>
@@ -184,8 +186,12 @@ Plan sealing requires validation of the current revision, records that revision,
 and performs the checked `planning → researching` transition. Repeating a seal
 of the same revision is idempotent.
 
-After work begins, existing steps are immutable. New steps are added through an
-append-only plan revision with a recorded reason.
+After work begins, existing steps are immutable. While the workspace remains in
+`researching`, `plan extend` atomically appends exactly one step, its optional
+edges to existing steps, and a non-empty reason of at most 64 KiB. The operation
+advances, validates, and seals the append-only plan revision in one transaction,
+so a new step is never claimable from an intermediate revision. Extension
+history is included in `plan list` and the human-readable plan projection.
 
 ## Claims, leases, and recovery
 

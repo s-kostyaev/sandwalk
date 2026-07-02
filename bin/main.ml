@@ -44,6 +44,10 @@ let explanation = function
     Some
       ( "The plan changed after validation, so the validation does not cover the current revision."
       , "Run `sandwalk plan validate --slug <slug>`, then retry sealing." )
+  | "PLAN_EXTENSION_NOT_ALLOWED" ->
+    Some
+      ( "A sealed plan can accept append-only extensions only while research is active."
+      , "Add the extension during `researching`; existing steps cannot be changed." )
   | "STEP_DEPENDENCIES_INCOMPLETE" ->
     Some
       ( "At least one declared dependency of this step has not completed."
@@ -330,6 +334,7 @@ let status_error = function
   | Plan_dependency_self
   | Plan_dependency_exists
   | Plan_dependency_cycle
+  | Plan_extension_wrong_phase _
   | Recon_start_wrong_phase _
   | Recon_not_active _
   | Gc_active_claims
@@ -761,6 +766,10 @@ let plan_error = function
     "PLAN_DEPENDENCY_EXISTS", "Plan dependency already exists."
   | Plan_dependency_cycle ->
     "PLAN_DEPENDENCY_CYCLE", "Plan dependency would create a cycle."
+  | Plan_step_not_found key ->
+    "PLAN_STEP_NOT_FOUND", sprintf "Plan step %S does not exist." key
+  | Plan_extension_wrong_phase _ ->
+    "PLAN_EXTENSION_NOT_ALLOWED", "Plan can be extended only while researching."
   | error -> status_error error
 ;;
 
@@ -782,6 +791,13 @@ let render_plan_state state =
   Sandwalk_core.Plan_projection.render
     ?objective:(Sandwalk_store.Plan_state.objective state)
     ~dependencies:(Sandwalk_store.Plan_state.dependencies state)
+    ~extensions:
+      (List.map
+         (Sandwalk_store.Plan_state.extensions state)
+         ~f:(fun extension ->
+           ( Sandwalk_store.Stored_plan_extension.revision extension
+           , Sandwalk_store.Stored_plan_extension.step_key extension
+           , Sandwalk_store.Stored_plan_extension.reason extension )))
     ~phase:(Sandwalk_store.Plan_state.phase state)
     ~revision
     ~validated
@@ -1132,6 +1148,359 @@ let plan_add_step_command =
                          |> Sandwalk_protocol.Envelope.render
                          |> print_endline;
                          Deferred.unit))))))
+;;
+
+let plan_extend_command =
+  Async.Command.async
+    ~summary:"Append one reasoned step to a sealed plan."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and key_text =
+       flag "--key" (required string) ~doc:"KEY New plan step key"
+     and title = flag "--title" (required string) ~doc:"TITLE Plan step title"
+     and optional =
+       flag "--optional" no_arg ~doc:" Mark this plan step as optional"
+     and dependencies =
+       flag "--on" (listed string) ~doc:"STEP Existing prerequisite step"
+     and reason_path =
+       flag "--reason-file" (required string) ~doc:"PATH Extension reason"
+     in
+     fun () ->
+       match
+         Sandwalk_core.Slug.of_string slug_text,
+         Sandwalk_core.Plan_step.Key.of_string key_text,
+         List.map dependencies ~f:Sandwalk_core.Plan_step.Key.of_string
+         |> Result.all
+       with
+       | Error error, _, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, Error error, _ | _, _, Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_PLAN_STEP_KEY"
+           ~message:(Sandwalk_core.Plan_step.Key.Error.message error)
+       | Ok slug, Ok key, Ok dependencies ->
+         (match
+            Sandwalk_core.Plan_step.create
+              ~key
+              ~title
+              ~required:(not optional)
+          with
+          | Error error ->
+            print_failure_and_exit
+              ~code:"INVALID_PLAN_STEP"
+              ~message:(Sandwalk_core.Plan_step.Error.message error)
+          | Ok step ->
+            let%bind reason_input =
+              Sandwalk_runtime.File_input.read
+                ~path:reason_path
+                ~maximum_bytes:
+                  Sandwalk_core.Plan_extension_reason.maximum_bytes
+            in
+            (match reason_input with
+             | Error _ ->
+               print_failure_and_exit
+                 ~code:"PLAN_EXTENSION_REASON_FILE_ERROR"
+                 ~message:"Could not read bounded plan extension reason."
+             | Ok reason_input ->
+               (match
+                  Sandwalk_core.Plan_extension_reason.create
+                    (Sandwalk_runtime.File_input.content reason_input)
+                with
+                | Error Empty ->
+                  print_failure_and_exit
+                    ~code:"PLAN_EXTENSION_REASON_EMPTY"
+                    ~message:"Plan extension reason must not be empty."
+                | Error Too_large ->
+                  print_failure_and_exit
+                    ~code:"PLAN_EXTENSION_REASON_TOO_LARGE"
+                    ~message:"Plan extension reason exceeds 65536 bytes."
+                | Ok reason ->
+                  let directory_prefix =
+                    Sandwalk_runtime.resolve_directory_prefix
+                      ~command_line:directory_prefix
+                  in
+                  let workspace =
+                    Sandwalk_runtime.Workspace.resolve
+                      ~directory_prefix
+                      ~slug
+                  in
+                  let key_text =
+                    Sandwalk_core.Plan_step.key step
+                    |> Sandwalk_core.Plan_step.Key.to_string
+                  in
+                  let dependency_texts =
+                    List.map
+                      dependencies
+                      ~f:Sandwalk_core.Plan_step.Key.to_string
+                  in
+                  let reason_argument =
+                    `Assoc
+                      [ ( "path"
+                        , `String
+                            (Sandwalk_runtime.File_input.path reason_input) )
+                      ; ( "md5"
+                        , `String
+                            (Sandwalk_runtime.File_input.md5 reason_input) )
+                      ; ( "size"
+                        , `Int
+                            (Sandwalk_runtime.File_input.size reason_input) )
+                      ]
+                  in
+                  let arguments =
+                    `Assoc
+                      [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                      ; "directory_prefix", `String directory_prefix
+                      ; "key", `String key_text
+                      ; "title", `String (Sandwalk_core.Plan_step.title step)
+                      ; ( "required"
+                        , `Bool (Sandwalk_core.Plan_step.required step) )
+                      ; ( "dependencies"
+                        , `List
+                            (List.map dependency_texts ~f:(fun dependency ->
+                               `String dependency)) )
+                      ; "reason_file", reason_argument
+                      ]
+                  in
+                  let%bind database_exists =
+                    Async.Sys.file_exists_exn
+                      (Sandwalk_runtime.Workspace.database_path workspace)
+                  in
+                  if not database_exists
+                  then
+                    print_failure_and_exit
+                      ~code:"WORKSPACE_NOT_FOUND"
+                      ~message:"Workspace does not exist."
+                  else (
+                    let started_at = Time_float_unix.now () in
+                    let%bind invocation_id =
+                      In_thread.run (fun () ->
+                        Sandwalk_runtime.invocation_id ~now:started_at)
+                    in
+                    let append_event
+                          ~kind
+                          ~timestamp
+                          ~phase
+                          ~state_changes
+                          ?duration_ms
+                          ?outcome
+                          ?error_code
+                          ()
+                      =
+                      let consumed_references, created_references =
+                        match kind with
+                        | `Finished -> dependency_texts, [ key_text ]
+                        | `Started | `Failed -> [], []
+                      in
+                      Sandwalk_runtime.Audit.append
+                        ~path:
+                          (Sandwalk_runtime.Workspace.events_path workspace)
+                        (Sandwalk_protocol.Audit_event.create
+                           ~invocation_id
+                           ~timestamp
+                           ~kind
+                           ~command:"plan extend"
+                           ~arguments
+                           ~phase
+                           ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                           ~state_changes
+                           ~consumed_references
+                           ~created_references
+                           ?duration_ms
+                           ?outcome
+                           ?error_code
+                           ())
+                    in
+                    let fail_with_audit ~phase ~code ~message =
+                      let finished_at = Time_float_unix.now () in
+                      let duration_ms =
+                        Time_float.diff finished_at started_at
+                        |> Time_float.Span.to_ms
+                        |> Float.iround_nearest_exn
+                      in
+                      let%bind logged =
+                        append_event
+                          ~kind:`Failed
+                          ~timestamp:
+                            (Sandwalk_runtime.timestamp_utc finished_at)
+                          ~phase
+                          ~state_changes:[]
+                          ~duration_ms
+                          ~outcome:"failure"
+                          ~error_code:code
+                          ()
+                      in
+                      match logged with
+                      | Error _ ->
+                        print_failure_and_exit
+                          ~code:"AUDIT_LOG_ERROR"
+                          ~message:"Could not append workspace audit log."
+                      | Ok () -> print_failure_and_exit ~code ~message
+                    in
+                    let%bind started =
+                      append_event
+                        ~kind:`Started
+                        ~timestamp:
+                          (Sandwalk_runtime.timestamp_utc started_at)
+                        ~phase:None
+                        ~state_changes:[]
+                        ()
+                    in
+                    match started with
+                    | Error _ ->
+                      print_failure_and_exit
+                        ~code:"AUDIT_LOG_ERROR"
+                        ~message:"Could not append workspace audit log."
+                    | Ok () ->
+                      let%bind extended =
+                        In_thread.run (fun () ->
+                          Sandwalk_store.extend_plan
+                            ~database_path:
+                              (Sandwalk_runtime.Workspace.database_path
+                                 workspace)
+                            ~expected_slug:slug
+                            ~step
+                            ~dependencies
+                            ~reason
+                            ~reason_path:
+                              (Sandwalk_runtime.File_input.path reason_input)
+                            ~reason_md5:
+                              (Sandwalk_runtime.File_input.md5 reason_input)
+                            ~reason_size:
+                              (Sandwalk_runtime.File_input.size reason_input)
+                            ~now:
+                              (Sandwalk_runtime.timestamp_utc started_at)
+                            ())
+                      in
+                      (match extended with
+                       | Error error ->
+                         let code, message = plan_error error in
+                         let phase =
+                           match error with
+                           | Sandwalk_store.Error.Plan_extension_wrong_phase
+                               phase ->
+                             Some (Sandwalk_core.Phase.to_string phase)
+                           | _ -> None
+                         in
+                         fail_with_audit ~phase ~code ~message
+                       | Ok extended ->
+                         let state =
+                           Sandwalk_store.Extend_plan_result.state extended
+                         in
+                         let revision =
+                           Sandwalk_store.Plan_state.revision state
+                         in
+                         let phase = Sandwalk_store.Plan_state.phase state in
+                         let state_changes =
+                           let previous_schema_version =
+                             Sandwalk_store.Extend_plan_result
+                             .previous_schema_version
+                               extended
+                           in
+                           (if
+                              previous_schema_version
+                              < Sandwalk_store.current_schema_version
+                            then
+                              [ `Assoc
+                                  [ "entity", `String "workspace.schema"
+                                  ; "from", `Int previous_schema_version
+                                  ; ( "to"
+                                    , `Int
+                                        Sandwalk_store.current_schema_version )
+                                  ]
+                              ]
+                            else [])
+                           @ [ `Assoc
+                                 [ "entity", `String "plan.step"
+                                 ; "from", `Null
+                                 ; "to", `String key_text
+                                 ]
+                             ; `Assoc
+                                 [ "entity", `String "plan.revision"
+                                 ; "from", `Int (revision - 1)
+                                 ; "to", `Int revision
+                                 ]
+                             ]
+                         in
+                         let%bind written =
+                           write_plan_state workspace ~invocation_id state
+                         in
+                         (match written with
+                          | Error _ ->
+                            fail_with_audit
+                              ~phase:
+                                (Some
+                                   (Sandwalk_core.Phase.to_string phase))
+                              ~code:"WORKSPACE_IO_ERROR"
+                              ~message:
+                                "Could not write research plan projection."
+                          | Ok () ->
+                            let finished_at = Time_float_unix.now () in
+                            let duration_ms =
+                              Time_float.diff finished_at started_at
+                              |> Time_float.Span.to_ms
+                              |> Float.iround_nearest_exn
+                            in
+                            let%bind logged =
+                              append_event
+                                ~kind:`Finished
+                                ~timestamp:
+                                  (Sandwalk_runtime.timestamp_utc finished_at)
+                                ~phase:
+                                  (Some
+                                     (Sandwalk_core.Phase.to_string phase))
+                                ~state_changes
+                                ~duration_ms
+                                ~outcome:"success"
+                                ()
+                            in
+                            (match logged with
+                             | Error _ ->
+                               print_failure_and_exit
+                                 ~code:"AUDIT_LOG_ERROR"
+                                 ~message:
+                                   "Could not append workspace audit log."
+                             | Ok () ->
+                               let result =
+                                 `Assoc
+                                   [ "key", `String key_text
+                                   ; ( "title"
+                                     , `String
+                                         (Sandwalk_core.Plan_step.title step) )
+                                   ; ( "required"
+                                     , `Bool
+                                         (Sandwalk_core.Plan_step.required
+                                            step) )
+                                   ; ( "position"
+                                     , `Int
+                                         (Sandwalk_store.Extend_plan_result
+                                          .position
+                                            extended) )
+                                   ; "revision", `Int revision
+                                   ; ( "dependencies"
+                                     , `List
+                                         (List.map
+                                            dependency_texts
+                                            ~f:(fun dependency ->
+                                              `String dependency)) )
+                                   ; ( "phase"
+                                     , `String
+                                         (Sandwalk_core.Phase.to_string phase)
+                                     )
+                                   ; ( "plan_path"
+                                     , `String
+                                         (Sandwalk_runtime.Workspace
+                                          .research_plan_path
+                                            workspace) )
+                                   ]
+                               in
+                               Sandwalk_protocol.Envelope.success ~result ()
+                               |> Sandwalk_protocol.Envelope.render
+                               |> print_endline;
+                               Deferred.unit))))))))
 ;;
 
 let plan_validate_command =
@@ -2198,6 +2567,25 @@ let plan_list_command =
                           ; "depends_on", `String dependency
                           ])
                     in
+                    let extensions =
+                      Sandwalk_store.Plan_state.extensions state
+                      |> List.map ~f:(fun extension ->
+                        `Assoc
+                          [ ( "revision"
+                            , `Int
+                                (Sandwalk_store.Stored_plan_extension.revision
+                                   extension) )
+                          ; ( "step"
+                            , `String
+                                (Sandwalk_store.Stored_plan_extension.step_key
+                                   extension
+                                 |> Sandwalk_core.Plan_step.Key.to_string) )
+                          ; ( "reason"
+                            , `String
+                                (Sandwalk_store.Stored_plan_extension.reason
+                                   extension) )
+                          ])
+                    in
                     let result =
                       `Assoc
                         [ ( "phase"
@@ -2213,6 +2601,7 @@ let plan_list_command =
                               ~f:(fun value -> `String value) )
                         ; "steps", `List steps
                         ; "dependencies", `List dependencies
+                        ; "extensions", `List extensions
                         ]
                     in
                     Sandwalk_protocol.Envelope.success ~result ()
@@ -2226,6 +2615,7 @@ let plan_command =
     ~summary:"Manage the canonical research plan."
     [ "add-step", plan_add_step_command
     ; "add-dependency", plan_add_dependency_command
+    ; "extend", plan_extend_command
     ; "list", plan_list_command
     ; "seal", plan_seal_command
     ; "set-objective", plan_set_objective_command

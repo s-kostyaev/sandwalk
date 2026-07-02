@@ -24,7 +24,7 @@ The identical review is idempotent.
 
   $ ./inspect_workspace.exe workspace/review-test/database/sandwalk.sqlite3
   review-test|researching
-  18
+  19
   wal
   ok
 
@@ -71,7 +71,7 @@ Complete the other current finding before completing the step.
 
   $ ./inspect_workspace.exe workspace/review-test/database/sandwalk.sqlite3
   review-test|evidence-review
-  18
+  19
   wal
   ok
 
@@ -103,6 +103,6 @@ Complete the other current finding before completing the step.
 
   $ ./inspect_workspace.exe workspace/review-test/database/sandwalk.sqlite3
   review-test|drafting
-  18
+  19
   wal
   ok
