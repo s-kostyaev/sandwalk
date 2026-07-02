@@ -1,0 +1,109 @@
+#!/bin/sh
+set -eu
+
+lynx_user_agent='Lynx/2.9.2 libwww-FM/2.14 SSL-MM/1.4.1 GNUTLS/3.8.3'
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+url=$(printf '%s' "$request" | jq -er '.url')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+
+[ "$protocol" = "sandwalk.fetch.v1" ] || {
+  printf '%s\n' 'unsupported fetch protocol' >&2
+  exit 64
+}
+
+printf '%s' "$url" | grep -Eq '^https?://' || {
+  printf '%s\n' 'fetch URL must use HTTP or HTTPS' >&2
+  exit 64
+}
+
+[ -n "$output_directory" ] || {
+  printf '%s\n' 'fetch output directory must not be empty' >&2
+  exit 64
+}
+
+mkdir -p "$output_directory"
+original="$output_directory/original"
+headers="$output_directory/headers.txt"
+document="$output_directory/document.md"
+manifest="$output_directory/manifest.json"
+manifest_temporary="$output_directory/manifest.json.tmp"
+rm -f "$manifest" "$manifest_temporary"
+
+curl_metadata=$(
+  curl -L -sS --fail-with-body \
+    --user-agent "$lynx_user_agent" \
+    --dump-header "$headers" \
+    --output "$original" \
+    --write-out '%{json}' \
+    "$url"
+)
+
+pandoc --from=html --to=gfm --wrap=none "$original" >"$document"
+[ -s "$document" ] || {
+  printf '%s\n' 'pandoc produced an empty Markdown document' >&2
+  exit 65
+}
+
+mq "$document" '.tree' >/dev/null
+
+input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
+markdown_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
+configuration_sha256=$(printf '%s' "$lynx_user_agent" | shasum -a 256 | awk '{print $1}')
+curl_version=$(curl --version | sed -n '1{s/"/\\"/g;p;}')
+pandoc_version=$(pandoc --version | sed -n '1{s/"/\\"/g;p;}')
+mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
+
+jq -n \
+  --arg protocol "sandwalk.fetch-manifest.v1" \
+  --arg adapter "curl-pandoc" \
+  --arg requested_url "$url" \
+  --arg final_url "$(printf '%s' "$curl_metadata" | jq -r '.url_effective')" \
+  --arg input_sha256 "$input_sha256" \
+  --arg markdown_sha256 "$markdown_sha256" \
+  --arg configuration_sha256 "$configuration_sha256" \
+  --arg curl_version "$curl_version" \
+  --arg pandoc_version "$pandoc_version" \
+  --arg mq_version "$mq_version" \
+  --argjson status "$(printf '%s' "$curl_metadata" | jq '.http_code')" \
+  --argjson redirects "$(printf '%s' "$curl_metadata" | jq '.num_redirects')" \
+  --arg content_type "$(printf '%s' "$curl_metadata" | jq -r '.content_type // ""')" \
+  '{
+    protocol: $protocol,
+    adapter: {
+      name: $adapter,
+      protocol_version: 1,
+      curl_version: $curl_version,
+      pandoc_version: $pandoc_version,
+      mq_version: $mq_version
+    },
+    requested_url: $requested_url,
+    final_url: $final_url,
+    redirect_count: $redirects,
+    http: {
+      status: $status,
+      content_type: $content_type,
+      headers_artifact: "headers.txt"
+    },
+    hashes: {
+      input_sha256: $input_sha256,
+      normalized_markdown_sha256: $markdown_sha256,
+      sanitized_configuration_sha256: $configuration_sha256
+    },
+    artifacts: {
+      document: "document.md",
+      original: "original"
+    },
+    queryability_check: {
+      tool: "mq",
+      query: ".tree",
+      ok: true
+    }
+  }' >"$manifest_temporary"
+
+mv "$manifest_temporary" "$manifest"
+
+jq -nc \
+  --arg protocol "sandwalk.fetch-result.v1" \
+  --arg manifest "$manifest" \
+  '{protocol: $protocol, manifest: $manifest}'

@@ -5,4 +5,7 @@
 (cram
  (deps
   %{bin:sandwalk}
-  inspect_workspace.exe))
+  inspect_workspace.exe
+  ../adapters/ddgr-search
+  ../adapters/curl-pandoc-fetch
+  (source_tree fakes)))

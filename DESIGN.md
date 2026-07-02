@@ -242,6 +242,16 @@ A search adapter returns bounded structured results. Sandwalk mints `hit_...`
 references and records the query, adapter, result position, URL, title, and
 snippet.
 
+The bundled ddgr connector accepts:
+
+```json
+{"protocol":"sandwalk.search.v1","query":"typed agents","limit":10}
+```
+
+and returns at most 25 bounded results in a
+`sandwalk.search-results.v1` envelope. It invokes `ddgr --json` without a
+shell command template.
+
 A fetch adapter receives an output directory controlled by Sandwalk. It writes:
 
 ```text
@@ -254,6 +264,11 @@ optional:
   original
   images/
 ```
+
+The bundled web connector accepts a `sandwalk.fetch.v1` request. It uses
+`curl -L` with a Lynx user-agent, retains the response as `original`, converts
+HTML to GitHub-flavored Markdown with pandoc, and requires `mq document.md
+'.tree'` to succeed before publishing `manifest.json`.
 
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.

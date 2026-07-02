@@ -1,0 +1,15 @@
+#!/bin/sh
+cat <<'EOF'
+[
+  {
+    "title": "Primary result",
+    "url": "https://example.test/primary",
+    "abstract": "A deterministic search result."
+  },
+  {
+    "title": "Second result",
+    "url": "https://example.test/second",
+    "abstract": "Another result."
+  }
+]
+EOF
