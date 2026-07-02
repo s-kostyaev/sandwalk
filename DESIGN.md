@@ -326,6 +326,12 @@ Raw cleanup preserves normalized Markdown, hashes, excerpts, evidence, and an
 audit event. Active operations are skipped or rejected. Logs are never deleted
 by default.
 
+The raw plan is deterministic versioned JSON at
+`artifacts/gc-raw-plan.json`. Sandwalk stores and rechecks its MD5 before apply;
+modified or already-applied plans are rejected. Planning and applying are both
+rejected while any step claim is active. Apply is crash-idempotent: already
+absent files are accepted, while unrelated filesystem errors stop the apply.
+
 ## Excerpts
 
 An excerpt is a contiguous, exact fragment of one immutable snapshot.

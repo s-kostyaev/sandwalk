@@ -239,7 +239,10 @@ let status_error = function
   | Plan_dependency_exists
   | Plan_dependency_cycle
   | Recon_start_wrong_phase _
-  | Recon_not_active _ ->
+  | Recon_not_active _
+  | Gc_active_claims
+  | Gc_no_plan
+  | Gc_plan_stale ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -4330,6 +4333,14 @@ let finalize_error = function
   | error -> status_error error
 ;;
 
+let gc_error = function
+  | Sandwalk_store.Error.Gc_active_claims ->
+    "GC_ACTIVE_CLAIMS", "Raw cleanup is blocked while claims are active."
+  | Gc_no_plan -> "GC_NO_PLAN", "No unapplied raw cleanup plan exists."
+  | Gc_plan_stale -> "GC_PLAN_STALE", "Raw cleanup plan is stale or modified."
+  | error -> status_error error
+;;
+
 let report_validation_error = function
   | Sandwalk_core.Report.Empty -> "EMPTY_REPORT", "Report must not be empty."
   | Too_large -> "REPORT_TOO_LARGE", "Report exceeds the 1 MiB bound."
@@ -6512,6 +6523,312 @@ let finalize_command =
                                Deferred.unit))))))))
 ;;
 
+let gc_command =
+  Async.Command.async
+    ~summary:"Plan or apply explicit raw snapshot cleanup."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and raw = flag "--raw" no_arg ~doc:" Target retained raw payloads"
+     and plan = flag "--plan" no_arg ~doc:" Write a cleanup plan"
+     and apply = flag "--apply" no_arg ~doc:" Apply the current cleanup plan" in
+     fun () ->
+       if (not raw) || Bool.equal plan apply
+       then
+         print_failure_and_exit
+           ~code:"INVALID_GC_MODE"
+           ~message:"Specify --raw and exactly one of --plan or --apply."
+       else
+         match Sandwalk_core.Slug.of_string slug_text with
+         | Error error ->
+           print_failure_and_exit
+             ~code:"INVALID_SLUG"
+             ~message:(Sandwalk_core.Slug.Error.message error)
+         | Ok slug ->
+           let directory_prefix =
+             Sandwalk_runtime.resolve_directory_prefix
+               ~command_line:directory_prefix
+           in
+           let workspace =
+             Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+           in
+           let%bind database_exists =
+             Async.Sys.file_exists_exn
+               (Sandwalk_runtime.Workspace.database_path workspace)
+           in
+           if not database_exists
+           then
+             print_failure_and_exit
+               ~code:"WORKSPACE_NOT_FOUND"
+               ~message:"Workspace does not exist."
+           else (
+             let started_at = Time_float_unix.now () in
+             let%bind invocation_id =
+               In_thread.run (fun () ->
+                 Sandwalk_runtime.invocation_id ~now:started_at)
+             in
+             let mode = if plan then "plan" else "apply" in
+             let arguments =
+               `Assoc
+                 [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                 ; "directory_prefix", `String directory_prefix
+                 ; "raw", `Bool true
+                 ; "mode", `String mode
+                 ]
+             in
+             let append_event
+                   ~kind
+                   ~timestamp
+                   ~state_changes
+                   ?duration_ms
+                   ?outcome
+                   ?error_code
+                   ()
+               =
+               Sandwalk_runtime.Audit.append
+                 ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                 (Sandwalk_protocol.Audit_event.create
+                    ~invocation_id
+                    ~timestamp
+                    ~kind
+                    ~command:("gc raw " ^ mode)
+                    ~arguments
+                    ~phase:None
+                    ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                    ~state_changes
+                    ?duration_ms
+                    ?outcome
+                    ?error_code
+                    ())
+             in
+             let fail_with_audit ~code ~message =
+               let finished_at = Time_float_unix.now () in
+               let duration_ms =
+                 Time_float.diff finished_at started_at
+                 |> Time_float.Span.to_ms
+                 |> Float.iround_nearest_exn
+               in
+               let%bind logged =
+                 append_event
+                   ~kind:`Failed
+                   ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                   ~state_changes:[]
+                   ~duration_ms
+                   ~outcome:"failure"
+                   ~error_code:code
+                   ()
+               in
+               match logged with
+               | Error _ ->
+                 print_failure_and_exit
+                   ~code:"AUDIT_LOG_ERROR"
+                   ~message:"Could not append workspace audit log."
+               | Ok () -> print_failure_and_exit ~code ~message
+             in
+             let%bind started =
+               append_event
+                 ~kind:`Started
+                 ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                 ~state_changes:[]
+                 ()
+             in
+             (match started with
+              | Error _ ->
+                print_failure_and_exit
+                  ~code:"AUDIT_LOG_ERROR"
+                  ~message:"Could not append workspace audit log."
+              | Ok () ->
+                let plan_path =
+                  Sandwalk_runtime.Workspace.gc_raw_plan_path workspace
+                in
+                let%bind operation =
+                  if plan
+                  then (
+                    let%bind candidates =
+                      In_thread.run (fun () ->
+                        Sandwalk_store.read_raw_gc_candidates
+                          ~database_path:
+                            (Sandwalk_runtime.Workspace.database_path workspace)
+                          ~expected_slug:slug
+                          ())
+                    in
+                    match candidates with
+                    | Error error -> Deferred.return (Error error)
+                    | Ok artifact_directories ->
+                      let paths =
+                        List.map artifact_directories ~f:(fun directory ->
+                          Filename.concat directory "original")
+                      in
+                      let%bind paths =
+                        Deferred.List.filter paths ~how:`Sequential ~f:(fun path ->
+                          Async.Sys.file_exists_exn path)
+                      in
+                      let plan_json =
+                        `Assoc
+                          [ "protocol", `String "sandwalk.gc-raw-plan.v1"
+                          ; ( "artifacts"
+                            , `List
+                                (List.map paths ~f:(fun path ->
+                                   `String path)) )
+                          ]
+                        |> Yojson.Safe.to_string
+                      in
+                      let plan_md5 =
+                        Md5.digest_string plan_json |> Md5.to_hex
+                      in
+                      let%bind written =
+                        Sandwalk_runtime.Atomic_file.write
+                          ~path:plan_path
+                          ~temporary_suffix:invocation_id
+                          plan_json
+                      in
+                      (match written with
+                       | Error _ ->
+                         Deferred.return
+                           (Error
+                              (Sandwalk_store.Error.Database_error
+                                 "Could not write GC plan."))
+                       | Ok () ->
+                         let%map recorded =
+                           In_thread.run (fun () ->
+                             Sandwalk_store.record_raw_gc_plan
+                               ~database_path:
+                                 (Sandwalk_runtime.Workspace.database_path
+                                    workspace)
+                               ~expected_slug:slug
+                               ~plan_path
+                               ~plan_json
+                               ~plan_md5
+                               ~now:
+                                 (Sandwalk_runtime.timestamp_utc
+                                    (Time_float_unix.now ()))
+                               ())
+                         in
+                         Result.map recorded ~f:(fun () -> paths)))
+                  else (
+                    let%bind stored =
+                      In_thread.run (fun () ->
+                        Sandwalk_store.read_raw_gc_plan
+                          ~database_path:
+                            (Sandwalk_runtime.Workspace.database_path workspace)
+                          ~expected_slug:slug
+                          ())
+                    in
+                    match stored with
+                    | Error error -> Deferred.return (Error error)
+                    | Ok stored ->
+                      let%bind input =
+                        Sandwalk_runtime.File_input.read
+                          ~path:plan_path
+                          ~maximum_bytes:1_048_576
+                      in
+                      (match input with
+                       | Error _ ->
+                         Deferred.return (Error Sandwalk_store.Error.Gc_plan_stale)
+                       | Ok input
+                         when String.equal
+                                (Sandwalk_runtime.File_input.md5 input)
+                                (Sandwalk_store.Raw_gc_plan.plan_md5 stored)
+                              && String.equal
+                                   (Sandwalk_runtime.File_input.content input)
+                                   (Sandwalk_store.Raw_gc_plan.plan_json stored)
+                              && String.equal
+                                   plan_path
+                                   (Sandwalk_store.Raw_gc_plan.plan_path stored)
+                         ->
+                         let paths =
+                           Sandwalk_store.Raw_gc_plan.artifact_paths stored
+                         in
+                         let%bind removed =
+                           Deferred.List.map
+                             paths
+                             ~how:`Sequential
+                             ~f:(fun path ->
+                               let%bind exists = Async.Sys.file_exists_exn path in
+                               if not exists
+                               then Deferred.return (Ok ())
+                               else Monitor.try_with (fun () -> Unix.unlink path))
+                         in
+                         (match Result.all_unit removed with
+                          | Error _ ->
+                            Deferred.return
+                              (Error
+                                 (Sandwalk_store.Error.Database_error
+                                    "Could not remove raw artifact."))
+                          | Ok () ->
+                            let%map marked =
+                              In_thread.run (fun () ->
+                                Sandwalk_store.mark_raw_gc_applied
+                                  ~database_path:
+                                    (Sandwalk_runtime.Workspace.database_path
+                                       workspace)
+                                  ~expected_slug:slug
+                                  ~plan_md5:
+                                    (Sandwalk_store.Raw_gc_plan.plan_md5 stored)
+                                  ~now:
+                                    (Sandwalk_runtime.timestamp_utc
+                                       (Time_float_unix.now ()))
+                                  ())
+                            in
+                            Result.map marked ~f:(fun () -> paths))
+                       | Ok _ ->
+                         Deferred.return
+                           (Error Sandwalk_store.Error.Gc_plan_stale)))
+                in
+                (match operation with
+                 | Error error ->
+                   let code, message =
+                     match error with
+                     | Sandwalk_store.Error.Database_error
+                         "Could not write GC plan." ->
+                       "WORKSPACE_IO_ERROR", "Could not write raw cleanup plan."
+                     | Database_error "Could not remove raw artifact." ->
+                       "WORKSPACE_IO_ERROR", "Could not remove raw artifact."
+                     | error -> gc_error error
+                   in
+                   fail_with_audit ~code ~message
+                 | Ok paths ->
+                   let finished_at = Time_float_unix.now () in
+                   let duration_ms =
+                     Time_float.diff finished_at started_at
+                     |> Time_float.Span.to_ms
+                     |> Float.iround_nearest_exn
+                   in
+                   let%bind logged =
+                     append_event
+                       ~kind:`Finished
+                       ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                       ~state_changes:
+                         [ `Assoc
+                             [ "entity", `String "snapshot.raw"
+                             ; "from", `Int (List.length paths)
+                             ; "to", `Int (if plan then List.length paths else 0)
+                             ]
+                         ]
+                       ~duration_ms
+                       ~outcome:"success"
+                       ()
+                   in
+                   (match logged with
+                    | Error _ ->
+                      print_failure_and_exit
+                        ~code:"AUDIT_LOG_ERROR"
+                        ~message:"Could not append workspace audit log."
+                    | Ok () ->
+                      let result =
+                        `Assoc
+                          [ "mode", `String mode
+                          ; "count", `Int (List.length paths)
+                          ; "plan_path", `String plan_path
+                          ]
+                      in
+                      Sandwalk_protocol.Envelope.success ~result ()
+                      |> Sandwalk_protocol.Envelope.render
+                      |> print_endline;
+                      Deferred.unit)))))
+;;
+
 let step_command =
   Async.Command.group
     ~summary:"Manage durable plan-step execution."
@@ -6530,6 +6847,7 @@ let command =
     ; "fetch", fetch_command
     ; "finding", finding_command
     ; "finalize", finalize_command
+    ; "gc", gc_command
     ; "init", init_command
     ; "plan", plan_command
     ; "recon", recon_command

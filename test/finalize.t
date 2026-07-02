@@ -21,7 +21,7 @@
 
   $ ./inspect_workspace.exe workspace/final-test/database/sandwalk.sqlite3
   final-test|completed
-  17
+  18
   wal
   ok
 

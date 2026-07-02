@@ -74,6 +74,9 @@ module Error = struct
     | Plan_dependency_cycle
     | Recon_start_wrong_phase of Sandwalk_core.Phase.t
     | Recon_not_active of Sandwalk_core.Phase.t
+    | Gc_active_claims
+    | Gc_no_plan
+    | Gc_plan_stale
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -408,6 +411,20 @@ module Recon_result = struct
   let observation_count t = t.observation_count
 end
 
+module Raw_gc_plan = struct
+  type t =
+    { plan_path : string
+    ; plan_json : string
+    ; plan_md5 : string
+    ; artifact_paths : string list
+    }
+
+  let plan_path t = t.plan_path
+  let plan_json t = t.plan_json
+  let plan_md5 t = t.plan_md5
+  let artifact_paths t = t.artifact_paths
+end
+
 module Validate_plan_result = struct
   type t =
     { previous_schema_version : int
@@ -484,7 +501,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 17
+let current_schema_version = 18
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -947,6 +964,20 @@ PRAGMA user_version = 17;
 |}
 ;;
 
+let migration_v18 =
+  {|
+CREATE TABLE raw_gc_plan (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  plan_path TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  plan_md5 TEXT NOT NULL CHECK (length(plan_md5) = 32),
+  created_at TEXT NOT NULL,
+  applied_at TEXT
+);
+PRAGMA user_version = 18;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -1085,10 +1116,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:16 ~now)
       else Ok ()
     in
-    if from_version < 17
+    let%bind () =
+      if from_version < 17
+      then (
+        let%bind () = execute database migration_v17 in
+        insert_migration database ~version:17 ~now)
+      else Ok ()
+    in
+    if from_version < 18
     then (
-      let%bind () = execute database migration_v17 in
-      insert_migration database ~version:17 ~now)
+      let%bind () = execute database migration_v18 in
+      insert_migration database ~version:18 ~now)
     else Ok ())
 ;;
 
@@ -6038,6 +6076,258 @@ INSERT INTO finalizations (
            | Ok result ->
              let%map () = execute database "COMMIT" in
              result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let ensure_no_active_claims database =
+  with_statement
+    database
+    "SELECT COUNT(*) FROM step_executions WHERE state = 'claimed'"
+    ~f:(fun statement ->
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        if Sqlite3.column_int statement 0 = 0
+        then Ok ()
+        else Error Error.Gc_active_claims
+      | return_code -> check database return_code)
+;;
+
+let read_raw_gc_candidates
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind slug_text, _ = query_workspace database in
+          let expected = Sandwalk_core.Slug.to_string expected_slug in
+          let%bind () =
+            if String.equal expected slug_text
+            then Ok ()
+            else
+              Error
+                (Error.Workspace_slug_mismatch
+                   { expected; actual = slug_text })
+          in
+          let%bind () = ensure_no_active_claims database in
+          let paths = ref [] in
+          let%map () =
+            check
+              database
+              (Sqlite3.exec
+                 database
+                 "SELECT artifact_path FROM snapshots ORDER BY snapshot_ref"
+                 ~cb:(fun row _ ->
+                   match row with
+                   | [| Some path |] -> paths := path :: !paths
+                   | _ -> failwith "Invalid persisted snapshot path."))
+          in
+          List.rev !paths
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let record_raw_gc_plan
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~plan_path
+      ~plan_json
+      ~plan_md5
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, _ = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind () = ensure_no_active_claims database in
+            with_statement
+              database
+              {|
+INSERT INTO raw_gc_plan (
+  singleton, plan_path, plan_json, plan_md5, created_at, applied_at
+) VALUES (1, ?1, ?2, ?3, ?4, NULL)
+ON CONFLICT(singleton) DO UPDATE SET
+  plan_path = excluded.plan_path,
+  plan_json = excluded.plan_json,
+  plan_md5 = excluded.plan_md5,
+  created_at = excluded.created_at,
+  applied_at = NULL
+|}
+              ~f:(fun statement ->
+                let%bind () = bind_text database statement 1 plan_path in
+                let%bind () = bind_text database statement 2 plan_json in
+                let%bind () = bind_text database statement 3 plan_md5 in
+                let%bind () = bind_text database statement 4 now in
+                step_done database statement)
+          in
+          (match outcome with
+           | Ok () -> execute database "COMMIT"
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let decode_raw_gc_plan ~plan_path ~plan_json ~plan_md5 =
+  try
+    match Yojson.Safe.from_string plan_json with
+    | `Assoc fields ->
+      (match
+         List.Assoc.find fields "protocol" ~equal:String.equal,
+         List.Assoc.find fields "artifacts" ~equal:String.equal
+       with
+       | Some (`String "sandwalk.gc-raw-plan.v1"), Some (`List values) ->
+         values
+         |> List.map ~f:(function
+           | `String path -> Some path
+           | _ -> None)
+         |> Option.all
+         |> Result.of_option ~error:Error.Gc_plan_stale
+         |> Result.map ~f:(fun artifact_paths ->
+           { Raw_gc_plan.plan_path
+           ; plan_json
+           ; plan_md5
+           ; artifact_paths
+           })
+       | _ -> Error Error.Gc_plan_stale)
+    | _ -> Error Error.Gc_plan_stale
+  with
+  | _ -> Error Error.Gc_plan_stale
+;;
+
+let read_raw_gc_plan
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind slug_text, _ = query_workspace database in
+          let expected = Sandwalk_core.Slug.to_string expected_slug in
+          let%bind () =
+            if String.equal expected slug_text
+            then Ok ()
+            else
+              Error
+                (Error.Workspace_slug_mismatch
+                   { expected; actual = slug_text })
+          in
+          let%bind () = ensure_no_active_claims database in
+          with_statement
+            database
+            {|
+SELECT plan_path, plan_json, plan_md5
+FROM raw_gc_plan
+WHERE singleton = 1 AND applied_at IS NULL
+|}
+            ~f:(fun statement ->
+              match Sqlite3.step statement with
+              | Sqlite3.Rc.ROW ->
+                decode_raw_gc_plan
+                  ~plan_path:(Sqlite3.column_text statement 0)
+                  ~plan_json:(Sqlite3.column_text statement 1)
+                  ~plan_md5:(Sqlite3.column_text statement 2)
+              | Sqlite3.Rc.DONE -> Error Error.Gc_no_plan
+              | return_code ->
+                check database return_code
+                |> Result.map ~f:(fun () -> assert false))
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let mark_raw_gc_applied
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~plan_md5
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind slug_text, _ = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind () = ensure_no_active_claims database in
+            with_statement
+              database
+              {|
+UPDATE raw_gc_plan
+SET applied_at = ?1
+WHERE singleton = 1 AND applied_at IS NULL AND plan_md5 = ?2
+|}
+              ~f:(fun statement ->
+                let%bind () = bind_text database statement 1 now in
+                let%bind () = bind_text database statement 2 plan_md5 in
+                let%bind () = step_done database statement in
+                if Sqlite3.changes database = 1
+                then Ok ()
+                else Error Error.Gc_plan_stale)
+          in
+          (match outcome with
+           | Ok () -> execute database "COMMIT"
            | Error _ as error ->
              ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
              error)

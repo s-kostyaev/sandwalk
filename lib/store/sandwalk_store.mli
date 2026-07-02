@@ -74,6 +74,9 @@ module Error : sig
     | Plan_dependency_cycle
     | Recon_start_wrong_phase of Sandwalk_core.Phase.t
     | Recon_not_active of Sandwalk_core.Phase.t
+    | Gc_active_claims
+    | Gc_no_plan
+    | Gc_plan_stale
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -287,6 +290,15 @@ module Recon_result : sig
 
   val phase : t -> Sandwalk_core.Phase.t
   val observation_count : t -> int
+end
+
+module Raw_gc_plan : sig
+  type t
+
+  val plan_path : t -> string
+  val plan_json : t -> string
+  val plan_md5 : t -> string
+  val artifact_paths : t -> string list
 end
 
 module Seal_plan_result : sig
@@ -691,3 +703,37 @@ val finalize_workspace
   -> now:string
   -> unit
   -> (Sandwalk_core.Phase.t, Error.t) Result.t
+
+val read_raw_gc_candidates
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> unit
+  -> (string list, Error.t) Result.t
+
+val record_raw_gc_plan
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> plan_path:string
+  -> plan_json:string
+  -> plan_md5:string
+  -> now:string
+  -> unit
+  -> (unit, Error.t) Result.t
+
+val read_raw_gc_plan
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> unit
+  -> (Raw_gc_plan.t, Error.t) Result.t
+
+val mark_raw_gc_applied
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> plan_md5:string
+  -> now:string
+  -> unit
+  -> (unit, Error.t) Result.t

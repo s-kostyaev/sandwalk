@@ -12,6 +12,7 @@ module Workspace = struct
     ; writer_pack_path : string
     ; report_path : string
     ; sources_path : string
+    ; gc_raw_plan_path : string
     }
 
   let root t = t.root
@@ -23,6 +24,7 @@ module Workspace = struct
   let writer_pack_path t = t.writer_pack_path
   let report_path t = t.report_path
   let sources_path t = t.sources_path
+  let gc_raw_plan_path t = t.gc_raw_plan_path
   let temporary_fetch_path t ~invocation_id =
     Filename.concat t.root ("artifacts/temporary/fetch-" ^ invocation_id)
   ;;
@@ -53,6 +55,7 @@ module Workspace = struct
     ; writer_pack_path = Filename.concat root "exports/writer-pack.md"
     ; report_path = Filename.concat root "exports/report.md"
     ; sources_path = Filename.concat root "exports/sources.md"
+    ; gc_raw_plan_path = Filename.concat root "artifacts/gc-raw-plan.json"
     }
   ;;
 

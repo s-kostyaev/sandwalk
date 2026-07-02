@@ -732,6 +732,42 @@ PRAGMA user_version = 16;
 |})
 ;;
 
+let create_v17 database slug =
+  create_v16 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE reconnaissance (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  goal_text TEXT NOT NULL,
+  goal_path TEXT NOT NULL,
+  goal_md5 TEXT NOT NULL CHECK (length(goal_md5) = 32),
+  goal_size INTEGER NOT NULL CHECK (goal_size > 0 AND goal_size <= 65536),
+  started_at TEXT NOT NULL,
+  summary_text TEXT,
+  summary_path TEXT,
+  summary_md5 TEXT,
+  summary_size INTEGER,
+  finished_at TEXT
+);
+CREATE TABLE reconnaissance_observations (
+  observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  observation_text TEXT NOT NULL,
+  observation_path TEXT NOT NULL,
+  observation_md5 TEXT NOT NULL CHECK (length(observation_md5) = 32),
+  observation_size INTEGER NOT NULL CHECK (
+    observation_size > 0 AND observation_size <= 65536
+  ),
+  created_at TEXT NOT NULL
+);
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (17, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 17;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -905,6 +941,7 @@ let () =
     | [| _; "--create-v14"; path; slug |] -> `Create (14, slug), path
     | [| _; "--create-v15"; path; slug |] -> `Create (15, slug), path
     | [| _; "--create-v16"; path; slug |] -> `Create (16, slug), path
+    | [| _; "--create-v17"; path; slug |] -> `Create (17, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
@@ -942,6 +979,7 @@ let () =
       | `Create (14, slug) -> create_v14 database slug
       | `Create (15, slug) -> create_v15 database slug
       | `Create (16, slug) -> create_v16 database slug
+      | `Create (17, slug) -> create_v17 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
