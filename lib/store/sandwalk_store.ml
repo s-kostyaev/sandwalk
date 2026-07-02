@@ -1474,6 +1474,72 @@ let read_plan_steps ?(busy_timeout_ms = 5_000) ~database_path () =
   | exn -> Error (Error.Database_error (Exn.to_string exn))
 ;;
 
+let read_next_step
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          if schema_version < 5
+          then Ok None
+          else if schema_version > current_schema_version
+          then Error (Error.Unsupported_schema_version schema_version)
+          else
+            let query =
+              if schema_version < 16
+              then
+                {|
+SELECT p.step_key
+FROM plan_steps p
+JOIN step_executions e ON e.step_key = p.step_key
+WHERE e.state IN ('pending', 'suspended', 'expired', 'blocked')
+ORDER BY p.position
+LIMIT 1
+|}
+              else
+                {|
+SELECT p.step_key
+FROM plan_steps p
+JOIN step_executions e ON e.step_key = p.step_key
+WHERE e.state IN ('pending', 'suspended', 'expired', 'blocked')
+  AND NOT EXISTS (
+    SELECT 1
+    FROM plan_dependencies d
+    JOIN step_executions de ON de.step_key = d.dependency_key
+    WHERE d.step_key = p.step_key AND de.state <> 'completed'
+  )
+ORDER BY p.position
+LIMIT 1
+|}
+            in
+            with_statement
+              database
+              query
+            ~f:(fun statement ->
+              match Sqlite3.step statement with
+              | Sqlite3.Rc.ROW ->
+                Sqlite3.column_text statement 0
+                |> Sandwalk_core.Plan_step.Key.of_string
+                |> Result.map ~f:Option.some
+                |> Result.map_error ~f:(fun _ ->
+                  Error.Database_error "Invalid persisted plan step.")
+              | Sqlite3.Rc.DONE -> Ok None
+              | return_code ->
+                check database return_code |> Result.map ~f:(Fn.const None))
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
 let query_plan_objective database =
   with_statement
     database

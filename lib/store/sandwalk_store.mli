@@ -379,6 +379,12 @@ val read_plan_steps
   -> unit
   -> (Stored_plan_step.t list, Error.t) Result.t
 
+val read_next_step
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> unit
+  -> (Sandwalk_core.Plan_step.Key.t option, Error.t) Result.t
+
 val read_plan_state
   :  ?busy_timeout_ms:int
   -> database_path:string

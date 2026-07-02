@@ -31,6 +31,98 @@ let print_failure_and_exit ~code ~message =
   Shutdown.exit 1
 ;;
 
+let explanation = function
+  | "PLAN_EMPTY" ->
+    Some
+      ( "The plan has no steps, so it cannot be validated."
+      , "Add at least one step with `sandwalk plan add-step`, then validate the plan." )
+  | "PLAN_NOT_VALIDATED" ->
+    Some
+      ( "The current plan revision has not passed the explicit validation gate."
+      , "Run `sandwalk plan validate --slug <slug>`, then retry sealing." )
+  | "PLAN_VALIDATION_STALE" ->
+    Some
+      ( "The plan changed after validation, so the validation does not cover the current revision."
+      , "Run `sandwalk plan validate --slug <slug>`, then retry sealing." )
+  | "STEP_DEPENDENCIES_INCOMPLETE" ->
+    Some
+      ( "At least one declared dependency of this step has not completed."
+      , "Complete the prerequisite steps before claiming this step." )
+  | "STEP_ALREADY_CLAIMED" ->
+    Some
+      ( "The step has a live lease owned by another claim."
+      , "Resume the existing work or wait for its lease to expire." )
+  | "CLAIM_EXPIRED" ->
+    Some
+      ( "The claim lease expired before this operation was recorded."
+      , "Claim the step again and continue under the new claim identifier." )
+  | "FINDING_HAS_NO_EVIDENCE" ->
+    Some
+      ( "A finding must cite at least one exact excerpt before it can be sealed."
+      , "Attach an excerpt with `sandwalk finding attach`, then seal the finding." )
+  | "FINDING_NOT_SEALED" ->
+    Some
+      ( "Only sealed finding revisions can receive an independent review."
+      , "Seal the finding revision, then submit its review." )
+  | "STEP_HAS_UNREVIEWED_FINDINGS" ->
+    Some
+      ( "Every current finding revision must have a review before the step can complete."
+      , "Review each sealed finding, then retry `sandwalk step complete`." )
+  | "STEP_HAS_REJECTED_FINDINGS" ->
+    Some
+      ( "At least one current finding review rejected or contradicted the finding."
+      , "Revise the finding and evidence, seal the new revision, and review it again." )
+  | "DRAFT_GATE_FAILED" ->
+    Some
+      ( "Drafting cannot start until all required research steps and finding reviews pass."
+      , "Complete the remaining required evidence work, then retry draft preparation." )
+  | "REPORT_CITATION_INVALID" ->
+    Some
+      ( "The report contains a missing, stale, malformed, or unreviewed citation target."
+      , "Use current `[cite:step-key/finding-key]` tokens from the writer pack." )
+  | "REPORT_REVIEW_INCOMPLETE" ->
+    Some
+      ( "The report review does not contain exactly one verdict for every current report block."
+      , "Review every block from the current report revision and resubmit the review." )
+  | "FINALIZE_GATE_FAILED" ->
+    Some
+      ( "The current report, block reviews, finding reviews, or provenance no longer satisfies the final gate."
+      , "Regenerate the relevant review or report revision before finalizing." )
+  | "GC_ACTIVE_CLAIMS" ->
+    Some
+      ( "Raw artifact garbage collection is blocked while research claims are active."
+      , "Checkpoint and complete the active work before generating a GC plan." )
+  | "GC_PLAN_STALE" ->
+    Some
+      ( "The raw-artifact set changed after the garbage-collection plan was generated."
+      , "Generate a new GC plan and apply that exact plan." )
+  | _ -> None
+;;
+
+let explain_command =
+  Async.Command.async
+    ~summary:"Explain a stable Sandwalk error code and its repair."
+    (let%map_open.Command code = anon ("CODE" %: string) in
+     fun () ->
+       match explanation code with
+       | None ->
+         print_failure_and_exit
+           ~code:"UNKNOWN_ERROR_CODE"
+           ~message:"No explanation is available for that error code."
+       | Some (detail, repair) ->
+         Sandwalk_protocol.Envelope.success
+           ~result:
+             (`Assoc
+                [ "code", `String code
+                ; "explanation", `String detail
+                ; "repair", `String repair
+                ])
+           ()
+         |> Sandwalk_protocol.Envelope.render
+         |> print_endline;
+         Deferred.unit)
+;;
+
 let init_command =
   Async.Command.async
     ~summary:"Create a new Sandwalk workspace."
@@ -6838,17 +6930,266 @@ let step_command =
     ]
 ;;
 
+let next_command =
+  Async.Command.async
+    ~summary:"Recommend one deterministic command from durable workspace state."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let database_path =
+           Sandwalk_runtime.Workspace.database_path workspace
+         in
+         let arguments = parsed_arguments ~slug ~directory_prefix in
+         let%bind database_exists = Async.Sys.file_exists_exn database_path in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let started_at = Time_float_unix.now () in
+           let%bind invocation_id =
+             In_thread.run (fun () ->
+               Sandwalk_runtime.invocation_id ~now:started_at)
+           in
+           let append_event
+                 ~kind
+                 ~timestamp
+                 ~phase
+                 ?duration_ms
+                 ?outcome
+                 ?error_code
+                 ()
+             =
+             Sandwalk_runtime.Audit.append
+               ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+               (Sandwalk_protocol.Audit_event.create
+                  ~invocation_id
+                  ~timestamp
+                  ~kind
+                  ~command:"next"
+                  ~arguments
+                  ~phase
+                  ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                  ~state_changes:[]
+                  ?duration_ms
+                  ?outcome
+                  ?error_code
+                  ())
+           in
+           let%bind started =
+             append_event
+               ~kind:`Started
+               ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+               ~phase:None
+               ()
+           in
+           match started with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"AUDIT_LOG_ERROR"
+               ~message:"Could not append workspace audit log."
+           | Ok () ->
+             let%bind status =
+               In_thread.run (fun () ->
+                 Sandwalk_store.read_status
+                   ~database_path
+                   ~expected_slug:slug
+                   ())
+             in
+             (match status with
+              | Error error ->
+                let code, message = status_error error in
+                let%bind _ =
+                  append_event
+                    ~kind:`Failed
+                    ~timestamp:
+                      (Sandwalk_runtime.timestamp_utc (Time_float_unix.now ()))
+                    ~phase:None
+                    ~outcome:"failure"
+                    ~error_code:code
+                    ()
+                in
+                print_failure_and_exit ~code ~message
+              | Ok status ->
+                let phase = Sandwalk_store.Workspace_status.phase status in
+                let workspace_words command =
+                  "sandwalk"
+                  :: command
+                  @ [ "--slug"
+                    ; Sandwalk_core.Slug.to_string slug
+                    ; "--directory-prefix"
+                    ; directory_prefix
+                    ]
+                in
+                let%bind recommendation =
+                  match phase with
+                  | Sandwalk_core.Phase.Initialized
+                  | Scoping ->
+                    Deferred.return
+                      (Ok
+                         (workspace_words
+                            [ "recon"; "start"; "--goal-file"; "goal.md" ]))
+                  | Reconnaissance ->
+                    Deferred.return
+                      (Ok
+                         (workspace_words
+                            [ "recon"
+                            ; "finish"
+                            ; "--summary-file"
+                            ; "recon-summary.md"
+                            ]))
+                  | Planning ->
+                    In_thread.run (fun () ->
+                      Sandwalk_store.read_plan_state
+                        ~database_path
+                        ~expected_slug:slug
+                        ())
+                    >>| Result.map ~f:(fun plan ->
+                      if List.is_empty (Sandwalk_store.Plan_state.steps plan)
+                      then
+                        workspace_words
+                          [ "plan"
+                          ; "add-step"
+                          ; "--key"
+                          ; "research-step"
+                          ; "--title"
+                          ; "Research step"
+                          ]
+                      else if
+                        not
+                          (Option.value_map
+                             (Sandwalk_store.Plan_state.validated_revision plan)
+                             ~default:false
+                             ~f:
+                               (Int.equal
+                                  (Sandwalk_store.Plan_state.revision plan)))
+                      then workspace_words [ "plan"; "validate" ]
+                      else workspace_words [ "plan"; "seal" ])
+                  | Researching ->
+                    let%bind active_claims =
+                      In_thread.run (fun () ->
+                        Sandwalk_store.read_active_claims ~database_path ())
+                    in
+                    (match active_claims with
+                     | Error _ as error -> Deferred.return error
+                     | Ok (_ :: _) ->
+                       Deferred.return (Ok (workspace_words [ "resume" ]))
+                     | Ok [] ->
+                       In_thread.run (fun () ->
+                         Sandwalk_store.read_next_step ~database_path ())
+                       >>| Result.map ~f:(function
+                         | Some key ->
+                           workspace_words
+                             [ "step"
+                             ; "claim"
+                             ; "--step"
+                             ; Sandwalk_core.Plan_step.Key.to_string key
+                             ]
+                         | None -> workspace_words [ "resume" ]))
+                  | Evidence_review ->
+                    Deferred.return
+                      (Ok (workspace_words [ "draft"; "prepare" ]))
+                  | Drafting ->
+                    Deferred.return
+                      (Ok
+                         (workspace_words
+                            [ "draft"
+                            ; "submit"
+                            ; "--report-file"
+                            ; "draft.md"
+                            ]))
+                  | Draft_review ->
+                    Deferred.return
+                      (Ok
+                         (workspace_words
+                            [ "draft"
+                            ; "review"
+                            ; "--review-file"
+                            ; "report-review.json"
+                            ]))
+                  | Finalizing ->
+                    Deferred.return (Ok (workspace_words [ "finalize" ]))
+                  | Completed ->
+                    Deferred.return (Ok (workspace_words [ "status" ]))
+                in
+                let phase_text = Sandwalk_core.Phase.to_string phase in
+                (match recommendation with
+                 | Error error ->
+                   let code, message = status_error error in
+                   let%bind _ =
+                     append_event
+                       ~kind:`Failed
+                       ~timestamp:
+                         (Sandwalk_runtime.timestamp_utc
+                            (Time_float_unix.now ()))
+                       ~phase:(Some phase_text)
+                       ~outcome:"failure"
+                       ~error_code:code
+                       ()
+                   in
+                   print_failure_and_exit ~code ~message
+                 | Ok words ->
+                   let command = Sandwalk_protocol.Shell_command.of_words words in
+                   let finished_at = Time_float_unix.now () in
+                   let duration_ms =
+                     Time_float.diff finished_at started_at
+                     |> Time_float.Span.to_ms
+                     |> Float.iround_nearest_exn
+                   in
+                   let%bind logged =
+                     append_event
+                       ~kind:`Finished
+                       ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                       ~phase:(Some phase_text)
+                       ~duration_ms
+                       ~outcome:"success"
+                       ()
+                   in
+                   (match logged with
+                    | Error _ ->
+                      print_failure_and_exit
+                        ~code:"AUDIT_LOG_ERROR"
+                        ~message:"Could not append workspace audit log."
+                    | Ok () ->
+                      Sandwalk_protocol.Envelope.success
+                        ~result:(`Assoc [ "phase", `String phase_text ])
+                        ~next:command
+                        ()
+                      |> Sandwalk_protocol.Envelope.render
+                      |> print_endline;
+                      Deferred.unit)))))
+;;
+
 let command =
   Async.Command.group
     ~summary:"Deterministic research orchestration for AI agents."
     [ "about", about_command
     ; "draft", draft_command
+    ; "explain", explain_command
     ; "excerpt", excerpt_command
     ; "fetch", fetch_command
     ; "finding", finding_command
     ; "finalize", finalize_command
     ; "gc", gc_command
     ; "init", init_command
+    ; "next", next_command
     ; "plan", plan_command
     ; "recon", recon_command
     ; "resume", resume_command

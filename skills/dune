@@ -1,0 +1,7 @@
+(install
+ (section share)
+ (package sandwalk)
+ (files
+  (deep-research/SKILL.md as skills/deep-research/SKILL.md)
+  (deep-research/agents/openai.yaml as skills/deep-research/agents/openai.yaml)
+  (deep-research/references/commands.md as skills/deep-research/references/commands.md)))

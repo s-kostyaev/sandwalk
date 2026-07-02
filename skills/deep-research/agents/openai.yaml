@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deep Research"
+  short_description: "Run durable, provenance-bound research"
+  default_prompt: "Use $deep-research to research this topic with durable evidence and a reviewed report."
