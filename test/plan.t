@@ -1,5 +1,5 @@
   $ sandwalk init --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"initialized","schema_version":10}}
+  {"ok":true,"result":{"slug":"plan-test","phase":"initialized","schema_version":11}}
 
   $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
   >   --key primary-sources --title "Review primary sources"
@@ -18,7 +18,7 @@
      Title: "Review primary sources"
 
   $ sandwalk status --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"planning","schema_version":10}}
+  {"ok":true,"result":{"slug":"plan-test","phase":"planning","schema_version":11}}
 
   $ sandwalk plan seal --slug plan-test --directory-prefix workspaces
   {"ok":false,"error":{"code":"PLAN_NOT_VALIDATED","message":"Plan must be validated before sealing."}}
@@ -85,7 +85,7 @@
   {"ok":true,"result":{"revision":3,"sealed":true,"already_sealed":true,"phase":"researching","plan_path":"workspaces/plan-test/exports/research-plan.md"}}
 
   $ sandwalk status --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"researching","schema_version":10}}
+  {"ok":true,"result":{"slug":"plan-test","phase":"researching","schema_version":11}}
 
   $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
   >   --key too-late --title "Too late"
@@ -131,7 +131,7 @@ Create a released-schema v1 fixture and prove the first plan mutation upgrades i
 
   $ ./inspect_workspace.exe legacy/legacy-test/database/sandwalk.sqlite3
   legacy-test|planning
-  10
+  11
   wal
   ok
 
@@ -149,7 +149,7 @@ Create a released-schema v3 fixture and seal it through the v4 migration.
 
   $ ./inspect_workspace.exe legacy-v3/v3-test/database/sandwalk.sqlite3
   v3-test|researching
-  10
+  11
   wal
   ok
 
@@ -167,6 +167,6 @@ Create a released-schema v2 fixture and validate it through the v4 migration.
 
   $ ./inspect_workspace.exe legacy-v2/v2-test/database/sandwalk.sqlite3
   v2-test|planning
-  10
+  11
   wal
   ok

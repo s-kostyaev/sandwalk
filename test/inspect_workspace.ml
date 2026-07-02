@@ -399,6 +399,89 @@ PRAGMA user_version = 9;
 |})
 ;;
 
+let create_v10 database slug =
+  create_v9 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE findings (
+  step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  finding_key TEXT NOT NULL CHECK (
+    length(finding_key) BETWEEN 1 AND 63
+    AND finding_key NOT GLOB '*[^a-z0-9-]*'
+    AND finding_key NOT GLOB '-*'
+    AND finding_key NOT GLOB '*-'
+    AND finding_key NOT GLOB '*--*'
+  ),
+  current_revision INTEGER NOT NULL CHECK (current_revision >= 1),
+  state TEXT NOT NULL CHECK (state IN ('draft', 'sealed', 'reviewed')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (step_key, finding_key)
+);
+CREATE TABLE finding_revisions (
+  step_key TEXT NOT NULL,
+  finding_key TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  claim_text TEXT NOT NULL,
+  claim_md5 TEXT NOT NULL CHECK (
+    length(claim_md5) = 32
+    AND claim_md5 NOT GLOB '*[^a-f0-9]*'
+  ),
+  claim_size INTEGER NOT NULL CHECK (claim_size > 0 AND claim_size <= 65536),
+  created_at TEXT NOT NULL,
+  sealed_at TEXT,
+  PRIMARY KEY (step_key, finding_key, revision),
+  FOREIGN KEY (step_key, finding_key)
+    REFERENCES findings(step_key, finding_key)
+);
+INSERT INTO excerpts (
+  excerpt_ref, snapshot_ref, claim_id, step_key, artifact_path,
+  markdown_sha256, line_start, line_end, byte_start, byte_end,
+  excerpt_md5, excerpt_size, created_at
+) VALUES (
+  'excerpt_00000000000000000000000000000001',
+  'snap_00000000000000000000000000000001',
+  'claim_00000000000000000000000000000001', 'fixture-step',
+  'fixture-excerpt.md',
+  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  1, 1, 0, 7, 'cccccccccccccccccccccccccccccccc', 7,
+  '2026-01-01 00:00:00Z'
+);
+INSERT INTO findings (
+  step_key, finding_key, current_revision, state, created_at, updated_at
+) VALUES (
+  'fixture-step', 'fixture-finding', 1, 'draft',
+  '2026-01-01 00:00:00Z', '2026-01-01 00:00:00Z'
+);
+INSERT INTO finding_revisions (
+  step_key, finding_key, revision, claim_text, claim_md5, claim_size, created_at
+) VALUES (
+  'fixture-step', 'fixture-finding', 1, 'Fixture claim.',
+  'dddddddddddddddddddddddddddddddd', 14, '2026-01-01 00:00:00Z'
+);
+INSERT INTO findings (
+  step_key, finding_key, current_revision, state, created_at, updated_at
+) VALUES (
+  'fixture-step', 'sealed-finding', 1, 'sealed',
+  '2026-01-01 00:00:00Z', '2026-01-01 00:00:00Z'
+);
+INSERT INTO finding_revisions (
+  step_key, finding_key, revision, claim_text, claim_md5, claim_size,
+  created_at, sealed_at
+) VALUES (
+  'fixture-step', 'sealed-finding', 1, 'Sealed claim.',
+  'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 13,
+  '2026-01-01 00:00:00Z', '2026-01-01 00:00:00Z'
+);
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (10, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 10;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -480,6 +563,16 @@ ORDER BY f.step_key, f.finding_key, r.revision
 |}
 ;;
 
+let inspect_evidence database =
+  print_query
+    database
+    {|
+SELECT step_key, finding_key, revision, excerpt_ref, relation
+FROM finding_evidence
+ORDER BY step_key, finding_key, revision, excerpt_ref, relation
+|}
+;;
+
 let () =
   let action, path =
     match Sys.argv with
@@ -492,12 +585,14 @@ let () =
     | [| _; "--create-v7"; path; slug |] -> `Create (7, slug), path
     | [| _; "--create-v8"; path; slug |] -> `Create (8, slug), path
     | [| _; "--create-v9"; path; slug |] -> `Create (9, slug), path
+    | [| _; "--create-v10"; path; slug |] -> `Create (10, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
     | [| _; "--inspect-snapshots"; path |] -> `Inspect_snapshots, path
     | [| _; "--inspect-excerpts"; path |] -> `Inspect_excerpts, path
     | [| _; "--inspect-findings"; path |] -> `Inspect_findings, path
+    | [| _; "--inspect-evidence"; path |] -> `Inspect_evidence, path
     | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
     | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
@@ -516,6 +611,7 @@ let () =
       | `Create (7, slug) -> create_v7 database slug
       | `Create (8, slug) -> create_v8 database slug
       | `Create (9, slug) -> create_v9 database slug
+      | `Create (10, slug) -> create_v10 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
@@ -524,6 +620,7 @@ let () =
       | `Inspect_snapshots -> inspect_snapshots database
       | `Inspect_excerpts -> inspect_excerpts database
       | `Inspect_findings -> inspect_findings database
+      | `Inspect_evidence -> inspect_evidence database
       | `Expire_claim step ->
         let statement =
           Sqlite3.prepare

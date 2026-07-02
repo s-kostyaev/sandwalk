@@ -45,6 +45,10 @@ module Error : sig
     | Finding_wrong_phase of Sandwalk_core.Phase.t
     | Finding_step_mismatch
     | Finding_exists of string
+    | Finding_not_found of string
+    | Excerpt_not_found of string
+    | Finding_excerpt_step_mismatch
+    | Excerpt_stale of string
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -88,6 +92,15 @@ module Create_finding_result : sig
   val step_key : t -> Sandwalk_core.Plan_step.Key.t
   val finding_key : t -> Sandwalk_core.Finding_key.t
   val revision : t -> int
+  val lease_expires_unix_seconds : t -> int64
+end
+
+module Attach_evidence_result : sig
+  type t
+
+  val revision : t -> int
+  val attached : t -> bool
+  val revised : t -> bool
   val lease_expires_unix_seconds : t -> int64
 end
 
@@ -368,3 +381,17 @@ val create_finding
   -> now_unix_seconds:int64
   -> unit
   -> (Create_finding_result.t, Error.t) Result.t
+
+val attach_evidence
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> step_key:Sandwalk_core.Plan_step.Key.t
+  -> finding_key:Sandwalk_core.Finding_key.t
+  -> excerpt_id:Sandwalk_core.Excerpt_id.t
+  -> relation:Sandwalk_core.Finding_relation.t
+  -> now:string
+  -> now_unix_seconds:int64
+  -> unit
+  -> (Attach_evidence_result.t, Error.t) Result.t

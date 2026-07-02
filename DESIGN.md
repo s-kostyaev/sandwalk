@@ -363,8 +363,8 @@ Each attached excerpt has one relation:
 sandwalk finding create --slug <slug> --step <step> \
   --claim <claim> --key <key> --claim-file <path>
 sandwalk finding attach --slug <slug> --finding <step>/<key> \
-  --excerpt <excerpt> --relation supports
-sandwalk finding seal --slug <slug> --finding <step>/<key>
+  --claim <claim> --excerpt <excerpt> --relation supports
+sandwalk finding seal --slug <slug> --finding <step>/<key> --claim <claim>
 ```
 
 The finding lifecycle is:

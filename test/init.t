@@ -1,5 +1,5 @@
   $ sandwalk init --slug typed-harness --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":10}}
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":11}}
 
   $ find workspaces/typed-harness -type d | sort
   workspaces/typed-harness
@@ -14,7 +14,7 @@
 
   $ ./inspect_workspace.exe workspaces/typed-harness/database/sandwalk.sqlite3
   typed-harness|initialized
-  10
+  11
   wal
   ok
 
@@ -22,7 +22,7 @@
          2
 
   $ sandwalk status --slug typed-harness --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":10}}
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":11}}
 
   $ wc -l < workspaces/typed-harness/logs/events.jsonl
          4
@@ -35,7 +35,7 @@
          6
 
   $ SANDWALK_DIRECTORY_PREFIX=workspaces sandwalk status --slug typed-harness
-  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":10}}
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":11}}
 
   $ sandwalk status --slug missing --directory-prefix workspaces
   {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}
