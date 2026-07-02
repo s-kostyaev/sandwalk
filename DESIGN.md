@@ -365,6 +365,8 @@ sandwalk finding create --slug <slug> --step <step> \
 sandwalk finding attach --slug <slug> --finding <step>/<key> \
   --claim <claim> --excerpt <excerpt> --relation supports
 sandwalk finding seal --slug <slug> --finding <step>/<key> --claim <claim>
+sandwalk finding review --slug <slug> --finding <step>/<key> \
+  --claim <claim> --review-file <path>
 ```
 
 The finding lifecycle is:
@@ -382,6 +384,15 @@ Finding statements are non-empty files of at most 65,536 bytes. Every finding
 mutation in `researching` also requires `--claim <claim>` for the active lease
 that owns the named plan step; `--claim-file` is the statement content, not the
 lease capability. Successful mutations renew that lease transactionally.
+
+Finding reviews are bounded JSON using protocol
+`sandwalk.finding-review.v1`. They record one agent-authored verdict
+(`supported`, `partially-supported`, `unsupported`, or `contradicted`) plus a
+non-empty summary and explicit source-quality, conflict, and qualification
+notes. Sandwalk accepts a review only for the current sealed revision. Repeating
+the identical review is idempotent; a different review cannot silently replace
+it. Editing reviewed content creates a new draft revision, so the prior review
+is stale by construction.
 
 ## Validation gates
 

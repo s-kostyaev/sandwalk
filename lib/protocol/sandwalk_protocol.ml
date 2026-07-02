@@ -332,6 +332,78 @@ module Fetch_adapter = struct
   let markdown_sha256 t = t.markdown_sha256
 end
 
+module Finding_review = struct
+  type verdict =
+    | Supported
+    | Partially_supported
+    | Unsupported
+    | Contradicted
+
+  type t =
+    { verdict : verdict
+    ; summary : string
+    ; source_quality : string
+    ; conflicts : string
+    ; qualifications : string
+    }
+
+  type error =
+    | Invalid_review
+    | Unsupported_protocol
+  [@@deriving sexp_of]
+
+  let bounded_string fields name =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`String value) when String.length value <= 4_000 -> Some value
+    | Some _ | None -> None
+  ;;
+
+  let verdict_of_string = function
+    | "supported" -> Some Supported
+    | "partially-supported" -> Some Partially_supported
+    | "unsupported" -> Some Unsupported
+    | "contradicted" -> Some Contradicted
+    | _ -> None
+  ;;
+
+  let verdict_to_string = function
+    | Supported -> "supported"
+    | Partially_supported -> "partially-supported"
+    | Unsupported -> "unsupported"
+    | Contradicted -> "contradicted"
+  ;;
+
+  let decode = function
+    | `Assoc fields ->
+      (match List.Assoc.find fields "protocol" ~equal:String.equal with
+       | Some (`String "sandwalk.finding-review.v1") ->
+         let open Option.Let_syntax in
+         let parsed =
+           let%bind verdict_text = bounded_string fields "verdict" in
+           let%bind verdict = verdict_of_string verdict_text in
+           let%bind summary = bounded_string fields "summary" in
+           let%bind source_quality = bounded_string fields "source_quality" in
+           let%bind conflicts = bounded_string fields "conflicts" in
+           let%bind qualifications = bounded_string fields "qualifications" in
+           if String.is_empty (String.strip summary)
+           then None
+           else
+             Some
+               { verdict; summary; source_quality; conflicts; qualifications }
+         in
+         Result.of_option parsed ~error:Invalid_review
+       | Some (`String _) -> Error Unsupported_protocol
+       | Some _ | None -> Error Invalid_review)
+    | _ -> Error Invalid_review
+  ;;
+
+  let verdict t = t.verdict
+  let summary t = t.summary
+  let source_quality t = t.source_quality
+  let conflicts t = t.conflicts
+  let qualifications t = t.qualifications
+end
+
 let%expect_test "renders a compact failure with one next command" =
   Envelope.failure
     ~code:"PLAN_NOT_VALIDATED"
@@ -461,4 +533,21 @@ let%expect_test "fetch manifests require a successful mq gate" =
   |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
   |> print_s;
   [%expect {| (Error Queryability_check_failed) |}]
+;;
+
+let%expect_test "finding reviews are versioned and agent-authored" =
+  `Assoc
+    [ "protocol", `String "sandwalk.finding-review.v1"
+    ; "verdict", `String "partially-supported"
+    ; "summary", `String "The exact excerpt supports the narrow claim."
+    ; "source_quality", `String "Primary source."
+    ; "conflicts", `String ""
+    ; "qualifications", `String "Keep the claim narrow."
+    ]
+  |> Finding_review.decode
+  |> Result.map ~f:(fun review ->
+    Finding_review.verdict review |> Finding_review.verdict_to_string)
+  |> [%sexp_of: (string, Finding_review.error) Result.t]
+  |> print_s;
+  [%expect {| (Ok partially-supported) |}]
 ;;

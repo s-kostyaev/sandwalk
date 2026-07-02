@@ -50,6 +50,8 @@ module Error : sig
     | Finding_excerpt_step_mismatch
     | Excerpt_stale of string
     | Finding_has_no_evidence of string
+    | Finding_not_sealed of string
+    | Finding_review_conflict of string
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -111,6 +113,14 @@ module Seal_finding_result : sig
   val revision : t -> int
   val already_sealed : t -> bool
   val state : t -> string
+  val lease_expires_unix_seconds : t -> int64
+end
+
+module Review_finding_result : sig
+  type t
+
+  val revision : t -> int
+  val reviewed : t -> bool
   val lease_expires_unix_seconds : t -> int64
 end
 
@@ -417,3 +427,22 @@ val seal_finding
   -> now_unix_seconds:int64
   -> unit
   -> (Seal_finding_result.t, Error.t) Result.t
+
+val review_finding
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> step_key:Sandwalk_core.Plan_step.Key.t
+  -> finding_key:Sandwalk_core.Finding_key.t
+  -> verdict:string
+  -> summary:string
+  -> source_quality:string
+  -> conflicts:string
+  -> qualifications:string
+  -> review_json:string
+  -> review_md5:string
+  -> now:string
+  -> now_unix_seconds:int64
+  -> unit
+  -> (Review_finding_result.t, Error.t) Result.t

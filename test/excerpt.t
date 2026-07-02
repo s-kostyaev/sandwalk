@@ -54,7 +54,7 @@ Ambiguous exact text requires a one-based occurrence.
 
   $ ./inspect_workspace.exe workspace/excerpt-test/database/sandwalk.sqlite3
   excerpt-test|researching
-  11
+  12
   wal
   ok
 

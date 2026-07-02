@@ -22,7 +22,7 @@
 
   $ ./inspect_workspace.exe workspace/finding-test/database/sandwalk.sqlite3
   finding-test|researching
-  11
+  12
   wal
   ok
 

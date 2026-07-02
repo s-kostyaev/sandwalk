@@ -90,3 +90,26 @@ module Fetch_adapter : sig
   val input_sha256 : manifest -> string
   val markdown_sha256 : manifest -> string
 end
+
+module Finding_review : sig
+  type verdict =
+    | Supported
+    | Partially_supported
+    | Unsupported
+    | Contradicted
+
+  type t
+
+  type error =
+    | Invalid_review
+    | Unsupported_protocol
+  [@@deriving sexp_of]
+
+  val decode : Yojson.Safe.t -> (t, error) Result.t
+  val verdict : t -> verdict
+  val verdict_to_string : verdict -> string
+  val summary : t -> string
+  val source_quality : t -> string
+  val conflicts : t -> string
+  val qualifications : t -> string
+end
