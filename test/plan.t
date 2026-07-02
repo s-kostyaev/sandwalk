@@ -24,7 +24,7 @@
   {"ok":true,"result":{"slug":"plan-test","phase":"planning","schema_version":20}}
 
   $ sandwalk plan seal --slug plan-test --directory-prefix workspaces
-  {"ok":false,"error":{"code":"PLAN_NOT_VALIDATED","message":"Plan must be validated before sealing."}}
+  {"ok":false,"error":{"code":"PLAN_NOT_VALIDATED","message":"Plan must be validated before sealing."},"next":"'sandwalk' 'plan' 'validate' '--slug' 'plan-test' '--directory-prefix' 'workspaces'"}
   [1]
 
   $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
@@ -65,7 +65,7 @@
   Validation: pending
 
   $ sandwalk plan seal --slug plan-test --directory-prefix workspaces
-  {"ok":false,"error":{"code":"PLAN_VALIDATION_STALE","message":"Plan changed after its last validation."}}
+  {"ok":false,"error":{"code":"PLAN_VALIDATION_STALE","message":"Plan changed after its last validation."},"next":"'sandwalk' 'plan' 'validate' '--slug' 'plan-test' '--directory-prefix' 'workspaces'"}
   [1]
 
   $ sandwalk plan validate --slug plan-test --directory-prefix workspaces

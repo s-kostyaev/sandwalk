@@ -139,6 +139,14 @@ module Audit_event = struct
     let optional name value =
       Option.map value ~f:(fun value -> name, value)
     in
+    let hint =
+      Option.value_map error_code ~default:`Null ~f:(fun code ->
+        `Assoc
+          [ "identifier", `String ("repair." ^ code)
+          ; "template_version", `Int 1
+          ; "follow_up_correlation", `String invocation_id
+          ])
+    in
     `Assoc
       (List.filter_opt
          [ Some ("version", `Int 1)
@@ -178,7 +186,7 @@ module Audit_event = struct
          ; optional
              "error_code"
              (Option.map error_code ~f:(fun value -> `String value))
-         ; Some ("hint", `Null)
+         ; Some ("hint", hint)
          ])
   ;;
 end
@@ -564,7 +572,14 @@ let%test_unit "audit metadata decodes recovery fields" =
     "invocation-1";
   [%test_eq: string option]
     (Audit_event.metadata_error_code metadata)
-    (Some "DATABASE_ERROR")
+    (Some "DATABASE_ERROR");
+  match Yojson.Safe.Util.member "hint" json with
+  | `Assoc fields ->
+    (match List.Assoc.find fields "identifier" ~equal:String.equal with
+     | Some (`String identifier) ->
+       [%test_eq: string] identifier "repair.DATABASE_ERROR"
+     | _ -> failwith "expected internal hint identifier")
+  | _ -> failwith "expected internal hint metadata"
 ;;
 
 let%expect_test "shell commands quote every word" =

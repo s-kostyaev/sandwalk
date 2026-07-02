@@ -24,8 +24,61 @@ let parsed_arguments ~slug ~directory_prefix =
     ]
 ;;
 
+let command_line_flag name =
+  let rec find = function
+    | [] | [ _ ] -> None
+    | flag :: value :: _ when String.equal flag name -> Some value
+    | _ :: rest -> find rest
+  in
+  Sys.get_argv () |> Array.to_list |> find
+;;
+
+let hint_mode () =
+  match Sys.getenv "SANDWALK_HINT_MODE" with
+  | Some "none" -> `None
+  | Some "full" -> `Full
+  | Some "compact" | Some _ | None -> `Compact
+;;
+
+let workspace_hint words =
+  match command_line_flag "--slug" with
+  | None -> None
+  | Some slug ->
+    let words = [ "sandwalk" ] @ words @ [ "--slug"; slug ] in
+    let words =
+      match command_line_flag "--directory-prefix" with
+      | None -> words
+      | Some prefix -> words @ [ "--directory-prefix"; prefix ]
+    in
+    Some (Sandwalk_protocol.Shell_command.of_words words)
+;;
+
+let compact_hint code =
+  match code with
+  | "PLAN_NOT_VALIDATED" | "PLAN_VALIDATION_STALE" ->
+    workspace_hint [ "plan"; "validate" ]
+  | "STEP_DEPENDENCIES_INCOMPLETE" ->
+    workspace_hint [ "next" ]
+  | "CLAIM_EXPIRED" | "STEP_ALREADY_CLAIMED" ->
+    workspace_hint [ "resume" ]
+  | "GC_PLAN_STALE" -> workspace_hint [ "gc"; "--raw"; "--plan" ]
+  | _ -> None
+;;
+
 let print_failure_and_exit ~code ~message =
-  Sandwalk_protocol.Envelope.failure ~code ~message ()
+  let next =
+    match hint_mode () with
+    | `None -> None
+    | `Compact -> compact_hint code
+    | `Full ->
+      if String.equal code "UNKNOWN_ERROR_CODE"
+      then None
+      else
+        Some
+          (Sandwalk_protocol.Shell_command.of_words
+             [ "sandwalk"; "explain"; code ])
+  in
+  Sandwalk_protocol.Envelope.failure ~code ~message ?next ()
   |> Sandwalk_protocol.Envelope.render
   |> print_endline;
   Shutdown.exit 1

@@ -547,7 +547,11 @@ sandwalk next --slug <slug>
 ```
 
 Hint modes are `none`, `compact`, and `full`. The bundled skill uses `compact`.
-The default compact response has a strict byte budget.
+`SANDWALK_HINT_MODE` selects the mode and defaults to `compact`. `none`
+suppresses repair commands, `compact` emits a command only when Sandwalk can
+derive a safe deterministic repair from the current invocation, and `full`
+points to the static `explain` entry. The default compact response has a strict
+byte budget.
 
 Sandwalk does not modify hint templates from runtime data. Logs may be analyzed
 offline, and improved versioned templates ship in later releases.

@@ -14,7 +14,7 @@ Plans are hash-bound and cannot be edited before apply.
 
   $ printf ' ' >> workspace/gc-test/artifacts/gc-raw-plan.json
   $ sandwalk gc --slug gc-test --directory-prefix workspace --raw --apply
-  {"ok":false,"error":{"code":"GC_PLAN_STALE","message":"Raw cleanup plan is stale or modified."}}
+  {"ok":false,"error":{"code":"GC_PLAN_STALE","message":"Raw cleanup plan is stale or modified."},"next":"'sandwalk' 'gc' '--raw' '--plan' '--slug' 'gc-test' '--directory-prefix' 'workspace'"}
   [1]
 
   $ sandwalk gc --slug gc-test --directory-prefix workspace --raw --plan >/dev/null

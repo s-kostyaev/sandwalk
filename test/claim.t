@@ -22,7 +22,7 @@
 
   $ sandwalk step claim --slug claim-test --directory-prefix workspaces \
   >   --step primary --lease-seconds 60
-  {"ok":false,"error":{"code":"STEP_ALREADY_CLAIMED","message":"Plan step already has an active claim."}}
+  {"ok":false,"error":{"code":"STEP_ALREADY_CLAIMED","message":"Plan step already has an active claim."},"next":"'sandwalk' 'resume' '--slug' 'claim-test' '--directory-prefix' 'workspaces'"}
   [1]
 
 Two concurrent contenders must produce exactly one claim.
@@ -40,7 +40,7 @@ Two concurrent contenders must produce exactly one claim.
   $ cat one.out two.out | \
   >   sed -E 's/claim_[0-9a-f]{32}/claim_ID/g; s/"lease_expires_at":"[^"]+"/"lease_expires_at":"TIMESTAMP"/' | \
   >   sort
-  {"ok":false,"error":{"code":"STEP_ALREADY_CLAIMED","message":"Plan step already has an active claim."}}
+  {"ok":false,"error":{"code":"STEP_ALREADY_CLAIMED","message":"Plan step already has an active claim."},"next":"'sandwalk' 'resume' '--slug' 'claim-test' '--directory-prefix' 'workspaces'"}
   {"ok":true,"result":{"claim":"claim_ID","step":"parallel","attempt":1,"lease_expires_at":"TIMESTAMP"}}
 
   $ ./inspect_workspace.exe --inspect-claims workspaces/claim-test/database/sandwalk.sqlite3

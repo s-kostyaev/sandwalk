@@ -52,7 +52,7 @@ Cycles and self-dependencies are rejected transactionally.
 
   $ sandwalk step claim \
   >   --slug dag-test --directory-prefix workspaces --step synthesize
-  {"ok":false,"error":{"code":"STEP_DEPENDENCIES_INCOMPLETE","message":"Plan step \"synthesize\" has incomplete dependencies."}}
+  {"ok":false,"error":{"code":"STEP_DEPENDENCIES_INCOMPLETE","message":"Plan step \"synthesize\" has incomplete dependencies."},"next":"'sandwalk' 'next' '--slug' 'dag-test' '--directory-prefix' 'workspaces'"}
   [1]
 
   $ sandwalk step claim \

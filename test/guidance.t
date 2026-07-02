@@ -19,6 +19,16 @@
   >   --key source-review --title "Review source"
   {"ok":true,"result":{"key":"source-review","title":"Review source","required":true,"position":1,"phase":"planning","plan_path":"workspaces/guidance-test/exports/research-plan.md"}}
 
+  $ SANDWALK_HINT_MODE=none sandwalk plan seal \
+  >   --slug guidance-test --directory-prefix workspaces
+  {"ok":false,"error":{"code":"PLAN_NOT_VALIDATED","message":"Plan must be validated before sealing."}}
+  [1]
+
+  $ SANDWALK_HINT_MODE=full sandwalk plan seal \
+  >   --slug guidance-test --directory-prefix workspaces
+  {"ok":false,"error":{"code":"PLAN_NOT_VALIDATED","message":"Plan must be validated before sealing."},"next":"'sandwalk' 'explain' 'PLAN_NOT_VALIDATED'"}
+  [1]
+
   $ sandwalk next --slug guidance-test --directory-prefix workspaces
   {"ok":true,"result":{"phase":"planning"},"next":"'sandwalk' 'plan' 'validate' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
 

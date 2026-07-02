@@ -7,7 +7,8 @@ description: Conduct durable, source-grounded research with Sandwalk, including 
 
 Use Sandwalk as the durable system of record. Sandwalk never supplies reasoning
 or prose: perform those tasks yourself, then submit bounded artifacts through
-its commands.
+its commands. Use the default compact hint mode (or set
+`SANDWALK_HINT_MODE=compact` explicitly).
 
 ## Workflow
 

@@ -46,7 +46,7 @@
 
   $ sandwalk step checkpoint --slug checkpoint-test --directory-prefix workspaces \
   >   --claim "$claim" --summary-file summary.md --next-file next.md
-  {"ok":false,"error":{"code":"CLAIM_EXPIRED","message":"Claim lease has expired."}}
+  {"ok":false,"error":{"code":"CLAIM_EXPIRED","message":"Claim lease has expired."},"next":"'sandwalk' 'resume' '--slug' 'checkpoint-test' '--directory-prefix' 'workspaces'"}
   [1]
 
   $ ./inspect_workspace.exe --inspect-claims workspaces/checkpoint-test/database/sandwalk.sqlite3
