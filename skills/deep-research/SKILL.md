@@ -10,14 +10,43 @@ or prose: perform those tasks yourself, then submit bounded artifacts through
 its commands. Use the default compact hint mode (or set
 `SANDWALK_HINT_MODE=compact` explicitly).
 
+## Required startup
+
+Before the first Sandwalk or network command, read
+[references/commands.md](references/commands.md) completely. Treat its command
+forms as canonical; do not guess flags or subcommands.
+
+Choose exactly one writable directory prefix:
+
+- If `SANDWALK_DIRECTORY_PREFIX` is non-empty, use it and never pass a
+  conflicting `--directory-prefix`.
+- Otherwise choose one prefix and pass the same `--directory-prefix` to every
+  workspace command.
+
+After `sandwalk init --slug <slug>` succeeds, do not initialize that workspace
+again. Continue with `status`, `next`, or `resume` using the same prefix.
+
+## Exclusive retrieval
+
+While this skill is active, Sandwalk is the only permitted path for every
+network search and fetch, including reconnaissance. Do not load or invoke
+another web-search, browsing, or fetch skill. Do not call `ddgr`, `curl`,
+`wget`, a browser, or an HTTP client directly. These programs may run only
+behind a Sandwalk adapter.
+
+Use `sandwalk search` to discover persisted hits, `sandwalk fetch` to create
+immutable snapshots, and read only the returned `document.md`. If either
+command fails, diagnose and retry its adapter; never substitute another
+retrieval path.
+
 ## Workflow
 
-1. Choose one writable directory prefix before initialization. Prefer setting
-   `SANDWALK_DIRECTORY_PREFIX`; otherwise pass the same `--directory-prefix`
-   to every workspace command. Create a workspace with a short lowercase slug.
+1. Create one workspace with a short lowercase slug using the required startup
+   rules above.
 2. Perform bounded reconnaissance whenever the topic name is unfamiliar or
-   ambiguous. Resolve its identity from a fetched source, never from memory,
-   before recording the objective or sealing the plan.
+   ambiguous. Resolve its identity with Sandwalk search and a fetched
+   `document.md`, never from memory or search snippets, before recording the
+   objective or sealing the plan.
 3. Record the objective, an append-only step plan, and dependency edges;
    validate and seal the plan. Run `sandwalk next` when the required command is
    unclear.
@@ -51,10 +80,4 @@ edit the SQLite database, projections, snapshots, excerpts, or audit log.
   `[cite:step-key/finding-key]`; Sandwalk renders final citations.
 - If a command fails, use `sandwalk explain CODE`, repair the stated invariant,
   and retry.
-- If search or fetch fails, diagnose and retry the Sandwalk adapter. Do not
-  replace it with direct browsing or `curl`, because that bypasses persisted
-  provenance.
 - Keep at most one live claim per worker and checkpoint before handing work off.
-
-Read [references/commands.md](references/commands.md) when exact command
-arguments, review envelopes, or the end-to-end sequence are needed.
