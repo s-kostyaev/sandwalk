@@ -448,10 +448,12 @@ end
 
 module Recon_result = struct
   type t =
-    { phase : Sandwalk_core.Phase.t
+    { previous_phase : Sandwalk_core.Phase.t
+    ; phase : Sandwalk_core.Phase.t
     ; observation_count : int
     }
 
+  let previous_phase t = t.previous_phase
   let phase t = t.phase
   let observation_count t = t.observation_count
 end
@@ -2093,6 +2095,8 @@ let start_reconnaissance
                   ]
               | Sandwalk_core.Phase.Scoping ->
                 Ok [ Sandwalk_core.Phase.Reconnaissance ]
+              | Sandwalk_core.Phase.Planning ->
+                Ok [ Sandwalk_core.Phase.Reconnaissance ]
               | _ -> Error (Error.Recon_start_wrong_phase phase)
             in
             let%bind path = path in
@@ -2110,6 +2114,17 @@ let start_reconnaissance
 INSERT INTO reconnaissance (
   singleton, goal_text, goal_path, goal_md5, goal_size, started_at
 ) VALUES (1, ?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(singleton) DO UPDATE SET
+  goal_text = excluded.goal_text,
+  goal_path = excluded.goal_path,
+  goal_md5 = excluded.goal_md5,
+  goal_size = excluded.goal_size,
+  started_at = excluded.started_at,
+  summary_text = NULL,
+  summary_path = NULL,
+  summary_md5 = NULL,
+  summary_size = NULL,
+  finished_at = NULL
 |}
                 ~f:(fun statement ->
                   let%bind () = bind_text database statement 1 goal_text in
@@ -2127,10 +2142,11 @@ INSERT INTO reconnaissance (
                 ~phase:Sandwalk_core.Phase.Reconnaissance
                 ~now
             in
-            Ok
-              { Recon_result.phase = Sandwalk_core.Phase.Reconnaissance
-              ; observation_count = 0
-              }
+            let%map observation_count = query_observation_count database in
+            { Recon_result.previous_phase = phase
+            ; phase = Sandwalk_core.Phase.Reconnaissance
+            ; observation_count
+            }
           in
           (match outcome with
            | Ok result ->
@@ -2219,7 +2235,7 @@ INSERT INTO reconnaissance_observations (
                   step_done database statement)
             in
             let%map observation_count = query_observation_count database in
-            { Recon_result.phase; observation_count }
+            { Recon_result.previous_phase = phase; phase; observation_count }
           in
           (match outcome with
            | Ok result ->
@@ -2309,7 +2325,8 @@ WHERE singleton = 1
             let%map () =
               update_phase database ~phase:Sandwalk_core.Phase.Planning ~now
             in
-            { Recon_result.phase = Sandwalk_core.Phase.Planning
+            { Recon_result.previous_phase = phase
+            ; phase = Sandwalk_core.Phase.Planning
             ; observation_count
             }
           in

@@ -318,6 +318,7 @@ end
 module Recon_result : sig
   type t
 
+  val previous_phase : t -> Sandwalk_core.Phase.t
   val phase : t -> Sandwalk_core.Phase.t
   val observation_count : t -> int
 end

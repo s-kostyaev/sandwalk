@@ -2959,9 +2959,13 @@ let recon_file_command kind =
                       let state_changes =
                         match kind with
                         | `Start ->
+                          let previous_phase =
+                            Sandwalk_store.Recon_result.previous_phase result
+                            |> Sandwalk_core.Phase.to_string
+                          in
                           [ `Assoc
                               [ "entity", `String "workspace.phase"
-                              ; "from", `String "initialized"
+                              ; "from", `String previous_phase
                               ; "to", `String phase
                               ]
                           ]

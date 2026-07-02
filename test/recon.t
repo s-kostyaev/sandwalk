@@ -38,6 +38,30 @@ Search and fetch do not require a claim during reconnaissance.
   Map the small topic before planning.|Proceed with one narrow evidence step.|1
   1|The primary result defines the topic boundary.
 
+Planning may reopen reconnaissance without discarding prior observations.
+
+  $ printf 'Refine the source boundary before sealing.' > refined-goal.md
+  $ sandwalk recon start \
+  >   --slug recon-test --directory-prefix workspaces \
+  >   --goal-file refined-goal.md
+  {"ok":true,"result":{"phase":"reconnaissance","observations":1}}
+
+  $ printf 'The refined boundary still needs one primary source.' > refined.md
+  $ sandwalk recon add-observation \
+  >   --slug recon-test --directory-prefix workspaces --text-file refined.md
+  {"ok":true,"result":{"phase":"reconnaissance","observations":2}}
+
+  $ printf 'Return to the existing plan with the refined boundary.' > refined-summary.md
+  $ sandwalk recon finish \
+  >   --slug recon-test --directory-prefix workspaces \
+  >   --summary-file refined-summary.md
+  {"ok":true,"result":{"phase":"planning","observations":2}}
+
+  $ ./inspect_workspace.exe --inspect-recon workspaces/recon-test/database/sandwalk.sqlite3
+  Refine the source boundary before sealing.|Return to the existing plan with the refined boundary.|1
+  1|The primary result defines the topic boundary.
+  2|The refined boundary still needs one primary source.
+
   $ sandwalk plan add-step \
   >   --slug recon-test --directory-prefix workspaces \
   >   --key narrow-evidence --title 'Collect narrow evidence'
