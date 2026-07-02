@@ -234,6 +234,24 @@ module Claim_id = struct
   let to_string t = t
 end
 
+module Hit_id = struct
+  type t = string
+
+  let of_string value =
+    if
+      String.length value = 36
+      && String.is_prefix value ~prefix:"hit_"
+      && String.drop_prefix value 4
+         |> String.for_all ~f:(function
+           | '0' .. '9' | 'a' .. 'f' -> true
+           | _ -> false)
+    then Some value
+    else None
+  ;;
+
+  let to_string t = t
+end
+
 module Step_state = struct
   type t =
     | Pending

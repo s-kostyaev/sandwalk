@@ -66,8 +66,18 @@ module File_input : sig
   val md5 : t -> string
 end
 
+module Adapter : sig
+  val run_json
+    :  executable:string
+    -> request:Yojson.Safe.t
+    -> timeout:Time_float.Span.t
+    -> maximum_output_bytes:int
+    -> Yojson.Safe.t Deferred.Or_error.t
+end
+
 val default_directory_prefix : unit -> string
 val resolve_directory_prefix : command_line:string option -> string
 val timestamp_utc : Time_float.t -> string
 val invocation_id : now:Time_float.t -> string
 val claim_id : unit -> Sandwalk_core.Claim_id.t
+val hit_id : unit -> Sandwalk_core.Hit_id.t

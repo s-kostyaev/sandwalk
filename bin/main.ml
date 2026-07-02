@@ -194,7 +194,10 @@ let status_error = function
   | Invalid_step_state _
   | Claim_not_found
   | Claim_not_active
-  | Claim_expired _ ->
+  | Claim_expired _
+  | Search_wrong_phase _
+  | Search_requires_claim
+  | Hit_id_collision ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -1994,6 +1997,325 @@ let step_checkpoint_command =
                          Deferred.unit))))))
 ;;
 
+let search_error = function
+  | Sandwalk_store.Error.Search_wrong_phase _ ->
+    "SEARCH_NOT_ALLOWED", "Search is not allowed in the current phase."
+  | Search_requires_claim ->
+    "SEARCH_REQUIRES_CLAIM", "Research search requires an active claim."
+  | Hit_id_collision ->
+    "HIT_ID_COLLISION", "Could not allocate unique search-hit references."
+  | error -> claim_error error
+;;
+
+let search_command =
+  Async.Command.async
+    ~summary:"Run a bounded search adapter and persist provenance-owned hits."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag
+         "--directory-prefix"
+         (optional string)
+         ~doc:"PATH Parent directory for Sandwalk workspaces"
+     and query =
+       flag "--query" (required string) ~doc:"QUERY Search query"
+     and claim_text =
+       flag "--claim" (optional string) ~doc:"CLAIM Active research claim"
+     and limit =
+       flag
+         "--limit"
+         (optional_with_default 10 int)
+         ~doc:"N Maximum results from 1 to 25"
+     and adapter =
+       flag
+         "--adapter"
+         (optional_with_default "sandwalk-search-ddgr" string)
+         ~doc:"PATH Search adapter executable"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         if String.is_empty query || String.length query > 2_048
+         then
+           print_failure_and_exit
+             ~code:"INVALID_QUERY"
+             ~message:"Search query must contain between 1 and 2048 bytes."
+         else if limit < 1 || limit > 25
+         then
+           print_failure_and_exit
+             ~code:"INVALID_SEARCH_LIMIT"
+             ~message:"Search limit must be between 1 and 25."
+         else (
+           let claim_id =
+             match claim_text with
+             | None -> Ok None
+             | Some value ->
+               Sandwalk_core.Claim_id.of_string value
+               |> Result.of_option ~error:"Claim identifier is invalid."
+               |> Result.map ~f:Option.some
+           in
+           match claim_id with
+           | Error message ->
+             print_failure_and_exit ~code:"INVALID_CLAIM" ~message
+           | Ok claim_id ->
+             let directory_prefix =
+               Sandwalk_runtime.resolve_directory_prefix
+                 ~command_line:directory_prefix
+             in
+             let workspace =
+               Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+             in
+             let%bind database_exists =
+               Async.Sys.file_exists_exn
+                 (Sandwalk_runtime.Workspace.database_path workspace)
+             in
+             if not database_exists
+             then
+               print_failure_and_exit
+                 ~code:"WORKSPACE_NOT_FOUND"
+                 ~message:"Workspace does not exist."
+             else (
+               let%bind status =
+                 In_thread.run (fun () ->
+                   Sandwalk_store.read_status
+                     ~database_path:
+                       (Sandwalk_runtime.Workspace.database_path workspace)
+                     ~expected_slug:slug
+                     ())
+               in
+               match status with
+               | Error error ->
+                 let code, message = status_error error in
+                 print_failure_and_exit ~code ~message
+               | Ok status
+                 when Sandwalk_core.Phase.equal
+                        (Sandwalk_store.Workspace_status.phase status)
+                        Sandwalk_core.Phase.Researching
+                      && Option.is_none claim_id ->
+                 print_failure_and_exit
+                   ~code:"SEARCH_REQUIRES_CLAIM"
+                   ~message:"Research search requires an active claim."
+               | Ok _ ->
+                 let arguments =
+                   `Assoc
+                     [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                     ; "directory_prefix", `String directory_prefix
+                     ; "query", `String query
+                     ; "limit", `Int limit
+                     ; "adapter", `String adapter
+                     ; ( "claim"
+                       , Option.value_map
+                           claim_text
+                           ~default:`Null
+                           ~f:(fun value -> `String value) )
+                     ]
+                 in
+                 let started_at = Time_float_unix.now () in
+                 let%bind invocation_id =
+                   In_thread.run (fun () ->
+                     Sandwalk_runtime.invocation_id ~now:started_at)
+                 in
+                 let append_event
+                       ~kind
+                       ~timestamp
+                       ~phase
+                       ~state_changes
+                       ?created_references
+                       ?duration_ms
+                       ?outcome
+                       ?error_code
+                       ()
+                   =
+                   Sandwalk_runtime.Audit.append
+                     ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                     (Sandwalk_protocol.Audit_event.create
+                        ~invocation_id
+                        ~timestamp
+                        ~kind
+                        ~command:"search"
+                        ~arguments
+                        ~phase
+                        ?claim:claim_text
+                        ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                        ~state_changes
+                        ~consumed_references:
+                          (Option.to_list claim_text)
+                        ?created_references
+                        ?duration_ms
+                        ?outcome
+                        ?error_code
+                        ())
+                 in
+                 let fail_with_audit ~code ~message =
+                   let finished_at = Time_float_unix.now () in
+                   let duration_ms =
+                     Time_float.diff finished_at started_at
+                     |> Time_float.Span.to_ms
+                     |> Float.iround_nearest_exn
+                   in
+                   let%bind logged =
+                     append_event
+                       ~kind:`Failed
+                       ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                       ~phase:None
+                       ~state_changes:[]
+                       ~duration_ms
+                       ~outcome:"failure"
+                       ~error_code:code
+                       ()
+                   in
+                   match logged with
+                   | Error _ ->
+                     print_failure_and_exit
+                       ~code:"AUDIT_LOG_ERROR"
+                       ~message:"Could not append workspace audit log."
+                   | Ok () -> print_failure_and_exit ~code ~message
+                 in
+                 let%bind started =
+                   append_event
+                     ~kind:`Started
+                     ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                     ~phase:None
+                     ~state_changes:[]
+                     ()
+                 in
+                 (match started with
+                  | Error _ ->
+                    print_failure_and_exit
+                      ~code:"AUDIT_LOG_ERROR"
+                      ~message:"Could not append workspace audit log."
+                  | Ok () ->
+                    let request =
+                      Sandwalk_protocol.Search_adapter.request ~query ~limit
+                    in
+                    let%bind adapter_output =
+                      Sandwalk_runtime.Adapter.run_json
+                        ~executable:adapter
+                        ~request
+                        ~timeout:(Time_float.Span.of_sec 30.)
+                        ~maximum_output_bytes:262_144
+                    in
+                    (match adapter_output with
+                     | Error _ ->
+                       fail_with_audit
+                         ~code:"SEARCH_ADAPTER_FAILED"
+                         ~message:"Search adapter failed."
+                     | Ok adapter_output ->
+                       (match
+                          Sandwalk_protocol.Search_adapter.results adapter_output
+                        with
+                        | Error _ ->
+                          fail_with_audit
+                            ~code:"SEARCH_PROTOCOL_ERROR"
+                            ~message:"Search adapter returned an invalid response."
+                        | Ok results ->
+                          let%bind hit_ids =
+                            In_thread.run (fun () ->
+                              List.map results ~f:(fun _ ->
+                                Sandwalk_runtime.hit_id ()))
+                          in
+                          let hits =
+                            List.map2_exn hit_ids results ~f:(fun hit_id result ->
+                              ( hit_id
+                              , Sandwalk_protocol.Search_adapter.url result
+                              , Sandwalk_protocol.Search_adapter.title result
+                              , Sandwalk_protocol.Search_adapter.snippet result ))
+                          in
+                          let persisted_at = Time_float_unix.now () in
+                          let now_unix_seconds =
+                            Time_float.to_span_since_epoch persisted_at
+                            |> Time_float.Span.to_sec
+                            |> Float.iround_down_exn
+                            |> Int64.of_int
+                          in
+                          let%bind persisted =
+                            In_thread.run (fun () ->
+                              Sandwalk_store.record_search
+                                ~database_path:
+                                  (Sandwalk_runtime.Workspace.database_path
+                                     workspace)
+                                ~expected_slug:slug
+                                ~claim_id
+                                ~query
+                                ~adapter
+                                ~hits
+                                ~now:
+                                  (Sandwalk_runtime.timestamp_utc persisted_at)
+                                ~now_unix_seconds
+                                ())
+                          in
+                          (match persisted with
+                           | Error error ->
+                             let code, message = search_error error in
+                             fail_with_audit ~code ~message
+                           | Ok persisted ->
+                             let stored_hits =
+                               Sandwalk_store.Record_search_result.hits persisted
+                             in
+                             let references =
+                               List.map stored_hits ~f:(fun hit ->
+                                 Sandwalk_store.Stored_hit.hit_id hit
+                                 |> Sandwalk_core.Hit_id.to_string)
+                             in
+                             let phase =
+                               Option.value_map
+                                 (Sandwalk_store.Record_search_result.step_key
+                                    persisted)
+                                 ~default:"reconnaissance"
+                                 ~f:(Fn.const "researching")
+                             in
+                             let state_changes =
+                               [ `Assoc
+                                   [ "entity", `String "search.hits"
+                                   ; "from", `Int 0
+                                   ; "to", `Int (List.length references)
+                                   ]
+                               ]
+                             in
+                             let finished_at = Time_float_unix.now () in
+                             let duration_ms =
+                               Time_float.diff finished_at started_at
+                               |> Time_float.Span.to_ms
+                               |> Float.iround_nearest_exn
+                             in
+                             let%bind logged =
+                               append_event
+                                 ~kind:`Finished
+                                 ~timestamp:
+                                   (Sandwalk_runtime.timestamp_utc finished_at)
+                                 ~phase:(Some phase)
+                                 ~state_changes
+                                 ~created_references:references
+                                 ~duration_ms
+                                 ~outcome:"success"
+                                 ()
+                             in
+                             (match logged with
+                              | Error _ ->
+                                print_failure_and_exit
+                                  ~code:"AUDIT_LOG_ERROR"
+                                  ~message:
+                                    "Could not append workspace audit log."
+                              | Ok () ->
+                                let result =
+                                  `Assoc
+                                    [ "count", `Int (List.length references)
+                                    ; ( "hits"
+                                      , `List
+                                          (List.map references ~f:(fun reference ->
+                                             `String reference)) )
+                                    ]
+                                in
+                                Sandwalk_protocol.Envelope.success ~result ()
+                                |> Sandwalk_protocol.Envelope.render
+                                |> print_endline;
+                                Deferred.unit))))))))
+;;
+
 let step_command =
   Async.Command.group
     ~summary:"Manage durable plan-step execution."
@@ -2007,6 +2329,7 @@ let command =
     ; "init", init_command
     ; "plan", plan_command
     ; "resume", resume_command
+    ; "search", search_command
     ; "status", status_command
     ; "step", step_command
     ]

@@ -132,7 +132,7 @@ records terms, themes, authoritative domains, and scope boundaries.
 
 ```console
 sandwalk recon start --slug <slug> --goal-file <path>
-sandwalk search --slug <slug> --query <query>
+sandwalk search --slug <slug> --query <query> [--claim <claim>]
 sandwalk fetch --slug <slug> <hit-ref>
 sandwalk recon add-observation --slug <slug> ...
 sandwalk recon finish --slug <slug> --summary-file <path>
@@ -142,6 +142,10 @@ Snapshots discovered during reconnaissance are ordinary immutable snapshots.
 They are tagged with their purpose and may later be promoted to a research plan
 step without being fetched again. Reconnaissance observations are not findings
 and cannot pass report validation by themselves.
+
+Searches in `researching` require the active step claim and renew its lease only
+after the bounded adapter response and minted hit references commit. Adapter
+execution occurs before the short persistence transaction.
 
 ## Plan
 

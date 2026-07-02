@@ -103,6 +103,13 @@ module Claim_id : sig
   val to_string : t -> string
 end
 
+module Hit_id : sig
+  type t
+
+  val of_string : string -> t option
+  val to_string : t -> string
+end
+
 module Step_state : sig
   type t =
     | Pending

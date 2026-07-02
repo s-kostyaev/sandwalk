@@ -290,6 +290,39 @@ module File_input = struct
   ;;
 end
 
+module Adapter = struct
+  let run_json ~executable ~request ~timeout ~maximum_output_bytes =
+    Deferred.Or_error.try_with (fun () ->
+      let search_path =
+        Sys.getenv "PATH"
+        |> Option.value ~default:""
+        |> String.split ~on:':'
+      in
+      let%bind process =
+        Process.create_exn
+          ~prog_search_path:search_path
+          ~stdin:(Yojson.Safe.to_string request)
+          ~prog:executable
+          ~args:[]
+          ()
+      in
+      let output = Process.collect_output_and_wait process in
+      let%bind timed = Clock.with_timeout timeout output in
+      let%bind output =
+        match timed with
+        | `Result output -> Deferred.return output
+        | `Timeout ->
+          Process.send_signal process Signal.kill;
+          let%map _ = output in
+          failwith "Adapter process timed out"
+      in
+      Core_unix.Exit_or_signal.or_error output.exit_status |> Or_error.ok_exn;
+      if String.length output.stdout > maximum_output_bytes
+      then failwith "Adapter output exceeded its byte limit";
+      Yojson.Safe.from_string output.stdout |> Deferred.return)
+  ;;
+end
+
 let default_directory_prefix () =
   match Sys.getenv "XDG_DATA_HOME" with
   | Some directory -> Filename.concat directory "sandwalk"
@@ -353,4 +386,13 @@ let claim_id () =
       sprintf "%02x" (Char.to_int character))
   in
   Sandwalk_core.Claim_id.of_string ("claim_" ^ suffix) |> Option.value_exn
+;;
+
+let hit_id () =
+  let suffix =
+    random_bits ()
+    |> String.concat_map ~f:(fun character ->
+      sprintf "%02x" (Char.to_int character))
+  in
+  Sandwalk_core.Hit_id.of_string ("hit_" ^ suffix) |> Option.value_exn
 ;;

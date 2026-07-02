@@ -192,6 +192,38 @@ PRAGMA user_version = 5;
 |})
 ;;
 
+let create_v6 database slug =
+  create_v5 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+ALTER TABLE claims ADD COLUMN lease_duration_seconds INTEGER
+  CHECK (lease_duration_seconds BETWEEN 30 AND 86400);
+UPDATE claims SET lease_duration_seconds = 900;
+CREATE TABLE checkpoints (
+  checkpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+  checkpoint_number INTEGER NOT NULL CHECK (checkpoint_number >= 1),
+  created_at TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  next TEXT NOT NULL,
+  summary_path TEXT NOT NULL,
+  summary_md5 TEXT NOT NULL,
+  summary_size INTEGER NOT NULL CHECK (summary_size >= 0),
+  next_path TEXT NOT NULL,
+  next_md5 TEXT NOT NULL,
+  next_size INTEGER NOT NULL CHECK (next_size >= 0),
+  UNIQUE (step_key, checkpoint_number)
+);
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (6, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 6;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -228,6 +260,16 @@ ORDER BY checkpoint_id
 |}
 ;;
 
+let inspect_hits database =
+  print_query
+    database
+    {|
+SELECT length(hit_ref), position, url, title, snippet
+FROM search_hits
+ORDER BY position
+|}
+;;
+
 let () =
   let action, path =
     match Sys.argv with
@@ -236,8 +278,10 @@ let () =
     | [| _; "--create-v3"; path; slug |] -> `Create (3, slug), path
     | [| _; "--create-v4"; path; slug |] -> `Create (4, slug), path
     | [| _; "--create-v5"; path; slug |] -> `Create (5, slug), path
+    | [| _; "--create-v6"; path; slug |] -> `Create (6, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
+    | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
     | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
     | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
@@ -252,10 +296,12 @@ let () =
       | `Create (3, slug) -> create_v3 database slug
       | `Create (4, slug) -> create_v4 database slug
       | `Create (5, slug) -> create_v5 database slug
+      | `Create (6, slug) -> create_v6 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
       | `Inspect_checkpoints -> inspect_checkpoints database
+      | `Inspect_hits -> inspect_hits database
       | `Expire_claim step ->
         let statement =
           Sqlite3.prepare

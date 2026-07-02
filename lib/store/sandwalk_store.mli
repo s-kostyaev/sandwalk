@@ -29,8 +29,30 @@ module Error : sig
     | Claim_not_found
     | Claim_not_active
     | Claim_expired of string
+    | Search_wrong_phase of Sandwalk_core.Phase.t
+    | Search_requires_claim
+    | Hit_id_collision
     | Database_error of string
   [@@deriving sexp_of]
+end
+
+module Stored_hit : sig
+  type t
+
+  val hit_id : t -> Sandwalk_core.Hit_id.t
+  val position : t -> int
+  val url : t -> string
+  val title : t -> string
+  val snippet : t -> string
+end
+
+module Record_search_result : sig
+  type t
+
+  val previous_schema_version : t -> int
+  val hits : t -> Stored_hit.t list
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t option
+  val lease_expires_unix_seconds : t -> int64 option
 end
 
 module Save_checkpoint_result : sig
@@ -210,3 +232,16 @@ val read_latest_checkpoint
   -> database_path:string
   -> unit
   -> (Latest_checkpoint.t option, Error.t) Result.t
+
+val record_search
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t option
+  -> query:string
+  -> adapter:string
+  -> hits:(Sandwalk_core.Hit_id.t * string * string * string) list
+  -> now:string
+  -> now_unix_seconds:int64
+  -> unit
+  -> (Record_search_result.t, Error.t) Result.t
