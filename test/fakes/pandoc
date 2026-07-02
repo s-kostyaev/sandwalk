@@ -4,9 +4,24 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 
-for argument in "$@"; do
-  input=$argument
+output_format=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --to=*)
+      output_format=${1#--to=}
+      ;;
+    --to)
+      shift
+      output_format=${1:-}
+      ;;
+  esac
+  shift
 done
+
+[ "$output_format" = "gfm-raw_html" ] || {
+  printf 'unexpected pandoc output format: %s\n' "$output_format" >&2
+  exit 64
+}
 
 cat <<'EOF'
 # Fetched title

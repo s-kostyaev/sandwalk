@@ -39,6 +39,9 @@ ddgr diagnostics with an empty result set are adapter failures.
   >   fetch-output/manifest.json
   {"protocol":"sandwalk.fetch-manifest.v1","requested_url":"https://example.test/start","final_url":"https://example.test/final","redirect_count":1,"http":{"status":200,"content_type":"text/html","headers_artifact":"headers.txt"},"queryability_check":{"tool":"mq","query":".tree","ok":true}}
 
+  $ jq -r '.adapter.extraction_profile' fetch-output/manifest.json
+  html-to-gfm-no-raw-html-v1
+
 The manifest is not published when mq cannot query the Markdown.
 
   $ mkdir rejected-output

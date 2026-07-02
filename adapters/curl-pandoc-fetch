@@ -2,6 +2,7 @@
 set -eu
 
 lynx_user_agent='Lynx/2.9.2 libwww-FM/2.14 SSL-MM/1.4.1 GNUTLS/3.8.3'
+extraction_profile='html-to-gfm-no-raw-html-v1'
 request=$(cat)
 protocol=$(printf '%s' "$request" | jq -er '.protocol')
 url=$(printf '%s' "$request" | jq -er '.url')
@@ -39,7 +40,7 @@ curl_metadata=$(
     "$url"
 )
 
-pandoc --from=html --to=gfm --wrap=none "$original" >"$document"
+pandoc --from=html --to=gfm-raw_html --wrap=none "$original" >"$document"
 [ -s "$document" ] || {
   printf '%s\n' 'pandoc produced an empty Markdown document' >&2
   exit 65
@@ -49,7 +50,11 @@ mq "$document" '.tree' >/dev/null
 
 input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
 markdown_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
-configuration_sha256=$(printf '%s' "$lynx_user_agent" | shasum -a 256 | awk '{print $1}')
+configuration_sha256=$(
+  printf '%s\n%s\n' "$lynx_user_agent" "$extraction_profile" |
+    shasum -a 256 |
+    awk '{print $1}'
+)
 curl_version=$(curl --version | sed -n '1{s/"/\\"/g;p;}')
 pandoc_version=$(pandoc --version | sed -n '1{s/"/\\"/g;p;}')
 mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
@@ -62,6 +67,7 @@ jq -n \
   --arg input_sha256 "$input_sha256" \
   --arg markdown_sha256 "$markdown_sha256" \
   --arg configuration_sha256 "$configuration_sha256" \
+  --arg extraction_profile "$extraction_profile" \
   --arg curl_version "$curl_version" \
   --arg pandoc_version "$pandoc_version" \
   --arg mq_version "$mq_version" \
@@ -73,6 +79,7 @@ jq -n \
     adapter: {
       name: $adapter,
       protocol_version: 1,
+      extraction_profile: $extraction_profile,
       curl_version: $curl_version,
       pandoc_version: $pandoc_version,
       mq_version: $mq_version

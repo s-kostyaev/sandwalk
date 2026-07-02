@@ -295,8 +295,10 @@ optional:
 
 The bundled web connector accepts a `sandwalk.fetch.v1` request. It uses
 `curl -L` with a Lynx user-agent, retains the response as `original`, converts
-HTML to GitHub-flavored Markdown with pandoc, and requires `mq document.md
-'.tree'` to succeed before publishing `manifest.json`.
+HTML to GitHub-flavored Markdown with pandoc's raw-HTML extension disabled,
+and requires `mq document.md '.tree'` to succeed before publishing
+`manifest.json`. The manifest identifies this normalization as extraction
+profile `html-to-gfm-no-raw-html-v1`.
 
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.
