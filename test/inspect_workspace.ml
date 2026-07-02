@@ -573,6 +573,97 @@ PRAGMA user_version = 12;
 |})
 ;;
 
+let create_v13 database slug =
+  create_v12 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE reports (
+  revision INTEGER PRIMARY KEY CHECK (revision >= 1),
+  report_path TEXT NOT NULL,
+  report_text TEXT NOT NULL,
+  report_md5 TEXT NOT NULL CHECK (
+    length(report_md5) = 32
+    AND report_md5 NOT GLOB '*[^a-f0-9]*'
+  ),
+  report_size INTEGER NOT NULL CHECK (report_size > 0 AND report_size <= 1048576),
+  submitted_at TEXT NOT NULL,
+  current INTEGER NOT NULL CHECK (current IN (0, 1))
+);
+CREATE UNIQUE INDEX one_current_report ON reports(current) WHERE current = 1;
+CREATE TABLE report_blocks (
+  report_revision INTEGER NOT NULL REFERENCES reports(revision),
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+  block_text TEXT NOT NULL,
+  block_md5 TEXT NOT NULL CHECK (
+    length(block_md5) = 32
+    AND block_md5 NOT GLOB '*[^a-f0-9]*'
+  ),
+  citations_json TEXT NOT NULL,
+  PRIMARY KEY (report_revision, ordinal)
+);
+INSERT INTO reports (
+  revision, report_path, report_text, report_md5, report_size, submitted_at, current
+) VALUES (
+  1, 'fixture-report.md',
+  '# Fixture
+
+Supported fixture. [cite:fixture-step/sealed-finding]
+',
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 64,
+  '2026-01-01 00:00:00Z', 1
+);
+INSERT INTO report_blocks (
+  report_revision, ordinal, block_text, block_md5, citations_json
+) VALUES
+  (1, 1, '# Fixture', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '[]'),
+  (1, 2, 'Supported fixture.', 'cccccccccccccccccccccccccccccccc',
+   '["fixture-step/sealed-finding"]');
+UPDATE workspaces SET phase = 'draft-review';
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (13, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 13;
+|})
+;;
+
+let create_v14 database slug =
+  create_v13 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE report_block_reviews (
+  report_revision INTEGER NOT NULL,
+  ordinal INTEGER NOT NULL,
+  verdict TEXT NOT NULL CHECK (
+    verdict IN (
+      'supported', 'partially-supported', 'unsupported', 'contradicted'
+    )
+  ),
+  summary TEXT NOT NULL,
+  block_md5 TEXT NOT NULL,
+  reviewed_at TEXT NOT NULL,
+  PRIMARY KEY (report_revision, ordinal),
+  FOREIGN KEY (report_revision, ordinal)
+    REFERENCES report_blocks(report_revision, ordinal)
+);
+INSERT INTO report_block_reviews (
+  report_revision, ordinal, verdict, summary, block_md5, reviewed_at
+) VALUES
+  (1, 1, 'supported', 'Heading is consistent.',
+   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01 00:00:00Z'),
+  (1, 2, 'supported', 'Claim is supported.',
+   'cccccccccccccccccccccccccccccccc', '2026-01-01 00:00:00Z');
+UPDATE workspaces SET phase = 'finalizing';
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (14, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 14;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -691,6 +782,26 @@ ORDER BY report_revision, ordinal
 |}
 ;;
 
+let inspect_block_reviews database =
+  print_query
+    database
+    {|
+SELECT report_revision, ordinal, verdict, length(block_md5), summary
+FROM report_block_reviews
+ORDER BY report_revision, ordinal
+|}
+;;
+
+let inspect_finalization database =
+  print_query
+    database
+    {|
+SELECT report_revision, length(final_report_md5), length(sources_md5),
+       source_count
+FROM finalizations
+|}
+;;
+
 let () =
   let action, path =
     match Sys.argv with
@@ -706,6 +817,8 @@ let () =
     | [| _; "--create-v10"; path; slug |] -> `Create (10, slug), path
     | [| _; "--create-v11"; path; slug |] -> `Create (11, slug), path
     | [| _; "--create-v12"; path; slug |] -> `Create (12, slug), path
+    | [| _; "--create-v13"; path; slug |] -> `Create (13, slug), path
+    | [| _; "--create-v14"; path; slug |] -> `Create (14, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
@@ -715,6 +828,8 @@ let () =
     | [| _; "--inspect-evidence"; path |] -> `Inspect_evidence, path
     | [| _; "--inspect-reviews"; path |] -> `Inspect_reviews, path
     | [| _; "--inspect-reports"; path |] -> `Inspect_reports, path
+    | [| _; "--inspect-block-reviews"; path |] -> `Inspect_block_reviews, path
+    | [| _; "--inspect-finalization"; path |] -> `Inspect_finalization, path
     | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
     | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
@@ -736,6 +851,8 @@ let () =
       | `Create (10, slug) -> create_v10 database slug
       | `Create (11, slug) -> create_v11 database slug
       | `Create (12, slug) -> create_v12 database slug
+      | `Create (13, slug) -> create_v13 database slug
+      | `Create (14, slug) -> create_v14 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
@@ -747,6 +864,8 @@ let () =
       | `Inspect_evidence -> inspect_evidence database
       | `Inspect_reviews -> inspect_reviews database
       | `Inspect_reports -> inspect_reports database
+      | `Inspect_block_reviews -> inspect_block_reviews database
+      | `Inspect_finalization -> inspect_finalization database
       | `Expire_claim step ->
         let statement =
           Sqlite3.prepare

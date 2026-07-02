@@ -404,6 +404,104 @@ module Finding_review = struct
   let qualifications t = t.qualifications
 end
 
+module Report_review = struct
+  type block =
+    { ordinal : int
+    ; block_md5 : string
+    ; verdict : Finding_review.verdict
+    ; summary : string
+    }
+
+  type t =
+    { report_revision : int
+    ; blocks : block list
+    }
+
+  type error =
+    | Invalid_review
+    | Unsupported_protocol
+    | Too_many_blocks
+    | Duplicate_ordinal
+  [@@deriving sexp_of]
+
+  let md5 value =
+    String.length value = 32
+    && String.for_all value ~f:(function
+      | '0' .. '9' | 'a' .. 'f' -> true
+      | _ -> false)
+  ;;
+
+  let block = function
+    | `Assoc fields ->
+      let open Option.Let_syntax in
+      let%bind ordinal =
+        match List.Assoc.find fields "ordinal" ~equal:String.equal with
+        | Some (`Int value) when value >= 1 -> Some value
+        | _ -> None
+      in
+      let%bind block_md5 =
+        match List.Assoc.find fields "block_md5" ~equal:String.equal with
+        | Some (`String value) when md5 value -> Some value
+        | _ -> None
+      in
+      let%bind verdict =
+        match List.Assoc.find fields "verdict" ~equal:String.equal with
+        | Some (`String value) -> Finding_review.verdict_of_string value
+        | _ -> None
+      in
+      let%bind summary =
+        match List.Assoc.find fields "summary" ~equal:String.equal with
+        | Some (`String value)
+          when (not (String.is_empty (String.strip value)))
+               && String.length value <= 4_000 ->
+          Some value
+        | _ -> None
+      in
+      Some { ordinal; block_md5; verdict; summary }
+    | _ -> None
+  ;;
+
+  let decode = function
+    | `Assoc fields ->
+      (match List.Assoc.find fields "protocol" ~equal:String.equal with
+       | Some (`String "sandwalk.report-review.v1") ->
+         let open Result.Let_syntax in
+         let%bind report_revision =
+           match List.Assoc.find fields "report_revision" ~equal:String.equal with
+           | Some (`Int value) when value >= 1 -> Ok value
+           | _ -> Error Invalid_review
+         in
+         let%bind blocks =
+           match List.Assoc.find fields "blocks" ~equal:String.equal with
+           | Some (`List values) when List.length values <= 256 ->
+             values
+             |> List.map ~f:block
+             |> Option.all
+             |> Result.of_option ~error:Invalid_review
+           | Some (`List _) -> Error Too_many_blocks
+           | _ -> Error Invalid_review
+         in
+         let ordinals =
+           List.map blocks ~f:(fun block -> block.ordinal)
+         in
+         if
+           List.length ordinals
+           <> List.length (List.dedup_and_sort ordinals ~compare:Int.compare)
+         then Error Duplicate_ordinal
+         else Ok { report_revision; blocks }
+       | Some (`String _) -> Error Unsupported_protocol
+       | _ -> Error Invalid_review)
+    | _ -> Error Invalid_review
+  ;;
+
+  let report_revision t = t.report_revision
+  let blocks t = t.blocks
+  let ordinal t = t.ordinal
+  let block_md5 t = t.block_md5
+  let verdict t = t.verdict
+  let summary t = t.summary
+end
+
 let%expect_test "renders a compact failure with one next command" =
   Envelope.failure
     ~code:"PLAN_NOT_VALIDATED"
@@ -550,4 +648,25 @@ let%expect_test "finding reviews are versioned and agent-authored" =
   |> [%sexp_of: (string, Finding_review.error) Result.t]
   |> print_s;
   [%expect {| (Ok partially-supported) |}]
+;;
+
+let%expect_test "report reviews bind verdicts to exact block hashes" =
+  `Assoc
+    [ "protocol", `String "sandwalk.report-review.v1"
+    ; "report_revision", `Int 1
+    ; ( "blocks"
+      , `List
+          [ `Assoc
+              [ "ordinal", `Int 1
+              ; "block_md5", `String (String.make 32 'a')
+              ; "verdict", `String "supported"
+              ; "summary", `String "Exact support."
+              ]
+          ] )
+    ]
+  |> Report_review.decode
+  |> Result.map ~f:(fun review -> List.length (Report_review.blocks review))
+  |> [%sexp_of: (int, Report_review.error) Result.t]
+  |> print_s;
+  [%expect {| (Ok 1) |}]
 ;;

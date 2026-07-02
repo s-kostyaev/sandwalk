@@ -60,6 +60,12 @@ module Error : sig
     | Report_wrong_phase of Sandwalk_core.Phase.t
     | Report_citation_invalid of string
     | Report_conflict
+    | Report_review_wrong_phase of Sandwalk_core.Phase.t
+    | Report_revision_stale
+    | Report_review_incomplete
+    | Report_block_stale of int
+    | Finalize_wrong_phase of Sandwalk_core.Phase.t
+    | Finalize_gate_failed
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -162,6 +168,24 @@ module Submit_report_result : sig
   val revision : t -> int
   val block_count : t -> int
   val phase : t -> Sandwalk_core.Phase.t
+end
+
+module Review_report_result : sig
+  type t
+
+  val revision : t -> int
+  val accepted : t -> bool
+  val phase : t -> Sandwalk_core.Phase.t
+end
+
+module Finalization_state : sig
+  type t
+
+  val report_revision : t -> int
+  val report_path : t -> string
+  val report_text : t -> string
+  val report_md5 : t -> string
+  val sources_by_finding : t -> (string * string list) list
 end
 
 module Stored_hit : sig
@@ -517,6 +541,7 @@ val submit_report
   -> database_path:string
   -> expected_slug:Sandwalk_core.Slug.t
   -> report_path:string
+  -> report_text:string
   -> report_md5:string
   -> report_size:int
   -> blocks:(string * string * string list) list
@@ -531,3 +556,32 @@ val validate_report_citations
   -> citations:string list
   -> unit
   -> (unit, Error.t) Result.t
+
+val review_report
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> report_revision:int
+  -> reviews:(int * string * string * string) list
+  -> now:string
+  -> unit
+  -> (Review_report_result.t, Error.t) Result.t
+
+val read_finalization_state
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> unit
+  -> (Finalization_state.t, Error.t) Result.t
+
+val finalize_workspace
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> report_revision:int
+  -> final_report_md5:string
+  -> sources_md5:string
+  -> source_count:int
+  -> now:string
+  -> unit
+  -> (Sandwalk_core.Phase.t, Error.t) Result.t

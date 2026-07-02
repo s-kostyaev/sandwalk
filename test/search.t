@@ -17,7 +17,7 @@ Create a released-schema v6 workspace with an active claim and search through v7
 
   $ ./inspect_workspace.exe workspace/search-test/database/sandwalk.sqlite3
   search-test|researching
-  13
+  15
   wal
   ok
 

@@ -225,7 +225,13 @@ let status_error = function
   | Draft_gate_failed
   | Report_wrong_phase _
   | Report_citation_invalid _
-  | Report_conflict ->
+  | Report_conflict
+  | Report_review_wrong_phase _
+  | Report_revision_stale
+  | Report_review_incomplete
+  | Report_block_stale _
+  | Finalize_wrong_phase _
+  | Finalize_gate_failed ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -3315,15 +3321,36 @@ let report_error = function
     sprintf "Citation target %S is unknown, stale, or rejected." reference
   | Report_conflict ->
     "REPORT_CONFLICT", "A conflicting report revision already exists."
+  | Report_review_wrong_phase _ ->
+    "REPORT_REVIEW_NOT_ALLOWED", "Report review is not allowed in this phase."
+  | Report_revision_stale ->
+    "REPORT_REVISION_STALE", "Report review does not target the current revision."
+  | Report_review_incomplete ->
+    "REPORT_REVIEW_INCOMPLETE", "Report review must cover every current block."
+  | Report_block_stale ordinal ->
+    "REPORT_BLOCK_STALE", sprintf "Report block %d hash is stale." ordinal
+  | error -> status_error error
+;;
+
+let finalize_error = function
+  | Sandwalk_store.Error.Finalize_wrong_phase _ ->
+    "FINALIZE_NOT_ALLOWED", "Finalization is not allowed in this phase."
+  | Finalize_gate_failed ->
+    "FINALIZE_GATE_FAILED", "Current report or block reviews are stale or rejected."
   | error -> status_error error
 ;;
 
 let report_validation_error = function
   | Sandwalk_core.Report.Empty -> "EMPTY_REPORT", "Report must not be empty."
   | Too_large -> "REPORT_TOO_LARGE", "Report exceeds the 1 MiB bound."
+  | Too_many_blocks count ->
+    "REPORT_TOO_MANY_BLOCKS",
+    sprintf "Report has %d blocks; maximum is 256." count
   | Block_too_large ordinal ->
     "REPORT_BLOCK_TOO_LARGE",
     sprintf "Report block %d exceeds the 16 KiB bound." ordinal
+  | No_citations ->
+    "REPORT_HAS_NO_CITATIONS", "Report must cite at least one reviewed finding."
   | Missing_citation ordinal ->
     "REPORT_BLOCK_UNCITED", sprintf "Report block %d has no citation." ordinal
   | Invalid_citation reference ->
@@ -4932,6 +4959,8 @@ let draft_submit_command =
                                  workspace)
                             ~expected_slug:slug
                             ~report_path:output_path
+                            ~report_text:
+                              (Sandwalk_core.Report.markdown report)
                             ~report_md5:
                               (Sandwalk_runtime.File_input.md5 input)
                             ~report_size:
@@ -4988,6 +5017,13 @@ let draft_submit_command =
                                       (Sandwalk_store.Submit_report_result
                                        .block_count
                                          submitted) )
+                                ; ( "review_blocks"
+                                  , `List
+                                      (List.mapi blocks ~f:(fun index (_, md5, _) ->
+                                         `Assoc
+                                           [ "ordinal", `Int (index + 1)
+                                           ; "block_md5", `String md5
+                                           ])) )
                                 ; "phase", `String "draft-review"
                                 ; "report", `String output_path
                                 ]
@@ -4998,10 +5034,492 @@ let draft_submit_command =
                             Deferred.unit)))))))
 ;;
 
+let draft_review_command =
+  Async.Command.async
+    ~summary:"Record hash-bound semantic verdicts for every report block."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and review_path =
+       flag "--review-file" (required string) ~doc:"PATH Versioned block review"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let%bind input =
+             Sandwalk_runtime.File_input.read
+               ~path:review_path
+               ~maximum_bytes:1_048_576
+           in
+           match input with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"REPORT_REVIEW_FILE_ERROR"
+               ~message:"Could not read bounded report review."
+           | Ok input ->
+             let decoded =
+               try
+                 Sandwalk_runtime.File_input.content input
+                 |> Yojson.Safe.from_string
+                 |> Sandwalk_protocol.Report_review.decode
+               with
+               | _ -> Error Sandwalk_protocol.Report_review.Invalid_review
+             in
+             (match decoded with
+              | Error _ ->
+                print_failure_and_exit
+                  ~code:"INVALID_REPORT_REVIEW"
+                  ~message:"Report review JSON is invalid or unsupported."
+              | Ok review ->
+                let started_at = Time_float_unix.now () in
+                let%bind invocation_id =
+                  In_thread.run (fun () ->
+                    Sandwalk_runtime.invocation_id ~now:started_at)
+                in
+                let reviews =
+                  Sandwalk_protocol.Report_review.blocks review
+                  |> List.map ~f:(fun block ->
+                    ( Sandwalk_protocol.Report_review.ordinal block
+                    , Sandwalk_protocol.Report_review.block_md5 block
+                    , (Sandwalk_protocol.Report_review.verdict block
+                       |> Sandwalk_protocol.Finding_review.verdict_to_string)
+                    , Sandwalk_protocol.Report_review.summary block ))
+                in
+                let arguments =
+                  `Assoc
+                    [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                    ; "directory_prefix", `String directory_prefix
+                    ; ( "review_file"
+                      , `Assoc
+                          [ "path", `String review_path
+                          ; "size", `Int (Sandwalk_runtime.File_input.size input)
+                          ; ( "hash"
+                            , `Assoc
+                                [ "algorithm", `String "md5"
+                                ; ( "value"
+                                  , `String
+                                      (Sandwalk_runtime.File_input.md5 input) )
+                                ] )
+                          ] )
+                    ]
+                in
+                let append_event
+                      ~kind
+                      ~timestamp
+                      ~phase
+                      ~state_changes
+                      ?duration_ms
+                      ?outcome
+                      ?error_code
+                      ()
+                  =
+                  Sandwalk_runtime.Audit.append
+                    ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                    (Sandwalk_protocol.Audit_event.create
+                       ~invocation_id
+                       ~timestamp
+                       ~kind
+                       ~command:"draft review"
+                       ~arguments
+                       ~phase
+                       ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                       ~state_changes
+                       ?duration_ms
+                       ?outcome
+                       ?error_code
+                       ())
+                in
+                let fail_with_audit ~code ~message =
+                  let finished_at = Time_float_unix.now () in
+                  let duration_ms =
+                    Time_float.diff finished_at started_at
+                    |> Time_float.Span.to_ms
+                    |> Float.iround_nearest_exn
+                  in
+                  let%bind logged =
+                    append_event
+                      ~kind:`Failed
+                      ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                      ~phase:(Some "draft-review")
+                      ~state_changes:[]
+                      ~duration_ms
+                      ~outcome:"failure"
+                      ~error_code:code
+                      ()
+                  in
+                  match logged with
+                  | Error _ ->
+                    print_failure_and_exit
+                      ~code:"AUDIT_LOG_ERROR"
+                      ~message:"Could not append workspace audit log."
+                  | Ok () -> print_failure_and_exit ~code ~message
+                in
+                let%bind started =
+                  append_event
+                    ~kind:`Started
+                    ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                    ~phase:(Some "draft-review")
+                    ~state_changes:[]
+                    ()
+                in
+                (match started with
+                 | Error _ ->
+                   print_failure_and_exit
+                     ~code:"AUDIT_LOG_ERROR"
+                     ~message:"Could not append workspace audit log."
+                 | Ok () ->
+                   let%bind recorded =
+                     In_thread.run (fun () ->
+                       Sandwalk_store.review_report
+                         ~database_path:
+                           (Sandwalk_runtime.Workspace.database_path workspace)
+                         ~expected_slug:slug
+                         ~report_revision:
+                           (Sandwalk_protocol.Report_review.report_revision
+                              review)
+                         ~reviews
+                         ~now:
+                           (Sandwalk_runtime.timestamp_utc
+                              (Time_float_unix.now ()))
+                         ())
+                   in
+                   (match recorded with
+                    | Error error ->
+                      let code, message = report_error error in
+                      fail_with_audit ~code ~message
+                    | Ok recorded ->
+                      let phase =
+                        Sandwalk_store.Review_report_result.phase recorded
+                      in
+                      let phase_text = Sandwalk_core.Phase.to_string phase in
+                      let finished_at = Time_float_unix.now () in
+                      let duration_ms =
+                        Time_float.diff finished_at started_at
+                        |> Time_float.Span.to_ms
+                        |> Float.iround_nearest_exn
+                      in
+                      let%bind logged =
+                        append_event
+                          ~kind:`Finished
+                          ~timestamp:
+                            (Sandwalk_runtime.timestamp_utc finished_at)
+                          ~phase:(Some phase_text)
+                          ~state_changes:
+                            [ `Assoc
+                                [ "entity", `String "workspace.phase"
+                                ; "from", `String "draft-review"
+                                ; "to", `String phase_text
+                                ]
+                            ]
+                          ~duration_ms
+                          ~outcome:"success"
+                          ()
+                      in
+                      (match logged with
+                       | Error _ ->
+                         print_failure_and_exit
+                           ~code:"AUDIT_LOG_ERROR"
+                           ~message:"Could not append workspace audit log."
+                       | Ok () ->
+                         let result =
+                           `Assoc
+                             [ ( "revision"
+                               , `Int
+                                   (Sandwalk_store.Review_report_result.revision
+                                      recorded) )
+                             ; ( "accepted"
+                               , `Bool
+                                   (Sandwalk_store.Review_report_result.accepted
+                                      recorded) )
+                             ; "phase", `String phase_text
+                             ]
+                         in
+                         Sandwalk_protocol.Envelope.success ~result ()
+                         |> Sandwalk_protocol.Envelope.render
+                         |> print_endline;
+                         Deferred.unit))))))
+;;
+
 let draft_command =
   Async.Command.group
     ~summary:"Prepare bounded drafting inputs."
-    [ "prepare", draft_prepare_command; "submit", draft_submit_command ]
+    [ "prepare", draft_prepare_command
+    ; "review", draft_review_command
+    ; "submit", draft_submit_command
+    ]
+;;
+
+let finalize_command =
+  Async.Command.async
+    ~summary:"Render stable citations and complete the workspace."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let%bind state =
+             In_thread.run (fun () ->
+               Sandwalk_store.read_finalization_state
+                 ~database_path:
+                   (Sandwalk_runtime.Workspace.database_path workspace)
+                 ~expected_slug:slug
+                 ())
+           in
+           match state with
+           | Error error ->
+             let code, message = finalize_error error in
+             print_failure_and_exit ~code ~message
+           | Ok state ->
+             (match
+                Sandwalk_core.Final_report.render
+                  ~markdown:
+                    (Sandwalk_store.Finalization_state.report_text state)
+                  ~sources_by_finding:
+                    (Sandwalk_store.Finalization_state.sources_by_finding state)
+              with
+              | Error (Missing_source reference) ->
+                print_failure_and_exit
+                  ~code:"FINALIZE_SOURCE_MISSING"
+                  ~message:
+                    (sprintf "Citation %S has no current source." reference)
+              | Ok rendered ->
+                let started_at = Time_float_unix.now () in
+                let%bind invocation_id =
+                  In_thread.run (fun () ->
+                    Sandwalk_runtime.invocation_id ~now:started_at)
+                in
+                let report_path =
+                  Sandwalk_runtime.Workspace.report_path workspace
+                in
+                let sources_path =
+                  Sandwalk_runtime.Workspace.sources_path workspace
+                in
+                let final_report =
+                  Sandwalk_core.Final_report.report rendered
+                in
+                let sources = Sandwalk_core.Final_report.sources rendered in
+                let arguments =
+                  `Assoc
+                    [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                    ; "directory_prefix", `String directory_prefix
+                    ]
+                in
+                let append_event
+                      ~kind
+                      ~timestamp
+                      ~phase
+                      ~state_changes
+                      ?duration_ms
+                      ?outcome
+                      ?error_code
+                      ()
+                  =
+                  Sandwalk_runtime.Audit.append
+                    ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                    (Sandwalk_protocol.Audit_event.create
+                       ~invocation_id
+                       ~timestamp
+                       ~kind
+                       ~command:"finalize"
+                       ~arguments
+                       ~phase
+                       ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                       ~state_changes
+                       ?duration_ms
+                       ?outcome
+                       ?error_code
+                       ())
+                in
+                let fail_with_audit ~code ~message =
+                  let finished_at = Time_float_unix.now () in
+                  let duration_ms =
+                    Time_float.diff finished_at started_at
+                    |> Time_float.Span.to_ms
+                    |> Float.iround_nearest_exn
+                  in
+                  let%bind logged =
+                    append_event
+                      ~kind:`Failed
+                      ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                      ~phase:(Some "finalizing")
+                      ~state_changes:[]
+                      ~duration_ms
+                      ~outcome:"failure"
+                      ~error_code:code
+                      ()
+                  in
+                  match logged with
+                  | Error _ ->
+                    print_failure_and_exit
+                      ~code:"AUDIT_LOG_ERROR"
+                      ~message:"Could not append workspace audit log."
+                  | Ok () -> print_failure_and_exit ~code ~message
+                in
+                let%bind started =
+                  append_event
+                    ~kind:`Started
+                    ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                    ~phase:(Some "finalizing")
+                    ~state_changes:[]
+                    ()
+                in
+                (match started with
+                 | Error _ ->
+                   print_failure_and_exit
+                     ~code:"AUDIT_LOG_ERROR"
+                     ~message:"Could not append workspace audit log."
+                 | Ok () ->
+                   let%bind sources_written =
+                     Sandwalk_runtime.Atomic_file.write
+                       ~path:sources_path
+                       ~temporary_suffix:invocation_id
+                       sources
+                   in
+                   (match sources_written with
+                    | Error _ ->
+                      fail_with_audit
+                        ~code:"WORKSPACE_IO_ERROR"
+                        ~message:"Could not publish sources bibliography."
+                    | Ok () ->
+                      let%bind report_written =
+                        Sandwalk_runtime.Atomic_file.write
+                          ~path:report_path
+                          ~temporary_suffix:invocation_id
+                          final_report
+                      in
+                      (match report_written with
+                       | Error _ ->
+                         fail_with_audit
+                           ~code:"WORKSPACE_IO_ERROR"
+                           ~message:"Could not publish final report."
+                       | Ok () ->
+                         let final_report_md5 =
+                           Md5.digest_string final_report |> Md5.to_hex
+                         in
+                         let sources_md5 =
+                           Md5.digest_string sources |> Md5.to_hex
+                         in
+                         let%bind completed =
+                           In_thread.run (fun () ->
+                             Sandwalk_store.finalize_workspace
+                               ~database_path:
+                                 (Sandwalk_runtime.Workspace.database_path
+                                    workspace)
+                               ~expected_slug:slug
+                               ~report_revision:
+                                 (Sandwalk_store.Finalization_state
+                                  .report_revision
+                                    state)
+                               ~final_report_md5
+                               ~sources_md5
+                               ~source_count:
+                                 (Sandwalk_core.Final_report.source_count
+                                    rendered)
+                               ~now:
+                                 (Sandwalk_runtime.timestamp_utc
+                                    (Time_float_unix.now ()))
+                               ())
+                         in
+                         (match completed with
+                          | Error error ->
+                            let code, message = finalize_error error in
+                            fail_with_audit ~code ~message
+                          | Ok phase ->
+                            let finished_at = Time_float_unix.now () in
+                            let duration_ms =
+                              Time_float.diff finished_at started_at
+                              |> Time_float.Span.to_ms
+                              |> Float.iround_nearest_exn
+                            in
+                            let%bind logged =
+                              append_event
+                                ~kind:`Finished
+                                ~timestamp:
+                                  (Sandwalk_runtime.timestamp_utc finished_at)
+                                ~phase:(Some "completed")
+                                ~state_changes:
+                                  [ `Assoc
+                                      [ "entity", `String "workspace.phase"
+                                      ; "from", `String "finalizing"
+                                      ; ( "to"
+                                        , `String
+                                            (Sandwalk_core.Phase.to_string
+                                               phase) )
+                                      ]
+                                  ]
+                                ~duration_ms
+                                ~outcome:"success"
+                                ()
+                            in
+                            (match logged with
+                             | Error _ ->
+                               print_failure_and_exit
+                                 ~code:"AUDIT_LOG_ERROR"
+                                 ~message:
+                                   "Could not append workspace audit log."
+                             | Ok () ->
+                               let result =
+                                 `Assoc
+                                   [ "phase", `String "completed"
+                                   ; "report", `String report_path
+                                   ; "sources", `String sources_path
+                                   ; ( "source_count"
+                                     , `Int
+                                         (Sandwalk_core.Final_report
+                                          .source_count
+                                            rendered) )
+                                   ]
+                               in
+                               Sandwalk_protocol.Envelope.success ~result ()
+                               |> Sandwalk_protocol.Envelope.render
+                               |> print_endline;
+                               Deferred.unit))))))))
 ;;
 
 let step_command =
@@ -5021,6 +5539,7 @@ let command =
     ; "excerpt", excerpt_command
     ; "fetch", fetch_command
     ; "finding", finding_command
+    ; "finalize", finalize_command
     ; "init", init_command
     ; "plan", plan_command
     ; "resume", resume_command

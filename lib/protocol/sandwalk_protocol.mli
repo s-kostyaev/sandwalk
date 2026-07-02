@@ -113,3 +113,23 @@ module Finding_review : sig
   val conflicts : t -> string
   val qualifications : t -> string
 end
+
+module Report_review : sig
+  type t
+  type block
+
+  type error =
+    | Invalid_review
+    | Unsupported_protocol
+    | Too_many_blocks
+    | Duplicate_ordinal
+  [@@deriving sexp_of]
+
+  val decode : Yojson.Safe.t -> (t, error) Result.t
+  val report_revision : t -> int
+  val blocks : t -> block list
+  val ordinal : block -> int
+  val block_md5 : block -> string
+  val verdict : block -> Finding_review.verdict
+  val summary : block -> string
+end

@@ -25,7 +25,7 @@ Citation targets must be current, reviewed, and accepted.
   $ sandwalk draft submit \
   >   --slug report-test --directory-prefix workspace \
   >   --report-file report.md
-  {"ok":true,"result":{"revision":1,"blocks":2,"phase":"draft-review","report":"workspace/report-test/exports/report.md"}}
+  {"ok":true,"result":{"revision":1,"blocks":2,"review_blocks":[{"ordinal":1,"block_md5":"503410e60bdf3d6f82d795c3003fdc23"},{"ordinal":2,"block_md5":"8cc434085ae5bb936317a724b26a081c"}],"phase":"draft-review","report":"workspace/report-test/exports/report.md"}}
 
   $ cat workspace/report-test/exports/report.md
   # Small Report
@@ -39,6 +39,6 @@ Citation targets must be current, reviewed, and accepted.
 
   $ ./inspect_workspace.exe workspace/report-test/database/sandwalk.sqlite3
   report-test|draft-review
-  13
+  15
   wal
   ok

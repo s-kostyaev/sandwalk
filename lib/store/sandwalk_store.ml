@@ -60,6 +60,12 @@ module Error = struct
     | Report_wrong_phase of Sandwalk_core.Phase.t
     | Report_citation_invalid of string
     | Report_conflict
+    | Report_review_wrong_phase of Sandwalk_core.Phase.t
+    | Report_revision_stale
+    | Report_review_incomplete
+    | Report_block_stale of int
+    | Finalize_wrong_phase of Sandwalk_core.Phase.t
+    | Finalize_gate_failed
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -218,6 +224,34 @@ module Submit_report_result = struct
   let revision t = t.revision
   let block_count t = t.block_count
   let phase t = t.phase
+end
+
+module Review_report_result = struct
+  type t =
+    { revision : int
+    ; accepted : bool
+    ; phase : Sandwalk_core.Phase.t
+    }
+
+  let revision t = t.revision
+  let accepted t = t.accepted
+  let phase t = t.phase
+end
+
+module Finalization_state = struct
+  type t =
+    { report_revision : int
+    ; report_path : string
+    ; report_text : string
+    ; report_md5 : string
+    ; sources_by_finding : (string * string list) list
+    }
+
+  let report_revision t = t.report_revision
+  let report_path t = t.report_path
+  let report_text t = t.report_text
+  let report_md5 t = t.report_md5
+  let sources_by_finding t = t.sources_by_finding
 end
 
 module Stored_hit = struct
@@ -388,7 +422,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 13
+let current_schema_version = 15
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -739,6 +773,7 @@ let migration_v13 =
 CREATE TABLE reports (
   revision INTEGER PRIMARY KEY CHECK (revision >= 1),
   report_path TEXT NOT NULL,
+  report_text TEXT NOT NULL,
   report_md5 TEXT NOT NULL CHECK (
     length(report_md5) = 32
     AND report_md5 NOT GLOB '*[^a-f0-9]*'
@@ -760,6 +795,41 @@ CREATE TABLE report_blocks (
   PRIMARY KEY (report_revision, ordinal)
 );
 PRAGMA user_version = 13;
+|}
+;;
+
+let migration_v14 =
+  {|
+CREATE TABLE report_block_reviews (
+  report_revision INTEGER NOT NULL,
+  ordinal INTEGER NOT NULL,
+  verdict TEXT NOT NULL CHECK (
+    verdict IN (
+      'supported', 'partially-supported', 'unsupported', 'contradicted'
+    )
+  ),
+  summary TEXT NOT NULL,
+  block_md5 TEXT NOT NULL,
+  reviewed_at TEXT NOT NULL,
+  PRIMARY KEY (report_revision, ordinal),
+  FOREIGN KEY (report_revision, ordinal)
+    REFERENCES report_blocks(report_revision, ordinal)
+);
+PRAGMA user_version = 14;
+|}
+;;
+
+let migration_v15 =
+  {|
+CREATE TABLE finalizations (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  report_revision INTEGER NOT NULL REFERENCES reports(revision),
+  final_report_md5 TEXT NOT NULL CHECK (length(final_report_md5) = 32),
+  sources_md5 TEXT NOT NULL CHECK (length(sources_md5) = 32),
+  source_count INTEGER NOT NULL CHECK (source_count >= 1),
+  completed_at TEXT NOT NULL
+);
+PRAGMA user_version = 15;
 |}
 ;;
 
@@ -873,10 +943,24 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:12 ~now)
       else Ok ()
     in
-    if from_version < 13
+    let%bind () =
+      if from_version < 13
+      then (
+        let%bind () = execute database migration_v13 in
+        insert_migration database ~version:13 ~now)
+      else Ok ()
+    in
+    let%bind () =
+      if from_version < 14
+      then (
+        let%bind () = execute database migration_v14 in
+        insert_migration database ~version:14 ~now)
+      else Ok ()
+    in
+    if from_version < 15
     then (
-      let%bind () = execute database migration_v13 in
-      insert_migration database ~version:13 ~now)
+      let%bind () = execute database migration_v15 in
+      insert_migration database ~version:15 ~now)
     else Ok ())
 ;;
 
@@ -4576,6 +4660,7 @@ let submit_report
       ~database_path
       ~expected_slug
       ~report_path
+      ~report_text
       ~report_md5
       ~report_size
       ~blocks
@@ -4637,19 +4722,20 @@ let submit_report
                 database
                 {|
 INSERT INTO reports (
-  revision, report_path, report_md5, report_size, submitted_at, current
-) VALUES (?1, ?2, ?3, ?4, ?5, 1)
+  revision, report_path, report_text, report_md5, report_size, submitted_at, current
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
 |}
                 ~f:(fun statement ->
                   let%bind () =
                     check database (Sqlite3.bind_int statement 1 revision)
                   in
                   let%bind () = bind_text database statement 2 report_path in
-                  let%bind () = bind_text database statement 3 report_md5 in
+                  let%bind () = bind_text database statement 3 report_text in
+                  let%bind () = bind_text database statement 4 report_md5 in
                   let%bind () =
-                    check database (Sqlite3.bind_int statement 4 report_size)
+                    check database (Sqlite3.bind_int statement 5 report_size)
                   in
-                  let%bind () = bind_text database statement 5 now in
+                  let%bind () = bind_text database statement 6 now in
                   step_done database statement)
             in
             let%bind () =
@@ -4695,6 +4781,447 @@ INSERT INTO report_blocks (
               ; block_count = List.length blocks
               ; phase = Sandwalk_core.Phase.Draft_review
               }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let review_report
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~report_revision
+      ~reviews
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Draft_review
+              then Ok ()
+              else Error (Error.Report_review_wrong_phase phase)
+            in
+            let%bind current_revision =
+              with_statement
+                database
+                "SELECT revision FROM reports WHERE current = 1"
+                ~f:(fun statement ->
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+                  | Sqlite3.Rc.DONE -> Error Error.Report_revision_stale
+                  | return_code ->
+                    check database return_code
+                    |> Result.map ~f:(Fn.const (-1)))
+            in
+            let%bind () =
+              if current_revision = report_revision
+              then Ok ()
+              else Error Error.Report_revision_stale
+            in
+            let%bind block_count =
+              with_statement
+                database
+                "SELECT COUNT(*) FROM report_blocks WHERE report_revision = ?1"
+                ~f:(fun statement ->
+                  let%bind () =
+                    check
+                      database
+                      (Sqlite3.bind_int statement 1 report_revision)
+                  in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+                  | return_code ->
+                    check database return_code |> Result.map ~f:(Fn.const 0))
+            in
+            let%bind () =
+              if List.length reviews = block_count
+              then Ok ()
+              else Error Error.Report_review_incomplete
+            in
+            let%bind () =
+              List.fold_result
+                reviews
+                ~init:()
+                ~f:(fun () (ordinal, block_md5, _verdict, _summary) ->
+                  with_statement
+                    database
+                    {|
+SELECT block_md5
+FROM report_blocks
+WHERE report_revision = ?1 AND ordinal = ?2
+|}
+                    ~f:(fun statement ->
+                      let%bind () =
+                        check
+                          database
+                          (Sqlite3.bind_int statement 1 report_revision)
+                      in
+                      let%bind () =
+                        check database (Sqlite3.bind_int statement 2 ordinal)
+                      in
+                      match Sqlite3.step statement with
+                      | Sqlite3.Rc.ROW
+                        when String.equal
+                               (Sqlite3.column_text statement 0)
+                               block_md5 ->
+                        Ok ()
+                      | Sqlite3.Rc.ROW | Sqlite3.Rc.DONE ->
+                        Error (Error.Report_block_stale ordinal)
+                      | return_code -> check database return_code))
+            in
+            let%bind () =
+              List.map
+                reviews
+                ~f:(fun (ordinal, block_md5, verdict, summary) ->
+                  with_statement
+                    database
+                    {|
+INSERT INTO report_block_reviews (
+  report_revision, ordinal, verdict, summary, block_md5, reviewed_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+|}
+                    ~f:(fun statement ->
+                      let%bind () =
+                        check
+                          database
+                          (Sqlite3.bind_int statement 1 report_revision)
+                      in
+                      let%bind () =
+                        check database (Sqlite3.bind_int statement 2 ordinal)
+                      in
+                      let%bind () = bind_text database statement 3 verdict in
+                      let%bind () = bind_text database statement 4 summary in
+                      let%bind () = bind_text database statement 5 block_md5 in
+                      let%bind () = bind_text database statement 6 now in
+                      step_done database statement))
+              |> Result.all_unit
+            in
+            let accepted =
+              not
+                (List.exists reviews ~f:(fun (_, _, verdict, _) ->
+                   String.equal verdict "unsupported"
+                   || String.equal verdict "contradicted"))
+            in
+            let next_phase =
+              if accepted
+              then Sandwalk_core.Phase.Finalizing
+              else Sandwalk_core.Phase.Drafting
+            in
+            let%bind _ =
+              Sandwalk_core.transition ~from:phase ~into:next_phase
+              |> Result.map_error ~f:(fun _ ->
+                Error.Report_review_wrong_phase phase)
+            in
+            let%bind () = update_phase database ~phase:next_phase ~now in
+            Ok
+              { Review_report_result.revision = report_revision
+              ; accepted
+              ; phase = next_phase
+              }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let query_final_report database =
+  with_statement
+    database
+    {|
+SELECT r.revision, r.report_path, r.report_text, r.report_md5,
+       (SELECT COUNT(*) FROM report_blocks b
+        WHERE b.report_revision = r.revision),
+       (SELECT COUNT(*)
+        FROM report_block_reviews br
+        JOIN report_blocks b
+          ON b.report_revision = br.report_revision
+         AND b.ordinal = br.ordinal
+        WHERE br.report_revision = r.revision
+          AND br.block_md5 = b.block_md5
+          AND br.verdict IN ('supported', 'partially-supported'))
+FROM reports r
+WHERE r.current = 1
+|}
+    ~f:(fun statement ->
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        let block_count = Sqlite3.column_int statement 4 in
+        let accepted_count = Sqlite3.column_int statement 5 in
+        if block_count > 0 && block_count = accepted_count
+        then
+          Ok
+            ( Sqlite3.column_int statement 0
+            , Sqlite3.column_text statement 1
+            , Sqlite3.column_text statement 2
+            , Sqlite3.column_text statement 3 )
+        else Error Error.Finalize_gate_failed
+      | Sqlite3.Rc.DONE -> Error Error.Finalize_gate_failed
+      | return_code ->
+        check database return_code
+        |> Result.map ~f:(fun () -> assert false))
+;;
+
+let query_report_citations database report_revision =
+  let citations = ref [] in
+  let statement =
+    Sqlite3.prepare
+      database
+      "SELECT citations_json FROM report_blocks WHERE report_revision = ?1 ORDER BY ordinal"
+  in
+  Exn.protect
+    ~f:(fun () ->
+      let open Result.Let_syntax in
+      let%bind () =
+        check database (Sqlite3.bind_int statement 1 report_revision)
+      in
+      let rec loop () =
+        match Sqlite3.step statement with
+        | Sqlite3.Rc.ROW ->
+          let values =
+            Sqlite3.column_text statement 0 |> Yojson.Safe.from_string
+          in
+          (match values with
+           | `List values ->
+             List.iter values ~f:(function
+               | `String reference -> citations := reference :: !citations
+               | _ -> failwith "Invalid persisted report citation.")
+           | _ -> failwith "Invalid persisted report citations.");
+          loop ()
+        | Sqlite3.Rc.DONE ->
+          Ok
+            (List.dedup_and_sort !citations ~compare:String.compare)
+        | return_code ->
+          check database return_code |> Result.map ~f:(fun () -> [])
+      in
+      loop ())
+    ~finally:(fun () -> ignore (Sqlite3.finalize statement : Sqlite3.Rc.t))
+;;
+
+let query_finding_sources database reference =
+  match String.lsplit2 reference ~on:'/' with
+  | None -> Error Error.Finalize_gate_failed
+  | Some (step, finding) ->
+    let sources = ref [] in
+    with_statement
+      database
+      {|
+SELECT DISTINCT s.final_url
+FROM findings f
+JOIN finding_evidence fe
+  ON fe.step_key = f.step_key
+ AND fe.finding_key = f.finding_key
+ AND fe.revision = f.current_revision
+JOIN excerpts e ON e.excerpt_ref = fe.excerpt_ref
+JOIN snapshots s ON s.snapshot_ref = e.snapshot_ref
+WHERE f.step_key = ?1 AND f.finding_key = ?2 AND f.state = 'reviewed'
+ORDER BY s.final_url
+|}
+      ~f:(fun statement ->
+        let open Result.Let_syntax in
+        let%bind () = bind_text database statement 1 step in
+        let%bind () = bind_text database statement 2 finding in
+        let rec loop () =
+          match Sqlite3.step statement with
+          | Sqlite3.Rc.ROW ->
+            sources := Sqlite3.column_text statement 0 :: !sources;
+            loop ()
+          | Sqlite3.Rc.DONE ->
+            if List.is_empty !sources
+            then Error Error.Finalize_gate_failed
+            else Ok (reference, List.rev !sources)
+          | return_code ->
+            check database return_code
+            |> Result.map ~f:(fun () -> reference, [])
+        in
+        loop ())
+;;
+
+let read_finalization_state
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind slug_text, phase_text = query_workspace database in
+          let expected = Sandwalk_core.Slug.to_string expected_slug in
+          let%bind () =
+            if String.equal expected slug_text
+            then Ok ()
+            else
+              Error
+                (Error.Workspace_slug_mismatch
+                   { expected; actual = slug_text })
+          in
+          let%bind phase =
+            Sandwalk_core.Phase.of_string phase_text
+            |> Result.of_option
+                 ~error:(Error.Invalid_persisted_phase phase_text)
+          in
+          let%bind () =
+            if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Finalizing
+            then Ok ()
+            else Error (Error.Finalize_wrong_phase phase)
+          in
+          let%bind report_revision, report_path, report_text, report_md5 =
+            query_final_report database
+          in
+          let%bind citations =
+            query_report_citations database report_revision
+          in
+          let%map sources_by_finding =
+            List.map citations ~f:(query_finding_sources database)
+            |> Result.all
+          in
+          { Finalization_state.report_revision
+          ; report_path
+          ; report_text
+          ; report_md5
+          ; sources_by_finding
+          }
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let finalize_workspace
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~report_revision
+      ~final_report_md5
+      ~sources_md5
+      ~source_count
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Finalizing
+              then Ok ()
+              else Error (Error.Finalize_wrong_phase phase)
+            in
+            let%bind current_revision, _, _, _ = query_final_report database in
+            let%bind () =
+              if current_revision = report_revision
+              then Ok ()
+              else Error Error.Finalize_gate_failed
+            in
+            let%bind () =
+              with_statement
+                database
+                {|
+INSERT INTO finalizations (
+  singleton, report_revision, final_report_md5, sources_md5,
+  source_count, completed_at
+) VALUES (1, ?1, ?2, ?3, ?4, ?5)
+|}
+                ~f:(fun statement ->
+                  let%bind () =
+                    check
+                      database
+                      (Sqlite3.bind_int statement 1 report_revision)
+                  in
+                  let%bind () =
+                    bind_text database statement 2 final_report_md5
+                  in
+                  let%bind () = bind_text database statement 3 sources_md5 in
+                  let%bind () =
+                    check database (Sqlite3.bind_int statement 4 source_count)
+                  in
+                  let%bind () = bind_text database statement 5 now in
+                  step_done database statement)
+            in
+            let%bind _ =
+              Sandwalk_core.transition
+                ~from:phase
+                ~into:Sandwalk_core.Phase.Completed
+              |> Result.map_error ~f:(fun _ ->
+                Error.Finalize_wrong_phase phase)
+            in
+            let%map () =
+              update_phase database ~phase:Sandwalk_core.Phase.Completed ~now
+            in
+            Sandwalk_core.Phase.Completed
           in
           (match outcome with
            | Ok result ->

@@ -561,13 +561,16 @@ module Report = struct
   type error =
     | Empty
     | Too_large
+    | Too_many_blocks of int
     | Block_too_large of int
+    | No_citations
     | Missing_citation of int
     | Invalid_citation of string
   [@@deriving sexp_of]
 
   let maximum_bytes = 1_048_576
   let maximum_block_bytes = 16_384
+  let maximum_blocks = 256
   let markdown t = t.markdown
   let blocks t = t.blocks
   let block_text t = t.text
@@ -632,9 +635,13 @@ module Report = struct
     then Error Empty
     else if size > maximum_bytes
     then Error Too_large
-    else
-      paragraphs markdown
-      |> List.mapi ~f:(fun index text ->
+    else (
+      let paragraphs = paragraphs markdown in
+      if List.length paragraphs > maximum_blocks
+      then Error (Too_many_blocks (List.length paragraphs))
+      else
+        paragraphs
+        |> List.mapi ~f:(fun index text ->
         if String.length text > maximum_block_bytes
         then Error (Block_too_large (index + 1))
         else
@@ -645,8 +652,87 @@ module Report = struct
             && not (String.is_prefix (String.strip text) ~prefix:"#")
           then Error (Missing_citation (index + 1))
           else Ok { text; citations })
-      |> Result.all
-      |> Result.map ~f:(fun blocks -> { markdown; blocks })
+        |> Result.all
+        |> Result.bind ~f:(fun blocks ->
+          if
+            List.for_all blocks ~f:(fun block ->
+              List.is_empty block.citations)
+          then Error No_citations
+          else Ok { markdown; blocks }))
+  ;;
+end
+
+module Final_report = struct
+  type t =
+    { report : string
+    ; sources : string
+    ; source_count : int
+    }
+
+  type error = Missing_source of string [@@deriving sexp_of]
+
+  let report t = t.report
+  let sources t = t.sources
+  let source_count t = t.source_count
+
+  let render ~markdown ~sources_by_finding =
+    let mapping =
+      Map.of_alist_reduce
+        (module String)
+        (List.map sources_by_finding ~f:(fun (reference, sources) ->
+           ( reference
+           , List.dedup_and_sort sources ~compare:String.compare )))
+        ~f:(fun left right ->
+          List.dedup_and_sort (left @ right) ~compare:String.compare)
+    in
+    let numbers = String.Table.create () in
+    let ordered_sources = ref [] in
+    let number source =
+      Hashtbl.find_or_add numbers source ~default:(fun () ->
+        let value = Hashtbl.length numbers + 1 in
+        ordered_sources := source :: !ordered_sources;
+        value)
+    in
+    let output = Buffer.create (String.length markdown) in
+    let rec loop position =
+      match String.substr_index markdown ~pattern:"[cite:" ~pos:position with
+      | None ->
+        Buffer.add_substring
+          output
+          markdown
+          ~pos:position
+          ~len:(String.length markdown - position);
+        Ok ()
+      | Some start ->
+        Buffer.add_substring output markdown ~pos:position ~len:(start - position);
+        (match String.index_from markdown (start + 6) ']' with
+         | None -> Error (Missing_source (String.drop_prefix markdown start))
+         | Some finish ->
+           let reference =
+             String.sub markdown ~pos:(start + 6) ~len:(finish - start - 6)
+           in
+           (match Map.find mapping reference with
+            | None | Some [] -> Error (Missing_source reference)
+            | Some sources ->
+              sources
+              |> List.map ~f:(fun source -> sprintf "[%d]" (number source))
+              |> String.concat
+              |> Buffer.add_string output;
+              loop (finish + 1)))
+    in
+    let open Result.Let_syntax in
+    let%map () = loop 0 in
+    let sources = List.rev !ordered_sources in
+    let bibliography =
+      [ "<!-- sandwalk-sources-v1 -->"; "# Sources"; "" ]
+      @ List.mapi sources ~f:(fun index source ->
+        sprintf "%d. %s" (index + 1) source)
+      |> String.concat_lines
+    in
+    { report = Buffer.contents output
+    ; sources = bibliography
+    ; source_count = List.length sources
+    }
   ;;
 end
 
@@ -1214,4 +1300,39 @@ let%test_unit "report blocks require canonical typed citations" =
   (match Report.create "Bad. [cite:../escape]" with
    | Error (Report.Invalid_citation _) -> ()
    | _ -> failwith "expected invalid citation rejection")
+;;
+
+let%test_unit "final citation numbering is stable and deduplicates sources" =
+  let markdown =
+    "First [cite:step-one/finding-one]. Second [cite:step-two/finding-two]."
+  in
+  let first =
+    Final_report.render
+      ~markdown
+      ~sources_by_finding:
+        [ "step-one/finding-one", [ "https://b.test"; "https://a.test" ]
+        ; "step-two/finding-two", [ "https://b.test" ]
+        ]
+  in
+  let second =
+    Final_report.render
+      ~markdown
+      ~sources_by_finding:
+        [ "step-two/finding-two", [ "https://b.test" ]
+        ; "step-one/finding-one", [ "https://a.test"; "https://b.test" ]
+        ]
+  in
+  match first, second with
+  | Ok first, Ok second ->
+    [%test_eq: string]
+      "First [1][2]. Second [2]."
+      (Final_report.report first);
+    [%test_eq: string]
+      (Final_report.report first)
+      (Final_report.report second);
+    [%test_eq: string]
+      (Final_report.sources first)
+      (Final_report.sources second);
+    [%test_eq: int] 2 (Final_report.source_count first)
+  | _ -> failwith "expected stable final citation rendering"
 ;;

@@ -430,14 +430,38 @@ sandwalk draft submit --slug <slug> --report-file <path>
 ```
 
 Submission accepts at most 1 MiB of Markdown and splits it at blank lines into
-blocks of at most 16 KiB. Heading blocks may be uncited; every prose block must
+at most 256 blocks of at most 16 KiB. Heading blocks may be uncited; every prose block must
 contain at least one canonical `[cite:step-key/finding-key]` token. Citation
 targets must name current reviewed findings with `supported` or
 `partially-supported` verdicts. Sandwalk atomically records the report revision
 and blocks, publishes `exports/report.md`, and performs the checked
 `drafting → draft-review` transition.
 
+```console
+sandwalk draft review --slug <slug> --review-file <path>
+```
+
+The `sandwalk.report-review.v1` JSON protocol binds one validation-agent
+verdict and non-empty summary to the MD5 of every current report block. Missing,
+duplicate, extra, or stale block reviews are rejected. If every verdict is
+`supported` or `partially-supported`, Sandwalk performs
+`draft-review → finalizing`; any `unsupported` or `contradicted` block performs
+`draft-review → drafting` so a new report revision can be submitted.
+
 The final gate rejects unknown, stale, or unreviewed citation targets.
+
+```console
+sandwalk finalize --slug <slug>
+```
+
+Finalization rechecks the current report revision, exact block hashes, accepted
+block reviews, current finding reviews, and source provenance. It replaces
+typed tokens with deterministic numeric citations ordered by first source
+appearance, deduplicates final source URLs, writes `exports/report.md` and
+`exports/sources.md`, records their hashes, and performs the checked
+`finalizing → completed` transition. Retrying after a filesystem-only partial
+failure renders from the durable submitted report text rather than from a
+partially rewritten export.
 
 ## Report format
 

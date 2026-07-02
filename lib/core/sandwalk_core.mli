@@ -213,13 +213,16 @@ module Report : sig
   type error =
     | Empty
     | Too_large
+    | Too_many_blocks of int
     | Block_too_large of int
+    | No_citations
     | Missing_citation of int
     | Invalid_citation of string
   [@@deriving sexp_of]
 
   val maximum_bytes : int
   val maximum_block_bytes : int
+  val maximum_blocks : int
   val create : string -> (t, error) Result.t
   val markdown : t -> string
   val blocks : t -> block list
@@ -227,6 +230,20 @@ module Report : sig
   val block_citations : block -> citation list
   val citation_step : citation -> string
   val citation_finding : citation -> string
+end
+
+module Final_report : sig
+  type t
+  type error = Missing_source of string [@@deriving sexp_of]
+
+  val render
+    :  markdown:string
+    -> sources_by_finding:(string * string list) list
+    -> (t, error) Result.t
+
+  val report : t -> string
+  val sources : t -> string
+  val source_count : t -> int
 end
 
 module Step_state : sig
