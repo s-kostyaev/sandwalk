@@ -190,6 +190,7 @@ let status_error = function
   | Step_claim_wrong_phase _
   | Step_already_claimed _
   | Step_completed _
+  | Step_dependencies_incomplete _
   | Claim_id_collision
   | Invalid_step_state _
   | Claim_not_found
@@ -231,7 +232,12 @@ let status_error = function
   | Report_review_incomplete
   | Report_block_stale _
   | Finalize_wrong_phase _
-  | Finalize_gate_failed ->
+  | Finalize_gate_failed
+  | Plan_objective_wrong_phase _
+  | Plan_dependency_wrong_phase _
+  | Plan_dependency_self
+  | Plan_dependency_exists
+  | Plan_dependency_cycle ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -648,7 +654,71 @@ let plan_error = function
     "PLAN_VALIDATION_STALE", "Plan changed after its last validation."
   | Plan_seal_wrong_phase _ ->
     "PLAN_SEAL_NOT_ALLOWED", "Plan cannot be sealed in the current phase."
+  | Plan_objective_wrong_phase _ ->
+    "PLAN_OBJECTIVE_NOT_ALLOWED", "Plan objective cannot change in this phase."
+  | Plan_dependency_wrong_phase _ ->
+    "PLAN_DEPENDENCY_NOT_ALLOWED", "Dependencies cannot change in this phase."
+  | Plan_dependency_self ->
+    "PLAN_DEPENDENCY_SELF", "A plan step cannot depend on itself."
+  | Plan_dependency_exists ->
+    "PLAN_DEPENDENCY_EXISTS", "Plan dependency already exists."
+  | Plan_dependency_cycle ->
+    "PLAN_DEPENDENCY_CYCLE", "Plan dependency would create a cycle."
   | error -> status_error error
+;;
+
+let render_plan_state state =
+  let steps = Sandwalk_store.Plan_state.steps state in
+  let revision = Sandwalk_store.Plan_state.revision state in
+  let validated =
+    Option.value_map
+      (Sandwalk_store.Plan_state.validated_revision state)
+      ~default:false
+      ~f:(Int.equal revision)
+  in
+  let sealed =
+    Option.value_map
+      (Sandwalk_store.Plan_state.sealed_revision state)
+      ~default:false
+      ~f:(Int.equal revision)
+  in
+  Sandwalk_core.Plan_projection.render
+    ?objective:(Sandwalk_store.Plan_state.objective state)
+    ~dependencies:(Sandwalk_store.Plan_state.dependencies state)
+    ~phase:(Sandwalk_store.Plan_state.phase state)
+    ~revision
+    ~validated
+    ~sealed
+    ~steps:
+      (List.map steps ~f:(fun stored ->
+         ( Sandwalk_store.Stored_plan_step.key stored
+         , Sandwalk_store.Stored_plan_step.title stored
+         , Sandwalk_store.Stored_plan_step.required stored
+         , Sandwalk_store.Stored_plan_step.position stored )))
+    ()
+;;
+
+let write_plan_state workspace ~invocation_id state =
+  let revision = Sandwalk_store.Plan_state.revision state in
+  let validated =
+    Option.value_map
+      (Sandwalk_store.Plan_state.validated_revision state)
+      ~default:false
+      ~f:(Int.equal revision)
+  in
+  let sealed =
+    Option.value_map
+      (Sandwalk_store.Plan_state.sealed_revision state)
+      ~default:false
+      ~f:(Int.equal revision)
+  in
+  Sandwalk_runtime.Atomic_file.write_versioned
+    ~path:(Sandwalk_runtime.Workspace.research_plan_path workspace)
+    ~lock_path:(Sandwalk_runtime.Workspace.research_plan_lock_path workspace)
+    ~temporary_suffix:invocation_id
+    ~version:
+      (Sandwalk_core.Plan_projection.version ~revision ~validated ~sealed)
+    (render_plan_state state)
 ;;
 
 let plan_add_step_command =
@@ -867,6 +937,10 @@ let plan_add_step_command =
                    in
                    let projection =
                      Sandwalk_core.Plan_projection.render
+                       ?objective:
+                         (Sandwalk_store.Add_plan_step_result.objective added)
+                       ~dependencies:
+                         (Sandwalk_store.Add_plan_step_result.dependencies added)
                        ~phase
                        ~revision
                        ~validated:false
@@ -877,6 +951,7 @@ let plan_add_step_command =
                             , Sandwalk_store.Stored_plan_step.title stored
                             , Sandwalk_store.Stored_plan_step.required stored
                             , Sandwalk_store.Stored_plan_step.position stored )))
+                       ()
                    in
                    let plan_path =
                      Sandwalk_runtime.Workspace.research_plan_path workspace
@@ -1126,6 +1201,11 @@ let plan_validate_command =
                 in
                 let projection =
                   Sandwalk_core.Plan_projection.render
+                    ?objective:
+                      (Sandwalk_store.Validate_plan_result.objective validated)
+                    ~dependencies:
+                      (Sandwalk_store.Validate_plan_result.dependencies
+                         validated)
                     ~phase
                     ~revision
                     ~validated:true
@@ -1136,6 +1216,7 @@ let plan_validate_command =
                          , Sandwalk_store.Stored_plan_step.title stored
                          , Sandwalk_store.Stored_plan_step.required stored
                          , Sandwalk_store.Stored_plan_step.position stored )))
+                    ()
                 in
                 let plan_path =
                   Sandwalk_runtime.Workspace.research_plan_path workspace
@@ -1366,6 +1447,10 @@ let plan_seal_command =
                 let steps = Sandwalk_store.Seal_plan_result.steps sealed in
                 let projection =
                   Sandwalk_core.Plan_projection.render
+                    ?objective:
+                      (Sandwalk_store.Seal_plan_result.objective sealed)
+                    ~dependencies:
+                      (Sandwalk_store.Seal_plan_result.dependencies sealed)
                     ~phase
                     ~revision
                     ~validated:true
@@ -1376,6 +1461,7 @@ let plan_seal_command =
                          , Sandwalk_store.Stored_plan_step.title stored
                          , Sandwalk_store.Stored_plan_step.required stored
                          , Sandwalk_store.Stored_plan_step.position stored )))
+                    ()
                 in
                 let plan_path =
                   Sandwalk_runtime.Workspace.research_plan_path workspace
@@ -1440,11 +1526,612 @@ let plan_seal_command =
                       Deferred.unit)))))
 ;;
 
+let plan_set_objective_command =
+  Async.Command.async
+    ~summary:"Set the bounded canonical research objective."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and objective_path =
+       flag "--file" (required string) ~doc:"PATH Objective text"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let%bind input =
+           Sandwalk_runtime.File_input.read
+             ~path:objective_path
+             ~maximum_bytes:Sandwalk_core.Plan_objective.maximum_bytes
+         in
+         (match input with
+          | Error _ ->
+            print_failure_and_exit
+              ~code:"PLAN_OBJECTIVE_FILE_ERROR"
+              ~message:"Could not read bounded plan objective."
+          | Ok input ->
+            (match
+               Sandwalk_core.Plan_objective.create
+                 (Sandwalk_runtime.File_input.content input)
+             with
+             | Error Empty ->
+               print_failure_and_exit
+                 ~code:"PLAN_OBJECTIVE_EMPTY"
+                 ~message:"Plan objective must not be empty."
+             | Error Too_large ->
+               print_failure_and_exit
+                 ~code:"PLAN_OBJECTIVE_TOO_LARGE"
+                 ~message:"Plan objective exceeds 65,536 bytes."
+             | Ok objective ->
+               let%bind database_exists =
+                 Async.Sys.file_exists_exn
+                   (Sandwalk_runtime.Workspace.database_path workspace)
+               in
+               if not database_exists
+               then
+                 print_failure_and_exit
+                   ~code:"WORKSPACE_NOT_FOUND"
+                   ~message:"Workspace does not exist."
+               else (
+                 let started_at = Time_float_unix.now () in
+                 let%bind invocation_id =
+                   In_thread.run (fun () ->
+                     Sandwalk_runtime.invocation_id ~now:started_at)
+                 in
+                 let arguments =
+                   `Assoc
+                     [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                     ; "directory_prefix", `String directory_prefix
+                     ; ( "file"
+                       , `Assoc
+                           [ "path", `String objective_path
+                           ; "size", `Int (Sandwalk_runtime.File_input.size input)
+                           ; ( "hash"
+                             , `Assoc
+                                 [ "algorithm", `String "md5"
+                                 ; ( "value"
+                                   , `String
+                                       (Sandwalk_runtime.File_input.md5 input) )
+                                 ] )
+                           ] )
+                     ]
+                 in
+                 let append_event
+                       ~kind
+                       ~timestamp
+                       ~phase
+                       ~state_changes
+                       ?duration_ms
+                       ?outcome
+                       ?error_code
+                       ()
+                   =
+                   Sandwalk_runtime.Audit.append
+                     ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                     (Sandwalk_protocol.Audit_event.create
+                        ~invocation_id
+                        ~timestamp
+                        ~kind
+                        ~command:"plan set-objective"
+                        ~arguments
+                        ~phase
+                        ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                        ~state_changes
+                        ?duration_ms
+                        ?outcome
+                        ?error_code
+                        ())
+                 in
+                 let fail_with_audit ~code ~message =
+                   let finished_at = Time_float_unix.now () in
+                   let duration_ms =
+                     Time_float.diff finished_at started_at
+                     |> Time_float.Span.to_ms
+                     |> Float.iround_nearest_exn
+                   in
+                   let%bind logged =
+                     append_event
+                       ~kind:`Failed
+                       ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                       ~phase:None
+                       ~state_changes:[]
+                       ~duration_ms
+                       ~outcome:"failure"
+                       ~error_code:code
+                       ()
+                   in
+                   match logged with
+                   | Error _ ->
+                     print_failure_and_exit
+                       ~code:"AUDIT_LOG_ERROR"
+                       ~message:"Could not append workspace audit log."
+                   | Ok () -> print_failure_and_exit ~code ~message
+                 in
+                 let%bind started =
+                   append_event
+                     ~kind:`Started
+                     ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                     ~phase:None
+                     ~state_changes:[]
+                     ()
+                 in
+                 (match started with
+                  | Error _ ->
+                    print_failure_and_exit
+                      ~code:"AUDIT_LOG_ERROR"
+                      ~message:"Could not append workspace audit log."
+                  | Ok () ->
+                    let%bind mutated =
+                      In_thread.run (fun () ->
+                        Sandwalk_store.set_plan_objective
+                          ~database_path:
+                            (Sandwalk_runtime.Workspace.database_path workspace)
+                          ~expected_slug:slug
+                          ~objective:
+                            (Sandwalk_core.Plan_objective.text objective)
+                          ~objective_path
+                          ~objective_md5:
+                            (Sandwalk_runtime.File_input.md5 input)
+                          ~objective_size:
+                            (Sandwalk_runtime.File_input.size input)
+                          ~now:
+                            (Sandwalk_runtime.timestamp_utc started_at)
+                          ())
+                    in
+                    (match mutated with
+                     | Error error ->
+                       let code, message = plan_error error in
+                       fail_with_audit ~code ~message
+                     | Ok mutated ->
+                       let state =
+                         Sandwalk_store.Mutate_plan_result.state mutated
+                       in
+                       let%bind written =
+                         write_plan_state workspace ~invocation_id state
+                       in
+                       (match written with
+                        | Error _ ->
+                          fail_with_audit
+                            ~code:"PLAN_PROJECTION_ERROR"
+                            ~message:"Could not write research plan projection."
+                        | Ok () ->
+                          let finished_at = Time_float_unix.now () in
+                          let duration_ms =
+                            Time_float.diff finished_at started_at
+                            |> Time_float.Span.to_ms
+                            |> Float.iround_nearest_exn
+                          in
+                          let phase =
+                            Sandwalk_store.Plan_state.phase state
+                            |> Sandwalk_core.Phase.to_string
+                          in
+                          let%bind logged =
+                            append_event
+                              ~kind:`Finished
+                              ~timestamp:
+                                (Sandwalk_runtime.timestamp_utc finished_at)
+                              ~phase:(Some phase)
+                              ~state_changes:
+                                [ `Assoc
+                                    [ "entity", `String "plan.objective"
+                                    ; "from", `Null
+                                    ; "to", `String "updated"
+                                    ]
+                                ]
+                              ~duration_ms
+                              ~outcome:"success"
+                              ()
+                          in
+                          (match logged with
+                           | Error _ ->
+                             print_failure_and_exit
+                               ~code:"AUDIT_LOG_ERROR"
+                               ~message:"Could not append workspace audit log."
+                           | Ok () ->
+                             let result =
+                               `Assoc
+                                 [ ( "revision"
+                                   , `Int
+                                       (Sandwalk_store.Plan_state.revision
+                                          state) )
+                                 ; "phase", `String phase
+                                 ; ( "plan_path"
+                                   , `String
+                                       (Sandwalk_runtime.Workspace
+                                        .research_plan_path
+                                          workspace) )
+                                 ]
+                             in
+                             Sandwalk_protocol.Envelope.success ~result ()
+                             |> Sandwalk_protocol.Envelope.render
+                             |> print_endline;
+                             Deferred.unit))))))))
+;;
+
+let plan_add_dependency_command =
+  Async.Command.async
+    ~summary:"Add one acyclic dependency edge to the plan."
+    (let%map_open.Command step_text = anon ("STEP" %: string)
+     and slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and dependency_text =
+       flag "--on" (required string) ~doc:"STEP Dependency step"
+     in
+     fun () ->
+       match
+         Sandwalk_core.Slug.of_string slug_text,
+         Sandwalk_core.Plan_step.Key.of_string step_text,
+         Sandwalk_core.Plan_step.Key.of_string dependency_text
+       with
+       | Error error, _, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, Error error, _ | _, _, Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_PLAN_STEP_KEY"
+           ~message:(Sandwalk_core.Plan_step.Key.Error.message error)
+       | Ok slug, Ok step_key, Ok dependency_key ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let started_at = Time_float_unix.now () in
+           let%bind invocation_id =
+             In_thread.run (fun () ->
+               Sandwalk_runtime.invocation_id ~now:started_at)
+           in
+           let arguments =
+             `Assoc
+               [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+               ; "directory_prefix", `String directory_prefix
+               ; "step", `String step_text
+               ; "on", `String dependency_text
+               ]
+           in
+           let append_event
+                 ~kind
+                 ~timestamp
+                 ~phase
+                 ~state_changes
+                 ?duration_ms
+                 ?outcome
+                 ?error_code
+                 ()
+             =
+             Sandwalk_runtime.Audit.append
+               ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+               (Sandwalk_protocol.Audit_event.create
+                  ~invocation_id
+                  ~timestamp
+                  ~kind
+                  ~command:"plan add-dependency"
+                  ~arguments
+                  ~phase
+                  ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                  ~state_changes
+                  ?duration_ms
+                  ?outcome
+                  ?error_code
+                  ())
+           in
+           let fail_with_audit ~code ~message =
+             let finished_at = Time_float_unix.now () in
+             let duration_ms =
+               Time_float.diff finished_at started_at
+               |> Time_float.Span.to_ms
+               |> Float.iround_nearest_exn
+             in
+             let%bind logged =
+               append_event
+                 ~kind:`Failed
+                 ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                 ~phase:None
+                 ~state_changes:[]
+                 ~duration_ms
+                 ~outcome:"failure"
+                 ~error_code:code
+                 ()
+             in
+             match logged with
+             | Error _ ->
+               print_failure_and_exit
+                 ~code:"AUDIT_LOG_ERROR"
+                 ~message:"Could not append workspace audit log."
+             | Ok () -> print_failure_and_exit ~code ~message
+           in
+           let%bind started =
+             append_event
+               ~kind:`Started
+               ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+               ~phase:(Some "planning")
+               ~state_changes:[]
+               ()
+           in
+           (match started with
+            | Error _ ->
+              print_failure_and_exit
+                ~code:"AUDIT_LOG_ERROR"
+                ~message:"Could not append workspace audit log."
+            | Ok () ->
+              let%bind mutated =
+                In_thread.run (fun () ->
+                  Sandwalk_store.add_plan_dependency
+                    ~database_path:
+                      (Sandwalk_runtime.Workspace.database_path workspace)
+                    ~expected_slug:slug
+                    ~step_key
+                    ~dependency_key
+                    ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                    ())
+              in
+              (match mutated with
+               | Error error ->
+                 let code, message = plan_error error in
+                 fail_with_audit ~code ~message
+               | Ok mutated ->
+                 let state =
+                   Sandwalk_store.Mutate_plan_result.state mutated
+                 in
+                 let%bind written =
+                   write_plan_state workspace ~invocation_id state
+                 in
+                 (match written with
+                  | Error _ ->
+                    fail_with_audit
+                      ~code:"PLAN_PROJECTION_ERROR"
+                      ~message:"Could not write research plan projection."
+                  | Ok () ->
+                    let finished_at = Time_float_unix.now () in
+                    let duration_ms =
+                      Time_float.diff finished_at started_at
+                      |> Time_float.Span.to_ms
+                      |> Float.iround_nearest_exn
+                    in
+                    let%bind logged =
+                      append_event
+                        ~kind:`Finished
+                        ~timestamp:
+                          (Sandwalk_runtime.timestamp_utc finished_at)
+                        ~phase:(Some "planning")
+                        ~state_changes:
+                          [ `Assoc
+                              [ "entity", `String "plan.dependency"
+                              ; "from", `Null
+                              ; ( "to"
+                                , `String
+                                    (step_text ^ "->" ^ dependency_text) )
+                              ]
+                          ]
+                        ~duration_ms
+                        ~outcome:"success"
+                        ()
+                    in
+                    (match logged with
+                     | Error _ ->
+                       print_failure_and_exit
+                         ~code:"AUDIT_LOG_ERROR"
+                         ~message:"Could not append workspace audit log."
+                     | Ok () ->
+                       let result =
+                         `Assoc
+                           [ ( "revision"
+                             , `Int
+                                 (Sandwalk_store.Plan_state.revision state) )
+                           ; "step", `String step_text
+                           ; "depends_on", `String dependency_text
+                           ; ( "plan_path"
+                             , `String
+                                 (Sandwalk_runtime.Workspace.research_plan_path
+                                    workspace) )
+                           ]
+                       in
+                       Sandwalk_protocol.Envelope.success ~result ()
+                       |> Sandwalk_protocol.Envelope.render
+                       |> print_endline;
+                       Deferred.unit))))))
+;;
+
+let plan_list_command =
+  Async.Command.async
+    ~summary:"List the canonical objective, steps, and dependencies."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let started_at = Time_float_unix.now () in
+           let%bind invocation_id =
+             In_thread.run (fun () ->
+               Sandwalk_runtime.invocation_id ~now:started_at)
+           in
+           let arguments =
+             `Assoc
+               [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+               ; "directory_prefix", `String directory_prefix
+               ]
+           in
+           let append_event ~kind ~timestamp ?duration_ms ?outcome ?error_code () =
+             Sandwalk_runtime.Audit.append
+               ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+               (Sandwalk_protocol.Audit_event.create
+                  ~invocation_id
+                  ~timestamp
+                  ~kind
+                  ~command:"plan list"
+                  ~arguments
+                  ~phase:None
+                  ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                  ~state_changes:[]
+                  ?duration_ms
+                  ?outcome
+                  ?error_code
+                  ())
+           in
+           let%bind started =
+             append_event
+               ~kind:`Started
+               ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+               ()
+           in
+           (match started with
+            | Error _ ->
+              print_failure_and_exit
+                ~code:"AUDIT_LOG_ERROR"
+                ~message:"Could not append workspace audit log."
+            | Ok () ->
+              let%bind state =
+                In_thread.run (fun () ->
+                  Sandwalk_store.read_plan_state
+                    ~database_path:
+                      (Sandwalk_runtime.Workspace.database_path workspace)
+                    ~expected_slug:slug
+                    ())
+              in
+              (match state with
+               | Error error ->
+                 let code, message = plan_error error in
+                 let%bind _ =
+                   append_event
+                     ~kind:`Failed
+                     ~timestamp:
+                       (Sandwalk_runtime.timestamp_utc (Time_float_unix.now ()))
+                     ~outcome:"failure"
+                     ~error_code:code
+                     ()
+                 in
+                 print_failure_and_exit ~code ~message
+               | Ok state ->
+                 let finished_at = Time_float_unix.now () in
+                 let duration_ms =
+                   Time_float.diff finished_at started_at
+                   |> Time_float.Span.to_ms
+                   |> Float.iround_nearest_exn
+                 in
+                 let%bind logged =
+                   append_event
+                     ~kind:`Finished
+                     ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                     ~duration_ms
+                     ~outcome:"success"
+                     ()
+                 in
+                 (match logged with
+                  | Error _ ->
+                    print_failure_and_exit
+                      ~code:"AUDIT_LOG_ERROR"
+                      ~message:"Could not append workspace audit log."
+                  | Ok () ->
+                    let steps =
+                      Sandwalk_store.Plan_state.steps state
+                      |> List.map ~f:(fun step ->
+                        `Assoc
+                          [ ( "key"
+                            , `String
+                                (Sandwalk_store.Stored_plan_step.key step
+                                 |> Sandwalk_core.Plan_step.Key.to_string) )
+                          ; ( "title"
+                            , `String
+                                (Sandwalk_store.Stored_plan_step.title step) )
+                          ; ( "required"
+                            , `Bool
+                                (Sandwalk_store.Stored_plan_step.required
+                                   step) )
+                          ; ( "position"
+                            , `Int
+                                (Sandwalk_store.Stored_plan_step.position
+                                   step) )
+                          ])
+                    in
+                    let dependencies =
+                      Sandwalk_store.Plan_state.dependencies state
+                      |> List.map ~f:(fun (step, dependency) ->
+                        `Assoc
+                          [ "step", `String step
+                          ; "depends_on", `String dependency
+                          ])
+                    in
+                    let result =
+                      `Assoc
+                        [ ( "phase"
+                          , `String
+                              (Sandwalk_store.Plan_state.phase state
+                               |> Sandwalk_core.Phase.to_string) )
+                        ; ( "revision"
+                          , `Int (Sandwalk_store.Plan_state.revision state) )
+                        ; ( "objective"
+                          , Option.value_map
+                              (Sandwalk_store.Plan_state.objective state)
+                              ~default:`Null
+                              ~f:(fun value -> `String value) )
+                        ; "steps", `List steps
+                        ; "dependencies", `List dependencies
+                        ]
+                    in
+                    Sandwalk_protocol.Envelope.success ~result ()
+                    |> Sandwalk_protocol.Envelope.render
+                    |> print_endline;
+                    Deferred.unit)))))
+;;
+
 let plan_command =
   Async.Command.group
     ~summary:"Manage the canonical research plan."
     [ "add-step", plan_add_step_command
+    ; "add-dependency", plan_add_dependency_command
+    ; "list", plan_list_command
     ; "seal", plan_seal_command
+    ; "set-objective", plan_set_objective_command
     ; "validate", plan_validate_command
     ]
 ;;
@@ -1458,6 +2145,9 @@ let claim_error = function
     "STEP_ALREADY_CLAIMED", "Plan step already has an active claim."
   | Step_completed key ->
     "STEP_COMPLETED", sprintf "Plan step %S is already completed." key
+  | Step_dependencies_incomplete key ->
+    "STEP_DEPENDENCIES_INCOMPLETE",
+    sprintf "Plan step %S has incomplete dependencies." key
   | Claim_id_collision ->
     "CLAIM_ID_COLLISION", "Could not allocate a unique claim identifier."
   | Claim_not_found -> "CLAIM_NOT_FOUND", "Claim does not exist."

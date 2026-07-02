@@ -84,15 +84,31 @@ module Planning : sig
   val transition_path : Phase.t -> (Phase.t list, Error.t) Result.t
 end
 
+module Plan_objective : sig
+  type t
+
+  type error =
+    | Empty
+    | Too_large
+  [@@deriving sexp_of]
+
+  val maximum_bytes : int
+  val create : string -> (t, error) Result.t
+  val text : t -> string
+end
+
 module Plan_projection : sig
   val version : revision:int -> validated:bool -> sealed:bool -> int
 
   val render
-    :  phase:Phase.t
+    :  ?objective:string
+    -> ?dependencies:(string * string) list
+    -> phase:Phase.t
     -> revision:int
     -> validated:bool
     -> sealed:bool
     -> steps:(Plan_step.Key.t * string * bool * int) list
+    -> unit
     -> string
 end
 

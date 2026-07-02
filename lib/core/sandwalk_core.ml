@@ -181,12 +181,42 @@ module Planning = struct
   ;;
 end
 
+module Plan_objective = struct
+  type t = string
+
+  type error =
+    | Empty
+    | Too_large
+  [@@deriving sexp_of]
+
+  let maximum_bytes = 65_536
+
+  let create text =
+    if String.is_empty (String.strip text)
+    then Error Empty
+    else if String.length text > maximum_bytes
+    then Error Too_large
+    else Ok text
+  ;;
+
+  let text t = t
+end
+
 module Plan_projection = struct
   let version ~revision ~validated ~sealed =
     (revision * 3) + if sealed then 2 else if validated then 1 else 0
   ;;
 
-  let render ~phase ~revision ~validated ~sealed ~steps =
+  let render
+        ?objective
+        ?(dependencies = [])
+        ~phase
+        ~revision
+        ~validated
+        ~sealed
+        ~steps
+        ()
+    =
     let step_lines =
       match steps with
       | [] -> [ "No steps." ]
@@ -199,6 +229,19 @@ module Plan_projection = struct
               (if required then "required" else "optional")
           ; sprintf "   Title: %S" title
           ])
+    in
+    let objective_lines =
+      Option.value_map objective ~default:[] ~f:(fun objective ->
+        [ "## Objective"; ""; String.strip objective; "" ])
+    in
+    let dependency_lines =
+      if List.is_empty dependencies
+      then []
+      else
+        [ "## Dependencies"; "" ]
+        @ List.map dependencies ~f:(fun (step, dependency) ->
+          sprintf "- `%s` depends on `%s`" step dependency)
+        @ [ "" ]
     in
     String.concat
       ~sep:"\n"
@@ -213,7 +256,11 @@ module Plan_projection = struct
        ; sprintf "Sealed: %s" (if sealed then "yes" else "no")
        ; ""
        ]
+       @ objective_lines
+       @ [ "## Steps"; "" ]
        @ step_lines
+       @ [ "" ]
+       @ dependency_lines
        @ [ "" ])
   ;;
 end

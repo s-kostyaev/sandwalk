@@ -35,7 +35,7 @@ Reviews must cover every current block and bind to exact hashes.
 
   $ ./inspect_workspace.exe workspace/block-review/database/sandwalk.sqlite3
   block-review|finalizing
-  15
+  16
   wal
   ok
 
@@ -51,6 +51,6 @@ Rejected blocks return the workspace to drafting.
 
   $ ./inspect_workspace.exe workspace/redraft/database/sandwalk.sqlite3
   redraft|drafting
-  15
+  16
   wal
   ok

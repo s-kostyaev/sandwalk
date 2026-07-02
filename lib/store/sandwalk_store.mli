@@ -24,6 +24,7 @@ module Error : sig
     | Step_claim_wrong_phase of Sandwalk_core.Phase.t
     | Step_already_claimed of int64
     | Step_completed of string
+    | Step_dependencies_incomplete of string
     | Claim_id_collision
     | Invalid_step_state of string
     | Claim_not_found
@@ -66,6 +67,11 @@ module Error : sig
     | Report_block_stale of int
     | Finalize_wrong_phase of Sandwalk_core.Phase.t
     | Finalize_gate_failed
+    | Plan_objective_wrong_phase of Sandwalk_core.Phase.t
+    | Plan_dependency_wrong_phase of Sandwalk_core.Phase.t
+    | Plan_dependency_self
+    | Plan_dependency_exists
+    | Plan_dependency_cycle
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -254,6 +260,26 @@ module Stored_plan_step : sig
   val position : t -> int
 end
 
+module Plan_state : sig
+  type t
+
+  val phase : t -> Sandwalk_core.Phase.t
+  val revision : t -> int
+  val validated_revision : t -> int option
+  val sealed_revision : t -> int option
+  val objective : t -> string option
+  val steps : t -> Stored_plan_step.t list
+  val dependencies : t -> (string * string) list
+end
+
+module Mutate_plan_result : sig
+  type t
+
+  val previous_phase : t -> Sandwalk_core.Phase.t
+  val phase_path : t -> Sandwalk_core.Phase.t list
+  val state : t -> Plan_state.t
+end
+
 module Seal_plan_result : sig
   type t
 
@@ -263,6 +289,8 @@ module Seal_plan_result : sig
   val revision : t -> int
   val already_sealed : t -> bool
   val steps : t -> Stored_plan_step.t list
+  val objective : t -> string option
+  val dependencies : t -> (string * string) list
 end
 
 module Validate_plan_result : sig
@@ -273,6 +301,8 @@ module Validate_plan_result : sig
   val revision : t -> int
   val already_validated : t -> bool
   val steps : t -> Stored_plan_step.t list
+  val objective : t -> string option
+  val dependencies : t -> (string * string) list
 end
 
 module Add_plan_step_result : sig
@@ -284,6 +314,8 @@ module Add_plan_step_result : sig
   val phase : t -> Sandwalk_core.Phase.t
   val revision : t -> int
   val steps : t -> Stored_plan_step.t list
+  val objective : t -> string option
+  val dependencies : t -> (string * string) list
 end
 
 module Workspace_status : sig
@@ -325,6 +357,35 @@ val read_plan_steps
   -> database_path:string
   -> unit
   -> (Stored_plan_step.t list, Error.t) Result.t
+
+val read_plan_state
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> unit
+  -> (Plan_state.t, Error.t) Result.t
+
+val set_plan_objective
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> objective:string
+  -> objective_path:string
+  -> objective_md5:string
+  -> objective_size:int
+  -> now:string
+  -> unit
+  -> (Mutate_plan_result.t, Error.t) Result.t
+
+val add_plan_dependency
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> step_key:Sandwalk_core.Plan_step.Key.t
+  -> dependency_key:Sandwalk_core.Plan_step.Key.t
+  -> now:string
+  -> unit
+  -> (Mutate_plan_result.t, Error.t) Result.t
 
 val validate_plan
   :  ?busy_timeout_ms:int

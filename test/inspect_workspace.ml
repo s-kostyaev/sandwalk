@@ -664,6 +664,35 @@ PRAGMA user_version = 14;
 |})
 ;;
 
+let create_v15 database slug =
+  create_v14 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE finalizations (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  report_revision INTEGER NOT NULL REFERENCES reports(revision),
+  final_report_md5 TEXT NOT NULL CHECK (length(final_report_md5) = 32),
+  sources_md5 TEXT NOT NULL CHECK (length(sources_md5) = 32),
+  source_count INTEGER NOT NULL CHECK (source_count >= 1),
+  completed_at TEXT NOT NULL
+);
+UPDATE workspaces SET phase = 'completed';
+INSERT INTO finalizations (
+  singleton, report_revision, final_report_md5, sources_md5,
+  source_count, completed_at
+) VALUES (
+  1, 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, '2026-01-01 00:00:00Z'
+);
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (15, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 15;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -819,6 +848,7 @@ let () =
     | [| _; "--create-v12"; path; slug |] -> `Create (12, slug), path
     | [| _; "--create-v13"; path; slug |] -> `Create (13, slug), path
     | [| _; "--create-v14"; path; slug |] -> `Create (14, slug), path
+    | [| _; "--create-v15"; path; slug |] -> `Create (15, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
@@ -853,6 +883,7 @@ let () =
       | `Create (12, slug) -> create_v12 database slug
       | `Create (13, slug) -> create_v13 database slug
       | `Create (14, slug) -> create_v14 database slug
+      | `Create (15, slug) -> create_v15 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
