@@ -117,6 +117,42 @@ module Snapshot_id : sig
   val to_string : t -> string
 end
 
+module Excerpt_id : sig
+  type t
+
+  val of_string : string -> t option
+  val to_string : t -> string
+end
+
+module Excerpt : sig
+  type t
+
+  type error =
+    | Empty_document
+    | Empty_excerpt
+    | Invalid_line_range
+    | Text_not_found
+    | Ambiguous_text of int
+    | Invalid_occurrence of int
+    | Too_large of int
+  [@@deriving sexp_of]
+
+  val maximum_bytes : int
+  val by_lines : string -> first:int -> last:int -> (t, error) Result.t
+
+  val by_text
+    :  string
+    -> excerpt:string
+    -> occurrence:int option
+    -> (t, error) Result.t
+
+  val text : t -> string
+  val line_start : t -> int
+  val line_end : t -> int
+  val byte_start : t -> int
+  val byte_end : t -> int
+end
+
 module Step_state : sig
   type t =
     | Pending

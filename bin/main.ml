@@ -202,7 +202,12 @@ let status_error = function
   | Hit_not_owned_by_claim _
   | Fetch_wrong_phase _
   | Fetch_requires_claim
-  | Snapshot_id_collision ->
+  | Snapshot_id_collision
+  | Snapshot_not_found _
+  | Snapshot_not_owned_by_claim _
+  | Excerpt_wrong_phase _
+  | Excerpt_requires_claim
+  | Excerpt_id_collision ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -2027,6 +2032,42 @@ let fetch_error = function
   | error -> claim_error error
 ;;
 
+let excerpt_store_error = function
+  | Sandwalk_store.Error.Snapshot_not_found reference ->
+    "SNAPSHOT_NOT_FOUND", sprintf "Snapshot %S does not exist." reference
+  | Snapshot_not_owned_by_claim reference ->
+    "SNAPSHOT_NOT_OWNED_BY_CLAIM",
+    sprintf "Snapshot %S belongs to another research step." reference
+  | Excerpt_wrong_phase _ ->
+    "EXCERPT_NOT_ALLOWED", "Excerpt creation is not allowed in the current phase."
+  | Excerpt_requires_claim ->
+    "EXCERPT_REQUIRES_CLAIM", "Research excerpt creation requires an active claim."
+  | Excerpt_id_collision ->
+    "EXCERPT_ID_COLLISION", "Could not allocate a unique excerpt reference."
+  | error -> fetch_error error
+;;
+
+let excerpt_selection_error = function
+  | Sandwalk_core.Excerpt.Empty_document ->
+    "EMPTY_SNAPSHOT", "Snapshot Markdown is empty."
+  | Empty_excerpt -> "EMPTY_EXCERPT", "Excerpt text must not be empty."
+  | Invalid_line_range ->
+    "INVALID_LINE_RANGE", "Line range must identify existing inclusive lines."
+  | Text_not_found ->
+    "EXCERPT_TEXT_NOT_FOUND", "Excerpt text does not occur in the snapshot."
+  | Ambiguous_text count ->
+    ( "AMBIGUOUS_EXCERPT_TEXT"
+    , sprintf "Excerpt text occurs %d times; specify --occurrence." count )
+  | Invalid_occurrence occurrence ->
+    "INVALID_OCCURRENCE", sprintf "Occurrence %d does not exist." occurrence
+  | Too_large size ->
+    ( "EXCERPT_TOO_LARGE"
+    , sprintf
+        "Excerpt is %d bytes; maximum size is %d bytes."
+        size
+        Sandwalk_core.Excerpt.maximum_bytes )
+;;
+
 let fetch_command =
   Async.Command.async
     ~summary:"Fetch one owned search hit into an immutable snapshot."
@@ -2407,6 +2448,469 @@ let fetch_command =
                                          Deferred.unit)))))))))))
 ;;
 
+let excerpt_create_command =
+  Async.Command.async
+    ~summary:"Create an exact excerpt from an immutable snapshot."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag
+         "--directory-prefix"
+         (optional string)
+         ~doc:"PATH Parent directory for Sandwalk workspaces"
+     and snapshot_text =
+       flag "--snapshot" (required string) ~doc:"SNAPSHOT Immutable snapshot"
+     and claim_text =
+       flag "--claim" (optional string) ~doc:"CLAIM Active research claim"
+     and lines_text =
+       flag "--lines" (optional string) ~doc:"FIRST:LAST Inclusive line range"
+     and text_path =
+       flag "--text-file" (optional string) ~doc:"PATH Exact excerpt text"
+     and occurrence =
+       flag "--occurrence" (optional int) ~doc:"N One-based text occurrence"
+     in
+     fun () ->
+       let selection =
+         match lines_text, text_path, occurrence with
+         | Some range, None, None ->
+           (match String.lsplit2 range ~on:':' with
+            | Some (first, last) ->
+              (match Int.of_string_opt first, Int.of_string_opt last with
+               | Some first, Some last -> Ok (`Lines (first, last))
+               | _ -> Error ())
+            | None -> Error ())
+         | None, Some path, occurrence -> Ok (`Text (path, occurrence))
+         | _ -> Error ()
+       in
+       match
+         Sandwalk_core.Slug.of_string slug_text,
+         Sandwalk_core.Snapshot_id.of_string snapshot_text,
+         selection
+       with
+       | Error error, _, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, None, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SNAPSHOT"
+           ~message:"Snapshot reference is invalid."
+       | _, _, Error () ->
+         print_failure_and_exit
+           ~code:"INVALID_EXCERPT_SELECTOR"
+           ~message:
+             "Specify exactly one of --lines or --text-file; occurrence applies to text."
+       | Ok slug, Some snapshot_id, Ok selection ->
+         let claim_id =
+           match claim_text with
+           | None -> Ok None
+           | Some value ->
+             Sandwalk_core.Claim_id.of_string value
+             |> Result.of_option ~error:"Claim identifier is invalid."
+             |> Result.map ~f:Option.some
+         in
+         (match claim_id with
+          | Error message ->
+            print_failure_and_exit ~code:"INVALID_CLAIM" ~message
+          | Ok claim_id ->
+            let directory_prefix =
+              Sandwalk_runtime.resolve_directory_prefix
+                ~command_line:directory_prefix
+            in
+            let workspace =
+              Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+            in
+            let%bind database_exists =
+              Async.Sys.file_exists_exn
+                (Sandwalk_runtime.Workspace.database_path workspace)
+            in
+            if not database_exists
+            then
+              print_failure_and_exit
+                ~code:"WORKSPACE_NOT_FOUND"
+                ~message:"Workspace does not exist."
+            else (
+              let%bind snapshot =
+                In_thread.run (fun () ->
+                  Sandwalk_store.snapshot_for_excerpt
+                    ~database_path:
+                      (Sandwalk_runtime.Workspace.database_path workspace)
+                    ~expected_slug:slug
+                    ~snapshot_id
+                    ())
+              in
+              match snapshot with
+              | Error error ->
+                let code, message = excerpt_store_error error in
+                print_failure_and_exit ~code ~message
+              | Ok snapshot ->
+                let document_path =
+                  Filename.concat
+                    (Sandwalk_store.Snapshot_for_excerpt.artifact_path snapshot)
+                    "document.md"
+                in
+                let%bind document_input =
+                  Sandwalk_runtime.File_input.read
+                    ~path:document_path
+                    ~maximum_bytes:52_428_800
+                in
+                (match document_input with
+                 | Error _ ->
+                   print_failure_and_exit
+                     ~code:"SNAPSHOT_ARTIFACT_ERROR"
+                     ~message:"Could not read bounded snapshot Markdown."
+                 | Ok document_input ->
+                   let%bind text_input =
+                     match selection with
+                     | `Lines _ -> Deferred.return (Ok None)
+                     | `Text (path, _) ->
+                       let%map input =
+                         Sandwalk_runtime.File_input.read
+                           ~path
+                           ~maximum_bytes:Sandwalk_core.Excerpt.maximum_bytes
+                       in
+                       Result.map input ~f:Option.some
+                   in
+                   (match text_input with
+                    | Error _ ->
+                      print_failure_and_exit
+                        ~code:"EXCERPT_FILE_ERROR"
+                        ~message:"Could not read bounded excerpt text."
+                    | Ok text_input ->
+                      let selected =
+                        match selection, text_input with
+                        | `Lines (first, last), _ ->
+                          Sandwalk_core.Excerpt.by_lines
+                            (Sandwalk_runtime.File_input.content document_input)
+                            ~first
+                            ~last
+                        | `Text (_, occurrence), Some input ->
+                          Sandwalk_core.Excerpt.by_text
+                            (Sandwalk_runtime.File_input.content document_input)
+                            ~excerpt:
+                              (Sandwalk_runtime.File_input.content input)
+                            ~occurrence
+                        | `Text _, None -> assert false
+                      in
+                      (match selected with
+                       | Error error ->
+                         let code, message = excerpt_selection_error error in
+                         print_failure_and_exit ~code ~message
+                       | Ok excerpt ->
+                         let started_at = Time_float_unix.now () in
+                         let%bind invocation_id, excerpt_id =
+                           Deferred.both
+                             (In_thread.run (fun () ->
+                                Sandwalk_runtime.invocation_id ~now:started_at))
+                             (In_thread.run Sandwalk_runtime.excerpt_id)
+                         in
+                         let artifact_path =
+                           Sandwalk_runtime.Workspace.excerpt_path
+                             workspace
+                             excerpt_id
+                         in
+                         let file_argument input =
+                           `Assoc
+                             [ ( "path"
+                               , `String
+                                   (Sandwalk_runtime.File_input.path input) )
+                             ; ( "size"
+                               , `Int
+                                   (Sandwalk_runtime.File_input.size input) )
+                             ; ( "hash"
+                               , `Assoc
+                                   [ "algorithm", `String "md5"
+                                   ; ( "value"
+                                     , `String
+                                         (Sandwalk_runtime.File_input.md5
+                                            input) )
+                                   ] )
+                             ]
+                         in
+                         let selector_argument =
+                           match selection, text_input with
+                           | `Lines (first, last), _ ->
+                             `Assoc
+                               [ "lines", `String (sprintf "%d:%d" first last)
+                               ]
+                           | `Text (_, occurrence), Some input ->
+                             `Assoc
+                               [ "text_file", file_argument input
+                               ; ( "occurrence"
+                                 , Option.value_map
+                                     occurrence
+                                     ~default:`Null
+                                     ~f:(fun value -> `Int value) )
+                               ]
+                           | `Text _, None -> assert false
+                         in
+                         let arguments =
+                           `Assoc
+                             [ ( "slug"
+                               , `String (Sandwalk_core.Slug.to_string slug) )
+                             ; "directory_prefix", `String directory_prefix
+                             ; "snapshot", `String snapshot_text
+                             ; ( "claim"
+                               , Option.value_map
+                                   claim_text
+                                   ~default:`Null
+                                   ~f:(fun value -> `String value) )
+                             ; "selector", selector_argument
+                             ]
+                         in
+                         let append_event
+                               ~kind
+                               ~timestamp
+                               ~phase
+                               ~state_changes
+                               ?created_references
+                               ?duration_ms
+                               ?outcome
+                               ?error_code
+                               ()
+                           =
+                           Sandwalk_runtime.Audit.append
+                             ~path:
+                               (Sandwalk_runtime.Workspace.events_path
+                                  workspace)
+                             (Sandwalk_protocol.Audit_event.create
+                                ~invocation_id
+                                ~timestamp
+                                ~kind
+                                ~command:"excerpt create"
+                                ~arguments
+                                ~phase
+                                ?claim:claim_text
+                                ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                                ~state_changes
+                                ~consumed_references:
+                                  (snapshot_text :: Option.to_list claim_text)
+                                ?created_references
+                                ?duration_ms
+                                ?outcome
+                                ?error_code
+                                ())
+                         in
+                         let fail_with_audit ~code ~message =
+                           let finished_at = Time_float_unix.now () in
+                           let duration_ms =
+                             Time_float.diff finished_at started_at
+                             |> Time_float.Span.to_ms
+                             |> Float.iround_nearest_exn
+                           in
+                           let%bind logged =
+                             append_event
+                               ~kind:`Failed
+                               ~timestamp:
+                                 (Sandwalk_runtime.timestamp_utc finished_at)
+                               ~phase:None
+                               ~state_changes:[]
+                               ~duration_ms
+                               ~outcome:"failure"
+                               ~error_code:code
+                               ()
+                           in
+                           match logged with
+                           | Error _ ->
+                             print_failure_and_exit
+                               ~code:"AUDIT_LOG_ERROR"
+                               ~message:
+                                 "Could not append workspace audit log."
+                           | Ok () -> print_failure_and_exit ~code ~message
+                         in
+                         let remove_candidate () =
+                           let%map _ =
+                             Monitor.try_with (fun () ->
+                               Unix.unlink artifact_path)
+                           in
+                           ()
+                         in
+                         let%bind started =
+                           append_event
+                             ~kind:`Started
+                             ~timestamp:
+                               (Sandwalk_runtime.timestamp_utc started_at)
+                             ~phase:None
+                             ~state_changes:[]
+                             ()
+                         in
+                         (match started with
+                          | Error _ ->
+                            print_failure_and_exit
+                              ~code:"AUDIT_LOG_ERROR"
+                              ~message:"Could not append workspace audit log."
+                          | Ok () ->
+                            let%bind () =
+                              Unix.mkdir
+                                ~p:()
+                                (Filename.dirname artifact_path)
+                            in
+                            let%bind written =
+                              Sandwalk_runtime.Atomic_file.write_exclusive
+                                ~path:artifact_path
+                                (Sandwalk_core.Excerpt.text excerpt)
+                            in
+                            (match written with
+                             | Error _ ->
+                               fail_with_audit
+                                 ~code:"WORKSPACE_IO_ERROR"
+                                 ~message:"Could not publish excerpt artifact."
+                             | Ok () ->
+                               let persisted_at = Time_float_unix.now () in
+                               let now_unix_seconds =
+                                 Time_float.to_span_since_epoch persisted_at
+                                 |> Time_float.Span.to_sec
+                                 |> Float.iround_down_exn
+                                 |> Int64.of_int
+                               in
+                               let%bind persisted =
+                                 In_thread.run (fun () ->
+                                   Sandwalk_store.record_excerpt
+                                     ~database_path:
+                                       (Sandwalk_runtime.Workspace.database_path
+                                          workspace)
+                                     ~expected_slug:slug
+                                     ~claim_id
+                                     ~snapshot_id
+                                     ~excerpt_id
+                                     ~artifact_path
+                                     ~markdown_sha256:
+                                       (Sandwalk_store.Snapshot_for_excerpt
+                                        .markdown_sha256
+                                          snapshot)
+                                     ~line_start:
+                                       (Sandwalk_core.Excerpt.line_start excerpt)
+                                     ~line_end:
+                                       (Sandwalk_core.Excerpt.line_end excerpt)
+                                     ~byte_start:
+                                       (Sandwalk_core.Excerpt.byte_start excerpt)
+                                     ~byte_end:
+                                       (Sandwalk_core.Excerpt.byte_end excerpt)
+                                     ~excerpt_md5:
+                                       (Md5.digest_string
+                                          (Sandwalk_core.Excerpt.text excerpt)
+                                        |> Md5.to_hex)
+                                     ~excerpt_size:
+                                       (String.length
+                                          (Sandwalk_core.Excerpt.text excerpt))
+                                     ~now:
+                                       (Sandwalk_runtime.timestamp_utc
+                                          persisted_at)
+                                     ~now_unix_seconds
+                                     ())
+                               in
+                               (match persisted with
+                                | Error error ->
+                                  let%bind () = remove_candidate () in
+                                  let code, message =
+                                    excerpt_store_error error
+                                  in
+                                  fail_with_audit ~code ~message
+                                | Ok persisted ->
+                                  let stored_id =
+                                    Sandwalk_store.Record_excerpt_result
+                                    .excerpt_id
+                                      persisted
+                                  in
+                                  let created =
+                                    Sandwalk_store.Record_excerpt_result.created
+                                      persisted
+                                  in
+                                  let%bind () =
+                                    if created
+                                    then Deferred.unit
+                                    else remove_candidate ()
+                                  in
+                                  let reference =
+                                    Sandwalk_core.Excerpt_id.to_string stored_id
+                                  in
+                                  let phase =
+                                    Option.value_map
+                                      (Sandwalk_store.Record_excerpt_result
+                                       .step_key
+                                         persisted)
+                                      ~default:"reconnaissance"
+                                      ~f:(Fn.const "researching")
+                                  in
+                                  let finished_at =
+                                    Time_float_unix.now ()
+                                  in
+                                  let duration_ms =
+                                    Time_float.diff finished_at started_at
+                                    |> Time_float.Span.to_ms
+                                    |> Float.iround_nearest_exn
+                                  in
+                                  let%bind logged =
+                                    append_event
+                                      ~kind:`Finished
+                                      ~timestamp:
+                                        (Sandwalk_runtime.timestamp_utc
+                                           finished_at)
+                                      ~phase:(Some phase)
+                                      ~state_changes:
+                                        (if created
+                                         then
+                                           [ `Assoc
+                                               [ ( "entity"
+                                                 , `String "excerpt" )
+                                               ; "from", `Null
+                                               ; "to", `String reference
+                                               ]
+                                           ]
+                                         else [])
+                                      ~created_references:
+                                        (if created then [ reference ] else [])
+                                      ~duration_ms
+                                      ~outcome:"success"
+                                      ()
+                                  in
+                                  (match logged with
+                                   | Error _ ->
+                                     print_failure_and_exit
+                                       ~code:"AUDIT_LOG_ERROR"
+                                       ~message:
+                                         "Could not append workspace audit log."
+                                   | Ok () ->
+                                     let result =
+                                       `Assoc
+                                         [ "excerpt", `String reference
+                                         ; "created", `Bool created
+                                         ; ( "lines"
+                                           , `String
+                                               (sprintf
+                                                  "%d:%d"
+                                                  (Sandwalk_core.Excerpt
+                                                   .line_start
+                                                     excerpt)
+                                                  (Sandwalk_core.Excerpt
+                                                   .line_end
+                                                     excerpt)) )
+                                         ; ( "bytes"
+                                           , `String
+                                               (sprintf
+                                                  "%d:%d"
+                                                  (Sandwalk_core.Excerpt
+                                                   .byte_start
+                                                     excerpt)
+                                                  (Sandwalk_core.Excerpt
+                                                   .byte_end
+                                                     excerpt)) )
+                                         ]
+                                     in
+                                     Sandwalk_protocol.Envelope.success
+                                       ~result
+                                       ()
+                                     |> Sandwalk_protocol.Envelope.render
+                                     |> print_endline;
+                                     Deferred.unit))))))))))
+;;
+
+let excerpt_command =
+  Async.Command.group
+    ~summary:"Create and manage exact snapshot excerpts."
+    [ "create", excerpt_create_command ]
+;;
+
 let search_command =
   Async.Command.async
     ~summary:"Run a bounded search adapter and persist provenance-owned hits."
@@ -2726,6 +3230,7 @@ let command =
   Async.Command.group
     ~summary:"Deterministic research orchestration for AI agents."
     [ "about", about_command
+    ; "excerpt", excerpt_command
     ; "fetch", fetch_command
     ; "init", init_command
     ; "plan", plan_command

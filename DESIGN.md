@@ -340,6 +340,13 @@ Text must occur exactly in the normalized snapshot. Ambiguous matches require
 an occurrence selector. Oversized excerpts are rejected with a compact repair
 instruction. Creating the same excerpt twice is idempotent.
 
+Line ranges are one-based, inclusive, and retain the source newline after the
+last selected line when one exists. Byte ranges are zero-based with an
+exclusive end. Exact-text matching permits overlapping occurrences and
+`--occurrence` is one-based. Excerpt text is limited to 65,536 bytes. In
+`researching`, creation requires the active claim that owns the snapshot and
+renews that claim only after the excerpt row commits.
+
 ## Findings and evidence
 
 A finding has a human-readable key scoped to one plan step. Its evidence bundle

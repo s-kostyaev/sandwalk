@@ -27,6 +27,12 @@ module Workspace = struct
       ("artifacts/snapshots/" ^ Sandwalk_core.Snapshot_id.to_string snapshot_id)
   ;;
 
+  let excerpt_path t excerpt_id =
+    Filename.concat
+      t.root
+      ("artifacts/excerpts/" ^ Sandwalk_core.Excerpt_id.to_string excerpt_id ^ ".md")
+  ;;
+
   let resolve ~directory_prefix ~slug =
     let root =
       Filename.concat directory_prefix (Sandwalk_core.Slug.to_string slug)
@@ -229,6 +235,22 @@ module Atomic_file = struct
       In_thread.run (fun () -> write_blocking ~path ~temporary_suffix content))
   ;;
 
+  let write_exclusive ~path content =
+    Deferred.Or_error.try_with (fun () ->
+      In_thread.run (fun () ->
+        let file_descriptor =
+          Core_unix.openfile
+            path
+            ~mode:[ O_WRONLY; O_CREAT; O_EXCL; O_CLOEXEC ]
+            ~perm:0o600
+        in
+        Exn.protect
+          ~f:(fun () ->
+            write_all file_descriptor content;
+            Core_unix.fsync file_descriptor)
+          ~finally:(fun () -> Core_unix.close file_descriptor)))
+  ;;
+
   let persisted_version path =
     try
       In_channel.with_file path ~f:(fun channel ->
@@ -413,4 +435,13 @@ let snapshot_id () =
       sprintf "%02x" (Char.to_int character))
   in
   Sandwalk_core.Snapshot_id.of_string ("snap_" ^ suffix) |> Option.value_exn
+;;
+
+let excerpt_id () =
+  let suffix =
+    random_bits ()
+    |> String.concat_map ~f:(fun character ->
+      sprintf "%02x" (Char.to_int character))
+  in
+  Sandwalk_core.Excerpt_id.of_string ("excerpt_" ^ suffix) |> Option.value_exn
 ;;

@@ -301,6 +301,65 @@ PRAGMA user_version = 7;
 |})
 ;;
 
+let create_v8 database slug =
+  create_v7 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE snapshots (
+  snapshot_ref TEXT PRIMARY KEY CHECK (
+    length(snapshot_ref) = 37
+    AND substr(snapshot_ref, 1, 5) = 'snap_'
+    AND substr(snapshot_ref, 6) NOT GLOB '*[^a-f0-9]*'
+  ),
+  hit_ref TEXT NOT NULL REFERENCES search_hits(hit_ref),
+  claim_id TEXT REFERENCES claims(claim_id),
+  step_key TEXT REFERENCES plan_steps(step_key),
+  artifact_path TEXT NOT NULL UNIQUE,
+  final_url TEXT NOT NULL,
+  input_sha256 TEXT NOT NULL,
+  markdown_sha256 TEXT NOT NULL,
+  manifest_json TEXT NOT NULL,
+  retrieved_at TEXT NOT NULL
+);
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (8, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 8;
+|});
+  let statement =
+    Sqlite3.prepare
+      database
+      {|
+INSERT INTO snapshots (
+  snapshot_ref, hit_ref, claim_id, step_key, artifact_path, final_url,
+  input_sha256, markdown_sha256, manifest_json, retrieved_at
+) VALUES (
+  'snap_00000000000000000000000000000001',
+  'hit_00000000000000000000000000000001',
+  'claim_00000000000000000000000000000001',
+  'fixture-step', ?1, 'https://example.test/final', ?2, ?3, '{}',
+  '2026-01-01 00:00:00Z'
+)
+|}
+  in
+  Fun.protect
+    ~finally:(fun () -> ignore (Sqlite3.finalize statement : Sqlite3.Rc.t))
+    (fun () ->
+      check
+        database
+        (Sqlite3.bind_text
+           statement
+           1
+           ("workspace/"
+            ^ slug
+            ^ "/artifacts/snapshots/snap_00000000000000000000000000000001"));
+      check database (Sqlite3.bind_text statement 2 (String.make 64 'a'));
+      check database (Sqlite3.bind_text statement 3 (String.make 64 'b'));
+      check database (Sqlite3.step statement))
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -358,6 +417,17 @@ ORDER BY retrieved_at, snapshot_ref
 |}
 ;;
 
+let inspect_excerpts database =
+  print_query
+    database
+    {|
+SELECT length(excerpt_ref), snapshot_ref, line_start, line_end,
+       byte_start, byte_end, length(excerpt_md5), excerpt_size
+FROM excerpts
+ORDER BY byte_start, byte_end
+|}
+;;
+
 let () =
   let action, path =
     match Sys.argv with
@@ -368,10 +438,12 @@ let () =
     | [| _; "--create-v5"; path; slug |] -> `Create (5, slug), path
     | [| _; "--create-v6"; path; slug |] -> `Create (6, slug), path
     | [| _; "--create-v7"; path; slug |] -> `Create (7, slug), path
+    | [| _; "--create-v8"; path; slug |] -> `Create (8, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
     | [| _; "--inspect-snapshots"; path |] -> `Inspect_snapshots, path
+    | [| _; "--inspect-excerpts"; path |] -> `Inspect_excerpts, path
     | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
     | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
@@ -388,12 +460,14 @@ let () =
       | `Create (5, slug) -> create_v5 database slug
       | `Create (6, slug) -> create_v6 database slug
       | `Create (7, slug) -> create_v7 database slug
+      | `Create (8, slug) -> create_v8 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
       | `Inspect_checkpoints -> inspect_checkpoints database
       | `Inspect_hits -> inspect_hits database
       | `Inspect_snapshots -> inspect_snapshots database
+      | `Inspect_excerpts -> inspect_excerpts database
       | `Expire_claim step ->
         let statement =
           Sqlite3.prepare

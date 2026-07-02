@@ -22,6 +22,7 @@ module Workspace : sig
   val research_plan_lock_path : t -> string
   val temporary_fetch_path : t -> invocation_id:string -> string
   val snapshot_path : t -> Sandwalk_core.Snapshot_id.t -> string
+  val excerpt_path : t -> Sandwalk_core.Excerpt_id.t -> string
 end
 
 module Audit : sig
@@ -48,6 +49,8 @@ module Atomic_file : sig
     -> temporary_suffix:string
     -> string
     -> unit Deferred.Or_error.t
+
+  val write_exclusive : path:string -> string -> unit Deferred.Or_error.t
 
   val write_versioned
     :  path:string
@@ -84,3 +87,4 @@ val invocation_id : now:Time_float.t -> string
 val claim_id : unit -> Sandwalk_core.Claim_id.t
 val hit_id : unit -> Sandwalk_core.Hit_id.t
 val snapshot_id : unit -> Sandwalk_core.Snapshot_id.t
+val excerpt_id : unit -> Sandwalk_core.Excerpt_id.t

@@ -270,6 +270,134 @@ module Snapshot_id = struct
   let to_string t = t
 end
 
+module Excerpt_id = struct
+  type t = string
+
+  let of_string value =
+    if
+      String.length value = 40
+      && String.is_prefix value ~prefix:"excerpt_"
+      && String.drop_prefix value 8
+         |> String.for_all ~f:(function
+           | '0' .. '9' | 'a' .. 'f' -> true
+           | _ -> false)
+    then Some value
+    else None
+  ;;
+
+  let to_string t = t
+end
+
+module Excerpt = struct
+  type t =
+    { text : string
+    ; line_start : int
+    ; line_end : int
+    ; byte_start : int
+    ; byte_end : int
+    }
+
+  type error =
+    | Empty_document
+    | Empty_excerpt
+    | Invalid_line_range
+    | Text_not_found
+    | Ambiguous_text of int
+    | Invalid_occurrence of int
+    | Too_large of int
+  [@@deriving sexp_of]
+
+  let maximum_bytes = 65_536
+  let text t = t.text
+  let line_start t = t.line_start
+  let line_end t = t.line_end
+  let byte_start t = t.byte_start
+  let byte_end t = t.byte_end
+
+  let line_starts document =
+    if String.is_empty document
+    then [||]
+    else (
+      let starts = ref [ 0 ] in
+      String.iteri document ~f:(fun index character ->
+        if Char.equal character '\n' && index + 1 < String.length document
+        then starts := (index + 1) :: !starts);
+      Array.of_list_rev !starts)
+  ;;
+
+  let create document ~byte_start ~byte_end =
+    let size = byte_end - byte_start in
+    if size <= 0
+    then Error Empty_excerpt
+    else if size > maximum_bytes
+    then Error (Too_large size)
+    else (
+      let line_at offset =
+        1
+        + String.foldi document ~init:0 ~f:(fun index count character ->
+            if index < offset && Char.equal character '\n'
+            then count + 1
+            else count)
+      in
+      Ok
+        { text = String.sub document ~pos:byte_start ~len:size
+        ; line_start = line_at byte_start
+        ; line_end = line_at (byte_end - 1)
+        ; byte_start
+        ; byte_end
+        })
+  ;;
+
+  let by_lines document ~first ~last =
+    let starts = line_starts document in
+    let line_count = Array.length starts in
+    if line_count = 0
+    then Error Empty_document
+    else if first < 1 || last < first || last > line_count
+    then Error Invalid_line_range
+    else (
+      let byte_start = starts.(first - 1) in
+      let byte_end =
+        if last = line_count then String.length document else starts.(last)
+      in
+      create document ~byte_start ~byte_end)
+  ;;
+
+  let by_text document ~excerpt ~occurrence =
+    if String.is_empty document
+    then Error Empty_document
+    else if String.is_empty excerpt
+    then Error Empty_excerpt
+    else if String.length excerpt > maximum_bytes
+    then Error (Too_large (String.length excerpt))
+    else (
+      let rec find positions position =
+        match String.substr_index document ~pattern:excerpt ~pos:position with
+        | None -> List.rev positions
+        | Some found -> find (found :: positions) (found + 1)
+      in
+      let positions = find [] 0 in
+      match occurrence, positions with
+      | _, [] -> Error Text_not_found
+      | None, [ byte_start ] ->
+        create
+          document
+          ~byte_start
+          ~byte_end:(byte_start + String.length excerpt)
+      | None, matches -> Error (Ambiguous_text (List.length matches))
+      | Some selected, _ when selected < 1 ->
+        Error (Invalid_occurrence selected)
+      | Some selected, matches ->
+        (match List.nth matches (selected - 1) with
+         | None -> Error (Invalid_occurrence selected)
+         | Some byte_start ->
+           create
+             document
+             ~byte_start
+             ~byte_end:(byte_start + String.length excerpt)))
+  ;;
+end
+
 module Step_state = struct
   type t =
     | Pending
@@ -760,4 +888,53 @@ let%test_unit "validated projections outrank pending projections at one revision
               ~validated:false
               ~sealed:false)
         sealed))
+;;
+
+let%test_unit "line excerpts preserve exact snapshot bytes" =
+  let excerpt =
+    match Excerpt.by_lines "one\ntwo\nthree" ~first:2 ~last:2 with
+    | Ok excerpt -> excerpt
+    | Error _ -> failwith "expected valid line excerpt"
+  in
+  [%test_eq: string] "two\n" (Excerpt.text excerpt);
+  [%test_eq: int] 2 (Excerpt.line_start excerpt);
+  [%test_eq: int] 2 (Excerpt.line_end excerpt);
+  [%test_eq: int] 4 (Excerpt.byte_start excerpt);
+  [%test_eq: int] 8 (Excerpt.byte_end excerpt)
+;;
+
+let%test_unit "text excerpts require an occurrence when matches are ambiguous" =
+  (match Excerpt.by_text "same\nx\nsame" ~excerpt:"same" ~occurrence:None with
+   | Error (Excerpt.Ambiguous_text 2) -> ()
+   | _ -> failwith "expected two ambiguous matches");
+  let excerpt =
+    match
+      Excerpt.by_text "same\nx\nsame" ~excerpt:"same" ~occurrence:(Some 2)
+    with
+    | Ok excerpt -> excerpt
+    | Error _ -> failwith "expected selected text occurrence"
+  in
+  [%test_eq: string] "same" (Excerpt.text excerpt);
+  [%test_eq: int] 7 (Excerpt.byte_start excerpt);
+  [%test_eq: int] 11 (Excerpt.byte_end excerpt)
+;;
+
+let%test_unit "exact text ranges round-trip snapshot bytes" =
+  Quickcheck.test
+    [%quickcheck.generator: string * string]
+    ~trials:500
+    ~f:(fun (prefix, suffix) ->
+      let remove_marker =
+        String.map ~f:(fun character ->
+          if Char.equal character '\000' then '\001' else character)
+      in
+      let prefix = remove_marker prefix in
+      let suffix = remove_marker suffix in
+      let document = prefix ^ "\000" ^ suffix in
+      match Excerpt.by_text document ~excerpt:"\000" ~occurrence:None with
+      | Error _ -> failwith "unique marker must be selectable"
+      | Ok excerpt ->
+        [%test_eq: string] "\000" (Excerpt.text excerpt);
+        [%test_eq: int] (String.length prefix) (Excerpt.byte_start excerpt);
+        [%test_eq: int] (String.length prefix + 1) (Excerpt.byte_end excerpt))
 ;;
