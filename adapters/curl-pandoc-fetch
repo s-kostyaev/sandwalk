@@ -2,7 +2,8 @@
 set -eu
 
 lynx_user_agent='Lynx/2.9.2 libwww-FM/2.14 SSL-MM/1.4.1 GNUTLS/3.8.3'
-extraction_profile='html-to-gfm-no-raw-html-v1'
+accept_header='text/markdown, text/html;q=0.9'
+negotiation_profile='server-markdown-with-html-fallback-v1'
 request=$(cat)
 protocol=$(printf '%s' "$request" | jq -er '.protocol')
 url=$(printf '%s' "$request" | jq -er '.url')
@@ -34,15 +35,28 @@ rm -f "$manifest" "$manifest_temporary"
 curl_metadata=$(
   curl -L -sS --fail-with-body \
     --user-agent "$lynx_user_agent" \
+    --header "Accept: $accept_header" \
     --dump-header "$headers" \
     --output "$original" \
     --write-out '%{json}' \
     "$url"
 )
 
-pandoc --from=html --to=gfm-raw_html --wrap=none "$original" >"$document"
+content_type=$(printf '%s' "$curl_metadata" | jq -r '.content_type // ""')
+normalized_content_type=$(printf '%s' "$content_type" | tr '[:upper:]' '[:lower:]')
+case "$normalized_content_type" in
+  text/markdown|text/markdown\;*)
+    extraction_profile='server-markdown-direct-v1'
+    cp "$original" "$document"
+    ;;
+  *)
+    extraction_profile='html-to-gfm-no-raw-html-v1'
+    pandoc --from=html --to=gfm-raw_html --wrap=none "$original" >"$document"
+    ;;
+esac
+
 [ -s "$document" ] || {
-  printf '%s\n' 'pandoc produced an empty Markdown document' >&2
+  printf '%s\n' 'fetch adapter produced an empty Markdown document' >&2
   exit 65
 }
 
@@ -51,7 +65,10 @@ mq "$document" '.tree' >/dev/null
 input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
 markdown_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
 configuration_sha256=$(
-  printf '%s\n%s\n' "$lynx_user_agent" "$extraction_profile" |
+  printf '%s\n%s\n%s\n' \
+    "$lynx_user_agent" \
+    "$accept_header" \
+    "$negotiation_profile" |
     shasum -a 256 |
     awk '{print $1}'
 )
@@ -68,12 +85,13 @@ jq -n \
   --arg markdown_sha256 "$markdown_sha256" \
   --arg configuration_sha256 "$configuration_sha256" \
   --arg extraction_profile "$extraction_profile" \
+  --arg request_accept "$accept_header" \
   --arg curl_version "$curl_version" \
   --arg pandoc_version "$pandoc_version" \
   --arg mq_version "$mq_version" \
   --argjson status "$(printf '%s' "$curl_metadata" | jq '.http_code')" \
   --argjson redirects "$(printf '%s' "$curl_metadata" | jq '.num_redirects')" \
-  --arg content_type "$(printf '%s' "$curl_metadata" | jq -r '.content_type // ""')" \
+  --arg content_type "$content_type" \
   '{
     protocol: $protocol,
     adapter: {
@@ -90,6 +108,7 @@ jq -n \
     http: {
       status: $status,
       content_type: $content_type,
+      request_accept: $request_accept,
       headers_artifact: "headers.txt"
     },
     hashes: {

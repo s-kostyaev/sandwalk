@@ -37,10 +37,26 @@ ddgr diagnostics with an empty result set are adapter failures.
 
   $ jq -c '{protocol, requested_url, final_url, redirect_count, http, queryability_check}' \
   >   fetch-output/manifest.json
-  {"protocol":"sandwalk.fetch-manifest.v1","requested_url":"https://example.test/start","final_url":"https://example.test/final","redirect_count":1,"http":{"status":200,"content_type":"text/html","headers_artifact":"headers.txt"},"queryability_check":{"tool":"mq","query":".tree","ok":true}}
+  {"protocol":"sandwalk.fetch-manifest.v1","requested_url":"https://example.test/start","final_url":"https://example.test/final","redirect_count":1,"http":{"status":200,"content_type":"text/html","request_accept":"text/markdown, text/html;q=0.9","headers_artifact":"headers.txt"},"queryability_check":{"tool":"mq","query":".tree","ok":true}}
 
   $ jq -r '.adapter.extraction_profile' fetch-output/manifest.json
   html-to-gfm-no-raw-html-v1
+
+Server-provided Markdown bypasses pandoc.
+
+  $ mkdir markdown-output
+  $ CURL_FAKE_MARKDOWN=1 PANDOC_FORCE_FAILURE=1 \
+  >   MQ_TEST_LOG="$PWD/mq.log" PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/curl-pandoc-fetch <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://example.test/markdown","output_directory":"markdown-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"markdown-output/manifest.json"}
+
+  $ cmp markdown-output/original markdown-output/document.md
+
+  $ jq -r '[.http.content_type, .adapter.extraction_profile] | @tsv' \
+  >   markdown-output/manifest.json
+  text/markdown; charset=utf-8	server-markdown-direct-v1
 
 The manifest is not published when mq cannot query the Markdown.
 
