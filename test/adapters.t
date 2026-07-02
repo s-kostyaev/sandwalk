@@ -3,6 +3,14 @@
   > EOF
   {"protocol":"sandwalk.search-results.v1","adapter":{"name":"ddgr","protocol_version":1},"results":[{"url":"https://example.test/primary","title":"Primary result","snippet":"A deterministic search result."}]}
 
+An inherited nonexistent TMPDIR falls back to the system temporary directory.
+
+  $ TMPDIR="$PWD/does-not-exist" PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/ddgr-search <<'EOF'
+  > {"protocol":"sandwalk.search.v1","query":"small topic","limit":1}
+  > EOF
+  {"protocol":"sandwalk.search-results.v1","adapter":{"name":"ddgr","protocol_version":1},"results":[{"url":"https://example.test/primary","title":"Primary result","snippet":"A deterministic search result."}]}
+
 ddgr diagnostics with an empty result set are adapter failures.
 
   $ DDGR_FORCE_FAILURE=1 PATH="$PWD/fakes:$PATH" \

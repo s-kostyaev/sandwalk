@@ -26,7 +26,11 @@ printf '%s' "$limit" | grep -Eq '^[0-9]+$' || {
   exit 64
 }
 
-stderr_file=$(mktemp "${TMPDIR:-/tmp}/sandwalk-ddgr.XXXXXX")
+temporary_directory=${TMPDIR:-/tmp}
+if [ ! -d "$temporary_directory" ] || [ ! -w "$temporary_directory" ]; then
+  temporary_directory=/tmp
+fi
+stderr_file=$(mktemp "$temporary_directory/sandwalk-ddgr.XXXXXX")
 trap 'rm -f "$stderr_file"' EXIT HUP INT TERM
 
 if ! raw=$(ddgr --json --num "$limit" -- "$query" 2>"$stderr_file"); then

@@ -1,6 +1,8 @@
 # Sandwalk command reference
 
-Set `<slug>` and optionally pass `--directory-prefix <path>` to every workspace
+Set `<slug>` and choose one writable workspace parent. Prefer exporting
+`SANDWALK_DIRECTORY_PREFIX=<path>` before the first command. If the environment
+cannot be retained, pass the same `--directory-prefix <path>` to every workspace
 command. Parse command output as JSON and retain returned identifiers.
 
 ## Establish scope and plan

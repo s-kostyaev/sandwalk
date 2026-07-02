@@ -5,6 +5,12 @@
   {"ok":false,"error":{"code":"UNKNOWN_ERROR_CODE","message":"No explanation is available for that error code."}}
   [1]
 
+  $ sandwalk explain WORKSPACE_IO_ERROR
+  {"ok":true,"result":{"code":"WORKSPACE_IO_ERROR","explanation":"Sandwalk could not create or update the selected workspace directory.","repair":"Choose a writable `--directory-prefix` or set `SANDWALK_DIRECTORY_PREFIX` to one, then retry."}}
+
+  $ sandwalk explain SEARCH_ADAPTER_FAILED
+  {"ok":true,"result":{"code":"SEARCH_ADAPTER_FAILED","explanation":"The search adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify `sandwalk-search-ddgr` and `ddgr` are on PATH, the temporary directory exists, and DuckDuckGo is allowed by the network sandbox."}}
+
   $ sandwalk init --slug guidance-test --directory-prefix workspaces
   {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":20}}
 

@@ -85,6 +85,14 @@ let print_failure_and_exit ~code ~message =
 ;;
 
 let explanation = function
+  | "WORKSPACE_IO_ERROR" ->
+    Some
+      ( "Sandwalk could not create or update the selected workspace directory."
+      , "Choose a writable `--directory-prefix` or set `SANDWALK_DIRECTORY_PREFIX` to one, then retry." )
+  | "SEARCH_ADAPTER_FAILED" ->
+    Some
+      ( "The search adapter exited unsuccessfully, timed out, or returned invalid JSON."
+      , "Verify `sandwalk-search-ddgr` and `ddgr` are on PATH, the temporary directory exists, and DuckDuckGo is allowed by the network sandbox." )
   | "PLAN_EMPTY" ->
     Some
       ( "The plan has no steps, so it cannot be validated."
