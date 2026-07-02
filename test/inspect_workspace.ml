@@ -447,7 +447,7 @@ INSERT INTO excerpts (
   'claim_00000000000000000000000000000001', 'fixture-step',
   'fixture-excerpt.md',
   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-  1, 1, 0, 7, 'cccccccccccccccccccccccccccccccc', 7,
+  1, 1, 0, 7, 'bfc1041d408b88953eacd86820332d8c', 7,
   '2026-01-01 00:00:00Z'
 );
 INSERT INTO findings (

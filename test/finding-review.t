@@ -1,4 +1,5 @@
-  $ mkdir -p workspace/review-test/database workspace/review-test/logs
+  $ mkdir -p workspace/review-test/database workspace/review-test/logs \
+  >   workspace/review-test/exports
   $ ./inspect_workspace.exe --create-v11 workspace/review-test/database/sandwalk.sqlite3 review-test
   $ cat > review.json <<'EOF'
   > {"protocol":"sandwalk.finding-review.v1","verdict":"partially-supported","summary":"The excerpt supports the narrow claim.","source_quality":"Primary source.","conflicts":"","qualifications":"Keep the claim narrow."}
@@ -70,6 +71,38 @@ Complete the other current finding before completing the step.
 
   $ ./inspect_workspace.exe workspace/review-test/database/sandwalk.sqlite3
   review-test|evidence-review
+  12
+  wal
+  ok
+
+  $ printf Fixture > fixture-excerpt.md
+  $ sandwalk draft prepare \
+  >   --slug review-test --directory-prefix workspace
+  {"ok":true,"result":{"phase":"drafting","writer_pack":"workspace/review-test/exports/writer-pack.md","evidence_count":2}}
+
+  $ grep -E '^(# Writer Pack|## |-|>|`)' \
+  >   workspace/review-test/exports/writer-pack.md
+  # Writer Pack: review-test
+  `[cite:step-key/finding-key]`
+  ## fixture-step/fixture-finding
+  - Verdict: partially-supported
+  - Citation: `[cite:fixture-step/fixture-finding]`
+  - Claim: Fixture claim.
+  - Source: https://example.test/final
+  - Snapshot: snap_00000000000000000000000000000001
+  - Lines: 1:1
+  > Fixture
+  ## fixture-step/sealed-finding
+  - Verdict: partially-supported
+  - Citation: `[cite:fixture-step/sealed-finding]`
+  - Claim: Sealed claim.
+  - Source: https://example.test/final
+  - Snapshot: snap_00000000000000000000000000000001
+  - Lines: 1:1
+  > Fixture
+
+  $ ./inspect_workspace.exe workspace/review-test/database/sandwalk.sqlite3
+  review-test|drafting
   12
   wal
   ok

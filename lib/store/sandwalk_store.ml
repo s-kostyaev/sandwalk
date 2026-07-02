@@ -55,6 +55,8 @@ module Error = struct
     | Step_has_no_findings of string
     | Step_has_unreviewed_findings of string
     | Step_has_rejected_findings of string
+    | Draft_wrong_phase of Sandwalk_core.Phase.t
+    | Draft_gate_failed
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -171,6 +173,36 @@ module Complete_step_result = struct
 
   let step_key t = t.step_key
   let phase t = t.phase
+end
+
+module Writer_evidence = struct
+  type t =
+    { step : string
+    ; finding : string
+    ; verdict : string
+    ; claim : string
+    ; relation : string
+    ; excerpt : string
+    ; excerpt_path : string
+    ; excerpt_md5 : string
+    ; snapshot : string
+    ; source_url : string
+    ; line_start : int
+    ; line_end : int
+    }
+
+  let step t = t.step
+  let finding t = t.finding
+  let verdict t = t.verdict
+  let claim t = t.claim
+  let relation t = t.relation
+  let excerpt t = t.excerpt
+  let excerpt_path t = t.excerpt_path
+  let excerpt_md5 t = t.excerpt_md5
+  let snapshot t = t.snapshot
+  let source_url t = t.source_url
+  let line_start t = t.line_start
+  let line_end t = t.line_end
 end
 
 module Stored_hit = struct
@@ -4140,6 +4172,268 @@ WHERE state = 'claimed'
               else Ok ()
             in
             Ok { Complete_step_result.step_key; phase = next_phase }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let check_draft_gate database =
+  let open Result.Let_syntax in
+  let%bind required_incomplete =
+    with_statement
+      database
+      {|
+SELECT COUNT(*)
+FROM plan_steps AS p
+JOIN step_executions AS e ON e.step_key = p.step_key
+WHERE p.required = 1 AND e.state <> 'completed'
+|}
+      ~f:(fun statement ->
+        match Sqlite3.step statement with
+        | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+        | return_code ->
+          check database return_code |> Result.map ~f:(Fn.const 1))
+  in
+  let%bind invalid_findings =
+    with_statement
+      database
+      {|
+SELECT COUNT(*)
+FROM findings AS f
+JOIN step_executions AS e ON e.step_key = f.step_key
+LEFT JOIN finding_reviews AS r
+  ON r.step_key = f.step_key
+ AND r.finding_key = f.finding_key
+ AND r.revision = f.current_revision
+WHERE e.state = 'completed'
+  AND (
+    f.state <> 'reviewed'
+    OR r.verdict IS NULL
+    OR r.verdict IN ('unsupported', 'contradicted')
+  )
+|}
+      ~f:(fun statement ->
+        match Sqlite3.step statement with
+        | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+        | return_code ->
+          check database return_code |> Result.map ~f:(Fn.const 1))
+  in
+  let%bind invalid_evidence =
+    with_statement
+      database
+      {|
+SELECT COUNT(*)
+FROM findings AS f
+JOIN step_executions AS se ON se.step_key = f.step_key
+WHERE se.state = 'completed'
+  AND (
+    NOT EXISTS (
+      SELECT 1
+      FROM finding_evidence AS fe
+      WHERE fe.step_key = f.step_key
+        AND fe.finding_key = f.finding_key
+        AND fe.revision = f.current_revision
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM finding_evidence AS fe
+      JOIN excerpts AS e ON e.excerpt_ref = fe.excerpt_ref
+      JOIN snapshots AS s ON s.snapshot_ref = e.snapshot_ref
+      WHERE fe.step_key = f.step_key
+        AND fe.finding_key = f.finding_key
+        AND fe.revision = f.current_revision
+        AND e.markdown_sha256 <> s.markdown_sha256
+    )
+  )
+|}
+      ~f:(fun statement ->
+        match Sqlite3.step statement with
+        | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+        | return_code ->
+          check database return_code |> Result.map ~f:(Fn.const 1))
+  in
+  if
+    required_incomplete = 0
+    && invalid_findings = 0
+    && invalid_evidence = 0
+  then Ok ()
+  else Error Error.Draft_gate_failed
+;;
+
+let read_writer_evidence
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          let%bind () =
+            if schema_version > current_schema_version
+            then Error (Error.Unsupported_schema_version schema_version)
+            else if schema_version < 12
+            then Error Error.Draft_gate_failed
+            else Ok ()
+          in
+          let%bind slug_text, phase_text = query_workspace database in
+          let expected = Sandwalk_core.Slug.to_string expected_slug in
+          let%bind () =
+            if String.equal expected slug_text
+            then Ok ()
+            else
+              Error
+                (Error.Workspace_slug_mismatch
+                   { expected; actual = slug_text })
+          in
+          let%bind phase =
+            Sandwalk_core.Phase.of_string phase_text
+            |> Result.of_option
+                 ~error:(Error.Invalid_persisted_phase phase_text)
+          in
+          let%bind () =
+            if
+              Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Evidence_review
+            then Ok ()
+            else Error (Error.Draft_wrong_phase phase)
+          in
+          let%bind () = check_draft_gate database in
+          let rows = ref [] in
+          let return_code =
+            Sqlite3.exec
+              database
+              {|
+SELECT f.step_key, f.finding_key, r.verdict, fr.claim_text,
+       fe.relation, e.excerpt_ref, e.artifact_path, e.excerpt_md5,
+       s.snapshot_ref, s.final_url, e.line_start, e.line_end
+FROM findings AS f
+JOIN step_executions AS se
+  ON se.step_key = f.step_key AND se.state = 'completed'
+JOIN finding_revisions AS fr
+  ON fr.step_key = f.step_key
+ AND fr.finding_key = f.finding_key
+ AND fr.revision = f.current_revision
+JOIN finding_reviews AS r
+  ON r.step_key = f.step_key
+ AND r.finding_key = f.finding_key
+ AND r.revision = f.current_revision
+JOIN finding_evidence AS fe
+  ON fe.step_key = f.step_key
+ AND fe.finding_key = f.finding_key
+ AND fe.revision = f.current_revision
+JOIN excerpts AS e ON e.excerpt_ref = fe.excerpt_ref
+JOIN snapshots AS s ON s.snapshot_ref = e.snapshot_ref
+JOIN plan_steps AS p ON p.step_key = f.step_key
+ORDER BY p.position, f.finding_key, e.line_start, e.excerpt_ref, fe.relation
+|}
+              ~cb:(fun row _headers ->
+                match row with
+                | [| Some step
+                   ; Some finding
+                   ; Some verdict
+                   ; Some claim
+                   ; Some relation
+                   ; Some excerpt
+                   ; Some excerpt_path
+                   ; Some excerpt_md5
+                   ; Some snapshot
+                   ; Some source_url
+                   ; Some line_start
+                   ; Some line_end
+                  |] ->
+                  rows :=
+                    { Writer_evidence.step
+                    ; finding
+                    ; verdict
+                    ; claim
+                    ; relation
+                    ; excerpt
+                    ; excerpt_path
+                    ; excerpt_md5
+                    ; snapshot
+                    ; source_url
+                    ; line_start = Int.of_string line_start
+                    ; line_end = Int.of_string line_end
+                    }
+                    :: !rows
+                | _ -> failwith "Invalid persisted writer evidence.")
+          in
+          let%map () = check database return_code in
+          List.rev !rows
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let begin_drafting
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if
+                Sandwalk_core.Phase.equal
+                  phase
+                  Sandwalk_core.Phase.Evidence_review
+              then Ok ()
+              else Error (Error.Draft_wrong_phase phase)
+            in
+            let%bind () = check_draft_gate database in
+            let%bind _ =
+              Sandwalk_core.transition
+                ~from:phase
+                ~into:Sandwalk_core.Phase.Drafting
+              |> Result.map_error ~f:(fun _ -> Error.Draft_wrong_phase phase)
+            in
+            let%map () =
+              update_phase database ~phase:Sandwalk_core.Phase.Drafting ~now
+            in
+            Sandwalk_core.Phase.Drafting
           in
           (match outcome with
            | Ok result ->

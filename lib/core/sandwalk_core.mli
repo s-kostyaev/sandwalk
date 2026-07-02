@@ -185,6 +185,26 @@ module Finding_claim : sig
   val text : t -> string
 end
 
+module Writer_pack : sig
+  type item
+
+  val item
+    :  step:string
+    -> finding:string
+    -> verdict:string
+    -> claim:string
+    -> relation:string
+    -> excerpt:string
+    -> snapshot:string
+    -> source_url:string
+    -> line_start:int
+    -> line_end:int
+    -> text:string
+    -> item
+
+  val render : slug:string -> item list -> string
+end
+
 module Step_state : sig
   type t =
     | Pending

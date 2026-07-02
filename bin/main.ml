@@ -220,7 +220,9 @@ let status_error = function
   | Finding_review_conflict _
   | Step_has_no_findings _
   | Step_has_unreviewed_findings _
-  | Step_has_rejected_findings _ ->
+  | Step_has_rejected_findings _
+  | Draft_wrong_phase _
+  | Draft_gate_failed ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -3271,6 +3273,14 @@ let complete_step_error = function
   | error -> claim_error error
 ;;
 
+let draft_error = function
+  | Sandwalk_store.Error.Draft_wrong_phase _ ->
+    "DRAFT_NOT_ALLOWED", "Writer-pack preparation is not allowed in this phase."
+  | Draft_gate_failed ->
+    "DRAFT_GATE_FAILED", "Current reviewed findings do not pass the draft gate."
+  | error -> status_error error
+;;
+
 let finding_create_command =
   Async.Command.async
     ~summary:"Create a draft finding for one claimed plan step."
@@ -4421,6 +4431,264 @@ let step_complete_command =
                     Deferred.unit)))))
 ;;
 
+let draft_prepare_command =
+  Async.Command.async
+    ~summary:"Generate the deterministic writer pack and enter drafting."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let%bind evidence =
+             In_thread.run (fun () ->
+               Sandwalk_store.read_writer_evidence
+                 ~database_path:
+                   (Sandwalk_runtime.Workspace.database_path workspace)
+                 ~expected_slug:slug
+                 ())
+           in
+           match evidence with
+           | Error error ->
+             let code, message = draft_error error in
+             print_failure_and_exit ~code ~message
+           | Ok evidence ->
+             let%bind loaded =
+               Deferred.List.map evidence ~how:`Sequential ~f:(fun row ->
+                 let%map input =
+                   Sandwalk_runtime.File_input.read
+                     ~path:(Sandwalk_store.Writer_evidence.excerpt_path row)
+                     ~maximum_bytes:Sandwalk_core.Excerpt.maximum_bytes
+                 in
+                 Result.bind input ~f:(fun input ->
+                   if
+                     String.equal
+                       (Sandwalk_runtime.File_input.md5 input)
+                       (Sandwalk_store.Writer_evidence.excerpt_md5 row)
+                   then Ok (row, input)
+                   else
+                     Or_error.error_string
+                       "Excerpt artifact hash does not match durable state."))
+             in
+             (match Result.all loaded with
+              | Error _ ->
+                print_failure_and_exit
+                  ~code:"WRITER_PACK_ARTIFACT_ERROR"
+                  ~message:"Could not validate bounded excerpt artifacts."
+              | Ok loaded ->
+                let items =
+                  List.map loaded ~f:(fun (row, input) ->
+                    Sandwalk_core.Writer_pack.item
+                      ~step:(Sandwalk_store.Writer_evidence.step row)
+                      ~finding:(Sandwalk_store.Writer_evidence.finding row)
+                      ~verdict:(Sandwalk_store.Writer_evidence.verdict row)
+                      ~claim:(Sandwalk_store.Writer_evidence.claim row)
+                      ~relation:(Sandwalk_store.Writer_evidence.relation row)
+                      ~excerpt:(Sandwalk_store.Writer_evidence.excerpt row)
+                      ~snapshot:(Sandwalk_store.Writer_evidence.snapshot row)
+                      ~source_url:(Sandwalk_store.Writer_evidence.source_url row)
+                      ~line_start:
+                        (Sandwalk_store.Writer_evidence.line_start row)
+                      ~line_end:(Sandwalk_store.Writer_evidence.line_end row)
+                      ~text:(Sandwalk_runtime.File_input.content input))
+                in
+                let writer_pack =
+                  Sandwalk_core.Writer_pack.render
+                    ~slug:(Sandwalk_core.Slug.to_string slug)
+                    items
+                in
+                if String.length writer_pack > 1_048_576
+                then
+                  print_failure_and_exit
+                    ~code:"WRITER_PACK_TOO_LARGE"
+                    ~message:"Writer pack exceeds the 1 MiB bound."
+                else (
+                  let started_at = Time_float_unix.now () in
+                  let%bind invocation_id =
+                    In_thread.run (fun () ->
+                      Sandwalk_runtime.invocation_id ~now:started_at)
+                  in
+                  let output_path =
+                    Sandwalk_runtime.Workspace.writer_pack_path workspace
+                  in
+                  let arguments =
+                    `Assoc
+                      [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                      ; "directory_prefix", `String directory_prefix
+                      ]
+                  in
+                  let append_event
+                        ~kind
+                        ~timestamp
+                        ~phase
+                        ~state_changes
+                        ?duration_ms
+                        ?outcome
+                        ?error_code
+                        ()
+                    =
+                    Sandwalk_runtime.Audit.append
+                      ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                      (Sandwalk_protocol.Audit_event.create
+                         ~invocation_id
+                         ~timestamp
+                         ~kind
+                         ~command:"draft prepare"
+                         ~arguments
+                         ~phase
+                         ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                         ~state_changes
+                         ~consumed_references:
+                           (List.map evidence ~f:(fun row ->
+                              Sandwalk_store.Writer_evidence.excerpt row))
+                         ?duration_ms
+                         ?outcome
+                         ?error_code
+                         ())
+                  in
+                  let fail_with_audit ~code ~message =
+                    let finished_at = Time_float_unix.now () in
+                    let duration_ms =
+                      Time_float.diff finished_at started_at
+                      |> Time_float.Span.to_ms
+                      |> Float.iround_nearest_exn
+                    in
+                    let%bind logged =
+                      append_event
+                        ~kind:`Failed
+                        ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                        ~phase:(Some "evidence-review")
+                        ~state_changes:[]
+                        ~duration_ms
+                        ~outcome:"failure"
+                        ~error_code:code
+                        ()
+                    in
+                    match logged with
+                    | Error _ ->
+                      print_failure_and_exit
+                        ~code:"AUDIT_LOG_ERROR"
+                        ~message:"Could not append workspace audit log."
+                    | Ok () -> print_failure_and_exit ~code ~message
+                  in
+                  let%bind started =
+                    append_event
+                      ~kind:`Started
+                      ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                      ~phase:(Some "evidence-review")
+                      ~state_changes:[]
+                      ()
+                  in
+                  (match started with
+                   | Error _ ->
+                     print_failure_and_exit
+                       ~code:"AUDIT_LOG_ERROR"
+                       ~message:"Could not append workspace audit log."
+                   | Ok () ->
+                     let%bind written =
+                       Sandwalk_runtime.Atomic_file.write
+                         ~path:output_path
+                         ~temporary_suffix:invocation_id
+                         writer_pack
+                     in
+                     (match written with
+                      | Error _ ->
+                        fail_with_audit
+                          ~code:"WORKSPACE_IO_ERROR"
+                          ~message:"Could not write deterministic writer pack."
+                      | Ok () ->
+                        let%bind transitioned =
+                          In_thread.run (fun () ->
+                            Sandwalk_store.begin_drafting
+                              ~database_path:
+                                (Sandwalk_runtime.Workspace.database_path
+                                   workspace)
+                              ~expected_slug:slug
+                              ~now:
+                                (Sandwalk_runtime.timestamp_utc
+                                   (Time_float_unix.now ()))
+                              ())
+                        in
+                        (match transitioned with
+                         | Error error ->
+                           let code, message = draft_error error in
+                           fail_with_audit ~code ~message
+                         | Ok phase ->
+                           let finished_at = Time_float_unix.now () in
+                           let duration_ms =
+                             Time_float.diff finished_at started_at
+                             |> Time_float.Span.to_ms
+                             |> Float.iround_nearest_exn
+                           in
+                           let%bind logged =
+                             append_event
+                               ~kind:`Finished
+                               ~timestamp:
+                                 (Sandwalk_runtime.timestamp_utc finished_at)
+                               ~phase:(Some "drafting")
+                               ~state_changes:
+                                 [ `Assoc
+                                     [ "entity", `String "workspace.phase"
+                                     ; "from", `String "evidence-review"
+                                     ; ( "to"
+                                       , `String
+                                           (Sandwalk_core.Phase.to_string
+                                              phase) )
+                                     ]
+                                 ]
+                               ~duration_ms
+                               ~outcome:"success"
+                               ()
+                           in
+                           (match logged with
+                            | Error _ ->
+                              print_failure_and_exit
+                                ~code:"AUDIT_LOG_ERROR"
+                                ~message:
+                                  "Could not append workspace audit log."
+                            | Ok () ->
+                              let result =
+                                `Assoc
+                                  [ "phase", `String "drafting"
+                                  ; "writer_pack", `String output_path
+                                  ; "evidence_count", `Int (List.length items)
+                                  ]
+                              in
+                              Sandwalk_protocol.Envelope.success ~result ()
+                              |> Sandwalk_protocol.Envelope.render
+                              |> print_endline;
+                              Deferred.unit))))))))
+;;
+
+let draft_command =
+  Async.Command.group
+    ~summary:"Prepare bounded drafting inputs."
+    [ "prepare", draft_prepare_command ]
+;;
+
 let step_command =
   Async.Command.group
     ~summary:"Manage durable plan-step execution."
@@ -4434,6 +4702,7 @@ let command =
   Async.Command.group
     ~summary:"Deterministic research orchestration for AI agents."
     [ "about", about_command
+    ; "draft", draft_command
     ; "excerpt", excerpt_command
     ; "fetch", fetch_command
     ; "finding", finding_command

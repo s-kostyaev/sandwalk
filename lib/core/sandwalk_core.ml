@@ -456,6 +456,92 @@ module Finding_claim = struct
   let text t = t
 end
 
+module Writer_pack = struct
+  type item =
+    { step : string
+    ; finding : string
+    ; verdict : string
+    ; claim : string
+    ; relation : string
+    ; excerpt : string
+    ; snapshot : string
+    ; source_url : string
+    ; line_start : int
+    ; line_end : int
+    ; text : string
+    }
+
+  let item
+        ~step
+        ~finding
+        ~verdict
+        ~claim
+        ~relation
+        ~excerpt
+        ~snapshot
+        ~source_url
+        ~line_start
+        ~line_end
+        ~text
+    =
+    { step
+    ; finding
+    ; verdict
+    ; claim
+    ; relation
+    ; excerpt
+    ; snapshot
+    ; source_url
+    ; line_start
+    ; line_end
+    ; text
+    }
+  ;;
+
+  let quote text =
+    text
+    |> String.split_lines
+    |> List.map ~f:(fun line -> "> " ^ line)
+    |> String.concat ~sep:"\n"
+  ;;
+
+  let render ~slug items =
+    let header =
+      [ "<!-- sandwalk-writer-pack-v1 -->"
+      ; "# Writer Pack: " ^ slug
+      ; ""
+      ; "Use only current reviewed findings below. Cite a finding with its exact token:"
+      ; ""
+      ; "`[cite:step-key/finding-key]`"
+      ; ""
+      ]
+    in
+    let sections =
+      List.concat_map items ~f:(fun item ->
+        [ "## " ^ item.step ^ "/" ^ item.finding
+        ; ""
+        ; "- Verdict: " ^ item.verdict
+        ; "- Citation: `[cite:" ^ item.step ^ "/" ^ item.finding ^ "]`"
+        ; "- Claim: " ^ String.strip item.claim
+        ; ""
+        ; ( "### Evidence: "
+            ^ item.excerpt
+            ^ " ("
+            ^ item.relation
+            ^ ")" )
+        ; ""
+        ; "- Source: " ^ item.source_url
+        ; "- Snapshot: " ^ item.snapshot
+        ; sprintf "- Lines: %d:%d" item.line_start item.line_end
+        ; ""
+        ; quote item.text
+        ; ""
+        ])
+    in
+    String.concat_lines (header @ sections)
+  ;;
+end
+
 module Step_state = struct
   type t =
     | Pending

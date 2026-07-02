@@ -55,6 +55,8 @@ module Error : sig
     | Step_has_no_findings of string
     | Step_has_unreviewed_findings of string
     | Step_has_rejected_findings of string
+    | Draft_wrong_phase of Sandwalk_core.Phase.t
+    | Draft_gate_failed
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -132,6 +134,23 @@ module Complete_step_result : sig
 
   val step_key : t -> Sandwalk_core.Plan_step.Key.t
   val phase : t -> Sandwalk_core.Phase.t
+end
+
+module Writer_evidence : sig
+  type t
+
+  val step : t -> string
+  val finding : t -> string
+  val verdict : t -> string
+  val claim : t -> string
+  val relation : t -> string
+  val excerpt : t -> string
+  val excerpt_path : t -> string
+  val excerpt_md5 : t -> string
+  val snapshot : t -> string
+  val source_url : t -> string
+  val line_start : t -> int
+  val line_end : t -> int
 end
 
 module Stored_hit : sig
@@ -466,3 +485,18 @@ val complete_step
   -> now_unix_seconds:int64
   -> unit
   -> (Complete_step_result.t, Error.t) Result.t
+
+val read_writer_evidence
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> unit
+  -> (Writer_evidence.t list, Error.t) Result.t
+
+val begin_drafting
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> now:string
+  -> unit
+  -> (Sandwalk_core.Phase.t, Error.t) Result.t

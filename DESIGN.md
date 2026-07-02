@@ -411,6 +411,16 @@ Before drafting:
 - finding revisions have current semantic reviews;
 - unsupported findings are excluded or revised.
 
+```console
+sandwalk draft prepare --slug <slug>
+```
+
+`draft prepare` rechecks the gate, validates every excerpt artifact against its
+durable hash, writes a deterministic bounded `exports/writer-pack.md`, and only
+then performs the checked `evidence-review → drafting` transition. The pack
+contains current reviewed claim text, exact evidence, provenance, and stable
+typed citation tokens. It is limited to 1 MiB.
+
 After drafting, Sandwalk splits the report into bounded citation-bearing blocks.
 A validation agent records whether each block is supported, partially
 supported, unsupported, or contradicted.

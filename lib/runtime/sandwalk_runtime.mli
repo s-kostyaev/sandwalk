@@ -20,6 +20,7 @@ module Workspace : sig
   val resume_path : t -> string
   val research_plan_path : t -> string
   val research_plan_lock_path : t -> string
+  val writer_pack_path : t -> string
   val temporary_fetch_path : t -> invocation_id:string -> string
   val snapshot_path : t -> Sandwalk_core.Snapshot_id.t -> string
   val excerpt_path : t -> Sandwalk_core.Excerpt_id.t -> string
