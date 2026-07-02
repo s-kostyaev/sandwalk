@@ -52,6 +52,9 @@ module Error = struct
     | Finding_has_no_evidence of string
     | Finding_not_sealed of string
     | Finding_review_conflict of string
+    | Step_has_no_findings of string
+    | Step_has_unreviewed_findings of string
+    | Step_has_rejected_findings of string
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -158,6 +161,16 @@ module Review_finding_result = struct
   let revision t = t.revision
   let reviewed t = t.reviewed
   let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
+end
+
+module Complete_step_result = struct
+  type t =
+    { step_key : Sandwalk_core.Plan_step.Key.t
+    ; phase : Sandwalk_core.Phase.t
+    }
+
+  let step_key t = t.step_key
+  let phase t = t.phase
 end
 
 module Stored_hit = struct
@@ -3920,6 +3933,213 @@ WHERE step_key = ?1 AND finding_key = ?2
               ; reviewed
               ; lease_expires_unix_seconds
               }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let complete_step
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~claim_id
+      ~now
+      ~now_unix_seconds
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Researching
+              then Ok ()
+              else Error (Error.Step_claim_wrong_phase phase)
+            in
+            let%bind step_key, state, active_claim_id, expiry, _duration =
+              query_claim_for_checkpoint database claim_id
+            in
+            let claim_reference = Sandwalk_core.Claim_id.to_string claim_id in
+            let%bind () =
+              if
+                Sandwalk_core.Step_state.equal
+                  state
+                  Sandwalk_core.Step_state.Claimed
+                && Option.value_map
+                     active_claim_id
+                     ~default:false
+                     ~f:(String.equal claim_reference)
+              then Ok ()
+              else Error Error.Claim_not_active
+            in
+            let expiry = Option.value_exn expiry in
+            let step = Sandwalk_core.Plan_step.Key.to_string step_key in
+            let%bind () =
+              if Int64.(expiry <= now_unix_seconds)
+              then Error (Error.Claim_expired step)
+              else Ok ()
+            in
+            let%bind total, reviewed, rejected =
+              with_statement
+                database
+                {|
+SELECT
+  COUNT(*),
+  COALESCE(SUM(CASE WHEN f.state = 'reviewed' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE
+    WHEN r.verdict IN ('unsupported', 'contradicted') THEN 1 ELSE 0 END), 0)
+FROM findings AS f
+LEFT JOIN finding_reviews AS r
+  ON r.step_key = f.step_key
+ AND r.finding_key = f.finding_key
+ AND r.revision = f.current_revision
+WHERE f.step_key = ?1
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 step in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW ->
+                    Ok
+                      ( Sqlite3.column_int statement 0
+                      , Sqlite3.column_int statement 1
+                      , Sqlite3.column_int statement 2 )
+                  | return_code ->
+                    check database return_code
+                    |> Result.map ~f:(fun () -> 0, 0, 0))
+            in
+            let%bind () =
+              if total = 0
+              then Error (Error.Step_has_no_findings step)
+              else if reviewed <> total
+              then Error (Error.Step_has_unreviewed_findings step)
+              else if rejected > 0
+              then Error (Error.Step_has_rejected_findings step)
+              else Ok ()
+            in
+            let%bind () =
+              with_statement
+                database
+                {|
+UPDATE step_executions
+SET state = 'completed', active_claim_id = NULL,
+    lease_expires_unix_seconds = NULL
+WHERE step_key = ?1 AND active_claim_id = ?2
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 step in
+                  let%bind () =
+                    bind_text database statement 2 claim_reference
+                  in
+                  step_done database statement)
+            in
+            let%bind () =
+              with_statement
+                database
+                {|
+UPDATE claims
+SET ended_at = ?2, end_reason = 'completed'
+WHERE claim_id = ?1 AND ended_at IS NULL
+|}
+                ~f:(fun statement ->
+                  let%bind () =
+                    bind_text database statement 1 claim_reference
+                  in
+                  let%bind () = bind_text database statement 2 now in
+                  step_done database statement)
+            in
+            let%bind remaining_required =
+              with_statement
+                database
+                {|
+SELECT COUNT(*)
+FROM plan_steps AS p
+JOIN step_executions AS e ON e.step_key = p.step_key
+WHERE p.required = 1 AND e.state <> 'completed'
+|}
+                ~f:(fun statement ->
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+                  | return_code ->
+                    check database return_code |> Result.map ~f:(Fn.const 1))
+            in
+            let next_phase =
+              if remaining_required = 0
+              then Sandwalk_core.Phase.Evidence_review
+              else Sandwalk_core.Phase.Researching
+            in
+            let%bind () =
+              if remaining_required = 0
+              then (
+                let%bind _ =
+                  Sandwalk_core.transition
+                    ~from:Sandwalk_core.Phase.Researching
+                    ~into:Sandwalk_core.Phase.Evidence_review
+                  |> Result.map_error ~f:(fun _ ->
+                    Error.Step_claim_wrong_phase phase)
+                in
+                let%bind () =
+                  with_statement
+                    database
+                    {|
+UPDATE claims
+SET ended_at = ?1, end_reason = 'suspended'
+WHERE claim_id IN (
+  SELECT active_claim_id
+  FROM step_executions
+  WHERE state = 'claimed' AND active_claim_id IS NOT NULL
+)
+|}
+                    ~f:(fun statement ->
+                      let%bind () = bind_text database statement 1 now in
+                      step_done database statement)
+                in
+                let%bind () =
+                  execute
+                    database
+                    {|
+UPDATE step_executions
+SET state = 'suspended', active_claim_id = NULL,
+    lease_expires_unix_seconds = NULL
+WHERE state = 'claimed'
+|}
+                in
+                update_phase database ~phase:next_phase ~now)
+              else Ok ()
+            in
+            Ok { Complete_step_result.step_key; phase = next_phase }
           in
           (match outcome with
            | Ok result ->

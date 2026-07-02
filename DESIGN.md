@@ -213,11 +213,18 @@ Agents record semantic checkpoints at meaningful milestones:
 ```console
 sandwalk step checkpoint --slug <slug> --claim <claim> \
   --summary-file <path> --next-file <path>
+sandwalk step complete --slug <slug> --claim <claim>
 ```
 
 Checkpoint files are non-empty and individually limited to 64 KiB. Saving a
 checkpoint requires the active, unexpired claim and renews its original lease
 duration from the checkpoint time.
+
+Completing a step requires at least one current finding, current semantic
+reviews for every finding, and no `unsupported` or `contradicted` verdicts. It
+atomically marks the step and claim completed. Completing the last required
+step performs the checked `researching → evidence-review` transition; optional
+unfinished steps do not block that transition.
 
 Sandwalk always creates a mechanical resume pack from durable state and logs.
 An explicit checkpoint adds the agent's current interpretation, hypotheses, and

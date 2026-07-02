@@ -20,6 +20,12 @@
   {"ok":false,"error":{"code":"FINDING_HAS_NO_EVIDENCE","message":"Finding \"fixture-step/small-claim\" must have evidence before sealing."}}
   [1]
 
+  $ sandwalk step complete \
+  >   --slug finding-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001
+  {"ok":false,"error":{"code":"STEP_HAS_UNREVIEWED_FINDINGS","message":"Step \"fixture-step\" has draft, sealed, or stale findings."}}
+  [1]
+
   $ ./inspect_workspace.exe workspace/finding-test/database/sandwalk.sqlite3
   finding-test|researching
   12

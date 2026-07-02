@@ -52,6 +52,9 @@ module Error : sig
     | Finding_has_no_evidence of string
     | Finding_not_sealed of string
     | Finding_review_conflict of string
+    | Step_has_no_findings of string
+    | Step_has_unreviewed_findings of string
+    | Step_has_rejected_findings of string
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -122,6 +125,13 @@ module Review_finding_result : sig
   val revision : t -> int
   val reviewed : t -> bool
   val lease_expires_unix_seconds : t -> int64
+end
+
+module Complete_step_result : sig
+  type t
+
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val phase : t -> Sandwalk_core.Phase.t
 end
 
 module Stored_hit : sig
@@ -446,3 +456,13 @@ val review_finding
   -> now_unix_seconds:int64
   -> unit
   -> (Review_finding_result.t, Error.t) Result.t
+
+val complete_step
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> now:string
+  -> now_unix_seconds:int64
+  -> unit
+  -> (Complete_step_result.t, Error.t) Result.t
