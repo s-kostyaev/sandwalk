@@ -56,3 +56,31 @@ module Shell_command : sig
   val quote : string -> string
   val of_words : string list -> string
 end
+
+module Search_adapter : sig
+  type result
+
+  type error =
+    | Invalid_envelope
+    | Unsupported_protocol
+    | Too_many_results
+    | Invalid_result
+  [@@deriving sexp_of]
+
+  val request : query:string -> limit:int -> Yojson.Safe.t
+  val results : Yojson.Safe.t -> (result list, error) Result.t
+  val url : result -> string
+  val title : result -> string
+  val snippet : result -> string
+end
+
+module Fetch_adapter : sig
+  type error =
+    | Invalid_manifest
+    | Unsupported_protocol
+    | Queryability_check_failed
+  [@@deriving sexp_of]
+
+  val request : url:string -> output_directory:string -> Yojson.Safe.t
+  val validate_manifest : Yojson.Safe.t -> (unit, error) Result.t
+end

@@ -187,6 +187,103 @@ module Shell_command = struct
   let of_words words = words |> List.map ~f:quote |> String.concat ~sep:" "
 end
 
+module Search_adapter = struct
+  type result =
+    { url : string
+    ; title : string
+    ; snippet : string
+    }
+
+  type error =
+    | Invalid_envelope
+    | Unsupported_protocol
+    | Too_many_results
+    | Invalid_result
+  [@@deriving sexp_of]
+
+  let request ~query ~limit =
+    `Assoc
+      [ "protocol", `String "sandwalk.search.v1"
+      ; "query", `String query
+      ; "limit", `Int limit
+      ]
+  ;;
+
+  let string_field fields name maximum =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`String value) when String.length value <= maximum -> Some value
+    | Some _ | None -> None
+  ;;
+
+  let result = function
+    | `Assoc fields ->
+      let open Option.Let_syntax in
+      let%bind url = string_field fields "url" 2048 in
+      let%bind title = string_field fields "title" 500 in
+      let%bind snippet = string_field fields "snippet" 1000 in
+      if
+        (String.is_prefix url ~prefix:"http://"
+         || String.is_prefix url ~prefix:"https://")
+        && not (String.is_empty title)
+      then Some { url; title; snippet }
+      else None
+    | _ -> None
+  ;;
+
+  let results = function
+    | `Assoc fields ->
+      (match List.Assoc.find fields "protocol" ~equal:String.equal with
+       | Some (`String "sandwalk.search-results.v1") ->
+         (match List.Assoc.find fields "results" ~equal:String.equal with
+          | Some (`List values) when List.length values <= 25 ->
+            values
+            |> List.map ~f:result
+            |> Option.all
+            |> Result.of_option ~error:Invalid_result
+          | Some (`List _) -> Error Too_many_results
+          | Some _ | None -> Error Invalid_envelope)
+       | Some (`String _) -> Error Unsupported_protocol
+       | Some _ | None -> Error Invalid_envelope)
+    | _ -> Error Invalid_envelope
+  ;;
+
+  let url t = t.url
+  let title t = t.title
+  let snippet t = t.snippet
+end
+
+module Fetch_adapter = struct
+  type error =
+    | Invalid_manifest
+    | Unsupported_protocol
+    | Queryability_check_failed
+  [@@deriving sexp_of]
+
+  let request ~url ~output_directory =
+    `Assoc
+      [ "protocol", `String "sandwalk.fetch.v1"
+      ; "url", `String url
+      ; "output_directory", `String output_directory
+      ]
+  ;;
+
+  let validate_manifest = function
+    | `Assoc fields ->
+      (match List.Assoc.find fields "protocol" ~equal:String.equal with
+       | Some (`String "sandwalk.fetch-manifest.v1") ->
+         (match List.Assoc.find fields "queryability_check" ~equal:String.equal with
+          | Some (`Assoc queryability) ->
+            (match List.Assoc.find queryability "ok" ~equal:String.equal with
+             | Some (`Bool true) -> Ok ()
+             | Some (`Bool false) -> Error Queryability_check_failed
+             | Some _ | None -> Error Invalid_manifest)
+          | Some _ | None -> Error Invalid_manifest)
+       | Some (`String _) -> Error Unsupported_protocol
+       | Some _ | None -> Error Invalid_manifest)
+    | _ -> Error Invalid_manifest
+  ;;
+end
+
 let%expect_test "renders a compact failure with one next command" =
   Envelope.failure
     ~code:"PLAN_NOT_VALIDATED"
@@ -278,4 +375,36 @@ let%test_unit "claim audit events carry capability and step context" =
   [%test_eq: string]
     (json |> member "created_references" |> to_list |> List.hd_exn |> to_string)
     claim
+;;
+
+let%expect_test "search adapter responses are versioned and bounded" =
+  let response =
+    `Assoc
+      [ "protocol", `String "sandwalk.search-results.v1"
+      ; ( "results"
+        , `List
+            [ `Assoc
+                [ "url", `String "https://example.test"
+                ; "title", `String "Example"
+                ; "snippet", `String "Bounded"
+                ]
+            ] )
+      ]
+  in
+  Search_adapter.results response
+  |> Result.map ~f:(fun results -> List.length results)
+  |> [%sexp_of: (int, Search_adapter.error) Result.t]
+  |> print_s;
+  [%expect {| (Ok 1) |}]
+;;
+
+let%expect_test "fetch manifests require a successful mq gate" =
+  `Assoc
+    [ "protocol", `String "sandwalk.fetch-manifest.v1"
+    ; "queryability_check", `Assoc [ "ok", `Bool false ]
+    ]
+  |> Fetch_adapter.validate_manifest
+  |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
+  |> print_s;
+  [%expect {| (Error Queryability_check_failed) |}]
 ;;
