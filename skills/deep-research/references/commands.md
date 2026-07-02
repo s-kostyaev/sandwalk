@@ -32,6 +32,7 @@ atomically records one new step and its reason without changing existing steps.
 
 ```console
 sandwalk step claim --slug <slug> --step <step> [--lease-seconds 900]
+sandwalk snapshot promote --slug <slug> --claim <claim_id> <snapshot_id>
 sandwalk search --slug <slug> --claim <claim_id> --query <query> [--limit 10]
 sandwalk fetch --slug <slug> --claim <claim_id> <hit_id>
 sandwalk excerpt create --slug <slug> --claim <claim_id> \
@@ -52,6 +53,9 @@ Fetch accepts only a persisted hit ID, not an arbitrary URL. Its default
 connector stores the original response, headers, converted Markdown, hashes,
 and a queryability check. For excerpts, use either `--lines first:last` or
 `--text-file path [--occurrence N]`.
+
+Use `snapshot promote` when reconnaissance already fetched the needed source.
+It binds the immutable snapshot to the claimed step without fetching it again.
 
 Evidence relations are `supports`, `contradicts`, `qualifies`, and `context`.
 Attaching evidence to an already sealed finding creates a new revision that

@@ -136,12 +136,16 @@ sandwalk search --slug <slug> --query <query> [--claim <claim>]
 sandwalk fetch --slug <slug> <hit-ref>
 sandwalk recon add-observation --slug <slug> ...
 sandwalk recon finish --slug <slug> --summary-file <path>
+sandwalk snapshot promote --slug <slug> --claim <claim> <snapshot>
 ```
 
 Snapshots discovered during reconnaissance are ordinary immutable snapshots.
 They are tagged with their purpose and may later be promoted to a research plan
-step without being fetched again. Reconnaissance observations are not findings
-and cannot pass report validation by themselves.
+step without being fetched again. Promotion creates a separate, append-only
+ownership association and renews the active claim; it does not rewrite snapshot
+content or provenance. Repeating promotion to the same step is idempotent, and
+promotion to a different step is rejected. Reconnaissance observations are not
+findings and cannot pass report validation by themselves.
 
 Searches in `researching` require the active step claim and renew its lease only
 after the bounded adapter response and minted hit references commit. Adapter

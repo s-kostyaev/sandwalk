@@ -6,7 +6,7 @@
   [1]
 
   $ sandwalk init --slug guidance-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":19}}
+  {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":20}}
 
   $ sandwalk next --slug guidance-test --directory-prefix "work spaces"
   {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}

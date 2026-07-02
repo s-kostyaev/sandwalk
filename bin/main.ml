@@ -302,6 +302,8 @@ let status_error = function
   | Snapshot_id_collision
   | Snapshot_not_found _
   | Snapshot_not_owned_by_claim _
+  | Snapshot_promotion_wrong_phase _
+  | Snapshot_promotion_conflict _
   | Excerpt_wrong_phase _
   | Excerpt_requires_claim
   | Excerpt_id_collision
@@ -3598,6 +3600,18 @@ let excerpt_store_error = function
   | error -> fetch_error error
 ;;
 
+let snapshot_promotion_error = function
+  | Sandwalk_store.Error.Snapshot_not_found reference ->
+    "SNAPSHOT_NOT_FOUND", sprintf "Snapshot %S does not exist." reference
+  | Snapshot_promotion_wrong_phase _ ->
+    "SNAPSHOT_PROMOTION_NOT_ALLOWED",
+    "Snapshot promotion is allowed only while researching."
+  | Snapshot_promotion_conflict reference ->
+    "SNAPSHOT_PROMOTION_CONFLICT",
+    sprintf "Snapshot %S already belongs to another plan step." reference
+  | error -> claim_error error
+;;
+
 let excerpt_selection_error = function
   | Sandwalk_core.Excerpt.Empty_document ->
     "EMPTY_SNAPSHOT", "Snapshot Markdown is empty."
@@ -3997,6 +4011,242 @@ let fetch_command =
                                          |> Sandwalk_protocol.Envelope.render
                                          |> print_endline;
                                          Deferred.unit)))))))))))
+;;
+
+let snapshot_promote_command =
+  Async.Command.async
+    ~summary:"Associate an immutable reconnaissance snapshot with a claimed step."
+    (let%map_open.Command snapshot_text = anon ("SNAPSHOT" %: string)
+     and slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and claim_text =
+       flag "--claim" (required string) ~doc:"CLAIM Active execution claim"
+     in
+     fun () ->
+       match
+         Sandwalk_core.Slug.of_string slug_text,
+         Sandwalk_core.Snapshot_id.of_string snapshot_text,
+         Sandwalk_core.Claim_id.of_string claim_text
+       with
+       | Error error, _, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, None, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SNAPSHOT"
+           ~message:"Snapshot reference is invalid."
+       | _, _, None ->
+         print_failure_and_exit
+           ~code:"INVALID_CLAIM"
+           ~message:"Claim identifier is invalid."
+       | Ok slug, Some snapshot_id, Some claim_id ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let arguments =
+           `Assoc
+             [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+             ; "directory_prefix", `String directory_prefix
+             ; "snapshot", `String snapshot_text
+             ; "claim", `String claim_text
+             ]
+         in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn
+             (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let started_at = Time_float_unix.now () in
+           let now_unix_seconds =
+             Time_float.to_span_since_epoch started_at
+             |> Time_float.Span.to_sec
+             |> Float.iround_down_exn
+             |> Int64.of_int
+           in
+           let%bind invocation_id =
+             In_thread.run (fun () ->
+               Sandwalk_runtime.invocation_id ~now:started_at)
+           in
+           let append_event
+                 ~kind
+                 ~timestamp
+                 ~phase
+                 ~state_changes
+                 ?step
+                 ?duration_ms
+                 ?outcome
+                 ?error_code
+                 ()
+             =
+             Sandwalk_runtime.Audit.append
+               ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+               (Sandwalk_protocol.Audit_event.create
+                  ~invocation_id
+                  ~timestamp
+                  ~kind
+                  ~command:"snapshot promote"
+                  ~arguments
+                  ~phase
+                  ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                  ~state_changes
+                  ~claim:claim_text
+                  ?step
+                  ~consumed_references:[ snapshot_text ]
+                  ?duration_ms
+                  ?outcome
+                  ?error_code
+                  ())
+           in
+           let fail_with_audit ?step ~code ~message () =
+             let finished_at = Time_float_unix.now () in
+             let duration_ms =
+               Time_float.diff finished_at started_at
+               |> Time_float.Span.to_ms
+               |> Float.iround_nearest_exn
+             in
+             let%bind logged =
+               append_event
+                 ~kind:`Failed
+                 ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                 ~phase:(Some "researching")
+                 ~state_changes:[]
+                 ?step
+                 ~duration_ms
+                 ~outcome:"failure"
+                 ~error_code:code
+                 ()
+             in
+             match logged with
+             | Error _ ->
+               print_failure_and_exit
+                 ~code:"AUDIT_LOG_ERROR"
+                 ~message:"Could not append workspace audit log."
+             | Ok () -> print_failure_and_exit ~code ~message
+           in
+           let%bind started =
+             append_event
+               ~kind:`Started
+               ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+               ~phase:None
+               ~state_changes:[]
+               ()
+           in
+           match started with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"AUDIT_LOG_ERROR"
+               ~message:"Could not append workspace audit log."
+           | Ok () ->
+             let%bind promoted =
+               In_thread.run (fun () ->
+                 Sandwalk_store.promote_snapshot
+                   ~database_path:
+                     (Sandwalk_runtime.Workspace.database_path workspace)
+                   ~expected_slug:slug
+                   ~claim_id
+                   ~snapshot_id
+                   ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                   ~now_unix_seconds
+                   ())
+             in
+             (match promoted with
+              | Error error ->
+                let code, message = snapshot_promotion_error error in
+                let step =
+                  match error with
+                  | Sandwalk_store.Error.Claim_expired step -> Some step
+                  | _ -> None
+                in
+                fail_with_audit ?step ~code ~message ()
+              | Ok promoted ->
+                let step_key =
+                  Sandwalk_store.Promote_snapshot_result.step_key promoted
+                in
+                let step = Sandwalk_core.Plan_step.Key.to_string step_key in
+                let lease_expires_unix_seconds =
+                  Sandwalk_store.Promote_snapshot_result
+                  .lease_expires_unix_seconds
+                    promoted
+                in
+                let lease_expires_at =
+                  Time_float.of_span_since_epoch
+                    (Time_float.Span.of_sec
+                       (Int64.to_float lease_expires_unix_seconds))
+                  |> Sandwalk_runtime.timestamp_utc
+                in
+                let did_promote =
+                  Sandwalk_store.Promote_snapshot_result.promoted promoted
+                in
+                let state_changes =
+                  (if did_promote
+                   then
+                     [ `Assoc
+                         [ "entity", `String "snapshot.promotion"
+                         ; "from", `Null
+                         ; "to", `String step
+                         ]
+                     ]
+                   else [])
+                  @ [ `Assoc
+                        [ "entity", `String ("step." ^ step ^ ".lease")
+                        ; "from", `Null
+                        ; "to", `String lease_expires_at
+                        ]
+                    ]
+                in
+                let finished_at = Time_float_unix.now () in
+                let duration_ms =
+                  Time_float.diff finished_at started_at
+                  |> Time_float.Span.to_ms
+                  |> Float.iround_nearest_exn
+                in
+                let%bind logged =
+                  append_event
+                    ~kind:`Finished
+                    ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                    ~phase:(Some "researching")
+                    ~step
+                    ~state_changes
+                    ~duration_ms
+                    ~outcome:"success"
+                    ()
+                in
+                (match logged with
+                 | Error _ ->
+                   print_failure_and_exit
+                     ~code:"AUDIT_LOG_ERROR"
+                     ~message:"Could not append workspace audit log."
+                 | Ok () ->
+                   let result =
+                     `Assoc
+                       [ "snapshot", `String snapshot_text
+                       ; "step", `String step
+                       ; "promoted", `Bool did_promote
+                       ; "lease_expires_at", `String lease_expires_at
+                       ]
+                   in
+                   Sandwalk_protocol.Envelope.success ~result ()
+                   |> Sandwalk_protocol.Envelope.render
+                   |> print_endline;
+                   Deferred.unit))))
+;;
+
+let snapshot_command =
+  Async.Command.group
+    ~summary:"Manage immutable snapshot ownership."
+    [ "promote", snapshot_promote_command ]
 ;;
 
 let excerpt_create_command =
@@ -7636,6 +7886,7 @@ let command =
     ; "recon", recon_command
     ; "resume", resume_command
     ; "search", search_command
+    ; "snapshot", snapshot_command
     ; "status", status_command
     ; "step", step_command
     ]

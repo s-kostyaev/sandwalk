@@ -40,6 +40,8 @@ module Error : sig
     | Snapshot_id_collision
     | Snapshot_not_found of string
     | Snapshot_not_owned_by_claim of string
+    | Snapshot_promotion_wrong_phase of Sandwalk_core.Phase.t
+    | Snapshot_promotion_conflict of string
     | Excerpt_wrong_phase of Sandwalk_core.Phase.t
     | Excerpt_requires_claim
     | Excerpt_id_collision
@@ -104,6 +106,15 @@ module Snapshot_for_excerpt : sig
   val artifact_path : t -> string
   val markdown_sha256 : t -> string
   val step_key : t -> Sandwalk_core.Plan_step.Key.t option
+end
+
+module Promote_snapshot_result : sig
+  type t
+
+  val previous_schema_version : t -> int
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val promoted : t -> bool
+  val lease_expires_unix_seconds : t -> int64
 end
 
 module Record_excerpt_result : sig
@@ -593,6 +604,17 @@ val record_snapshot
   -> now_unix_seconds:int64
   -> unit
   -> (Record_snapshot_result.t, Error.t) Result.t
+
+val promote_snapshot
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> snapshot_id:Sandwalk_core.Snapshot_id.t
+  -> now:string
+  -> now_unix_seconds:int64
+  -> unit
+  -> (Promote_snapshot_result.t, Error.t) Result.t
 
 val snapshot_for_excerpt
   :  ?busy_timeout_ms:int

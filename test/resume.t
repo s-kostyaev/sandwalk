@@ -1,5 +1,5 @@
   $ sandwalk init --slug recovery-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"recovery-test","phase":"initialized","schema_version":19}}
+  {"ok":true,"result":{"slug":"recovery-test","phase":"initialized","schema_version":20}}
 
 Simulate a command whose process exited before recording its terminal event.
 
@@ -13,7 +13,7 @@ Simulate a command whose process exited before recording its terminal event.
   
   - Workspace: "recovery-test"
   - Phase: initialized
-  - Schema version: 19
+  - Schema version: 20
   
   ## Step objective and scope
   

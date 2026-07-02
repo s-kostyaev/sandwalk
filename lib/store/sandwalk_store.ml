@@ -40,6 +40,8 @@ module Error = struct
     | Snapshot_id_collision
     | Snapshot_not_found of string
     | Snapshot_not_owned_by_claim of string
+    | Snapshot_promotion_wrong_phase of Sandwalk_core.Phase.t
+    | Snapshot_promotion_conflict of string
     | Excerpt_wrong_phase of Sandwalk_core.Phase.t
     | Excerpt_requires_claim
     | Excerpt_id_collision
@@ -116,6 +118,20 @@ module Snapshot_for_excerpt = struct
   let artifact_path t = t.artifact_path
   let markdown_sha256 t = t.markdown_sha256
   let step_key t = t.step_key
+end
+
+module Promote_snapshot_result = struct
+  type t =
+    { previous_schema_version : int
+    ; step_key : Sandwalk_core.Plan_step.Key.t
+    ; promoted : bool
+    ; lease_expires_unix_seconds : int64
+    }
+
+  let previous_schema_version t = t.previous_schema_version
+  let step_key t = t.step_key
+  let promoted t = t.promoted
+  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Record_excerpt_result = struct
@@ -542,7 +558,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 19
+let current_schema_version = 20
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -1038,6 +1054,18 @@ PRAGMA user_version = 19;
 |}
 ;;
 
+let migration_v20 =
+  {|
+CREATE TABLE snapshot_promotions (
+  snapshot_ref TEXT PRIMARY KEY REFERENCES snapshots(snapshot_ref),
+  step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+  promoted_at TEXT NOT NULL
+);
+PRAGMA user_version = 20;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -1190,10 +1218,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:18 ~now)
       else Ok ()
     in
-    if from_version < 19
+    let%bind () =
+      if from_version < 19
+      then (
+        let%bind () = execute database migration_v19 in
+        insert_migration database ~version:19 ~now)
+      else Ok ()
+    in
+    if from_version < 20
     then (
-      let%bind () = execute database migration_v19 in
-      insert_migration database ~version:19 ~now)
+      let%bind () = execute database migration_v20 in
+      insert_migration database ~version:20 ~now)
     else Ok ())
 ;;
 
@@ -3126,6 +3161,17 @@ LIMIT 10
   let%bind () =
     if schema_version < 8
     then Ok ()
+    else if schema_version >= 20
+    then
+      query
+        "snapshot"
+        {|
+SELECT s.snapshot_ref, COALESCE(s.step_key, p.step_key), s.artifact_path
+FROM snapshots s
+LEFT JOIN snapshot_promotions p ON p.snapshot_ref = s.snapshot_ref
+ORDER BY s.rowid DESC
+LIMIT 10
+|}
     else
       query
         "snapshot"
@@ -4068,6 +4114,174 @@ let record_snapshot
   | exn -> Error (Error.Database_error (Exn.to_string exn))
 ;;
 
+let promote_snapshot
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~claim_id
+      ~snapshot_id
+      ~now
+      ~now_unix_seconds
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind previous_schema_version = query_schema_version database in
+            let%bind () =
+              migrate database ~from_version:previous_schema_version ~now
+            in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option
+                   ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Researching
+              then Ok ()
+              else Error (Error.Snapshot_promotion_wrong_phase phase)
+            in
+            let%bind step_key, state, active_claim_id, expiry, duration =
+              query_claim_for_checkpoint database claim_id
+            in
+            let claim_text = Sandwalk_core.Claim_id.to_string claim_id in
+            let%bind () =
+              if
+                Sandwalk_core.Step_state.equal
+                  state
+                  Sandwalk_core.Step_state.Claimed
+                && Option.value_map
+                     active_claim_id
+                     ~default:false
+                     ~f:(String.equal claim_text)
+              then Ok ()
+              else Error Error.Claim_not_active
+            in
+            let expiry = Option.value_exn expiry in
+            let%bind () =
+              if Int64.(expiry <= now_unix_seconds)
+              then
+                Error
+                  (Error.Claim_expired
+                     (Sandwalk_core.Plan_step.Key.to_string step_key))
+              else Ok ()
+            in
+            let reference = Sandwalk_core.Snapshot_id.to_string snapshot_id in
+            let parse_step statement column =
+              match Sqlite3.column statement column with
+              | Sqlite3.Data.NULL -> Ok None
+              | Sqlite3.Data.TEXT value ->
+                Sandwalk_core.Plan_step.Key.of_string value
+                |> Result.map ~f:Option.some
+                |> Result.map_error ~f:(fun _ ->
+                  Error.Database_error "Invalid persisted snapshot owner.")
+              | _ ->
+                Error
+                  (Error.Database_error "Invalid persisted snapshot owner.")
+            in
+            let%bind base_owner, promoted_owner =
+              with_statement
+                database
+                {|
+SELECT s.step_key, p.step_key
+FROM snapshots s
+LEFT JOIN snapshot_promotions p ON p.snapshot_ref = s.snapshot_ref
+WHERE s.snapshot_ref = ?1
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 reference in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW ->
+                    let%bind base_owner = parse_step statement 0 in
+                    let%map promoted_owner = parse_step statement 1 in
+                    base_owner, promoted_owner
+                  | Sqlite3.Rc.DONE ->
+                    Error (Error.Snapshot_not_found reference)
+                  | return_code ->
+                    check database return_code
+                    |> Result.map ~f:(Fn.const (None, None)))
+            in
+            let same_step owner =
+              String.equal
+                (Sandwalk_core.Plan_step.Key.to_string owner)
+                (Sandwalk_core.Plan_step.Key.to_string step_key)
+            in
+            let%bind promoted =
+              match base_owner, promoted_owner with
+              | Some owner, _ | None, Some owner ->
+                if same_step owner
+                then Ok false
+                else Error (Error.Snapshot_promotion_conflict reference)
+              | None, None ->
+                with_statement
+                  database
+                  {|
+INSERT INTO snapshot_promotions (
+  snapshot_ref, step_key, claim_id, promoted_at
+) VALUES (?1, ?2, ?3, ?4)
+|}
+                  ~f:(fun statement ->
+                    let%bind () = bind_text database statement 1 reference in
+                    let%bind () =
+                      bind_text
+                        database
+                        statement
+                        2
+                        (Sandwalk_core.Plan_step.Key.to_string step_key)
+                    in
+                    let%bind () = bind_text database statement 3 claim_text in
+                    let%bind () = bind_text database statement 4 now in
+                    let%map () = step_done database statement in
+                    true)
+            in
+            let lease_expires_unix_seconds =
+              Int64.(now_unix_seconds + of_int duration)
+            in
+            let%bind () =
+              renew_claim
+                database
+                ~claim_id
+                ~step_key
+                ~lease_expires_unix_seconds
+            in
+            Ok
+              { Promote_snapshot_result.previous_schema_version
+              ; step_key
+              ; promoted
+              ; lease_expires_unix_seconds
+              }
+          in
+          (match outcome with
+           | Ok result ->
+             let%map () = execute database "COMMIT" in
+             result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
 let snapshot_for_excerpt
       ?(busy_timeout_ms = 5_000)
       ~database_path
@@ -4103,13 +4317,26 @@ let snapshot_for_excerpt
                 (Error.Workspace_slug_mismatch
                    { expected; actual = slug_text })
           in
-          with_statement
-            database
-            {|
+          let query =
+            if schema_version >= 20
+            then
+              {|
+SELECT s.artifact_path, s.markdown_sha256,
+       COALESCE(s.step_key, p.step_key)
+FROM snapshots s
+LEFT JOIN snapshot_promotions p ON p.snapshot_ref = s.snapshot_ref
+WHERE s.snapshot_ref = ?1
+|}
+            else
+              {|
 SELECT artifact_path, markdown_sha256, step_key
 FROM snapshots
 WHERE snapshot_ref = ?1
 |}
+          in
+          with_statement
+            database
+            query
             ~f:(fun statement ->
               let reference = Sandwalk_core.Snapshot_id.to_string snapshot_id in
               let%bind () = bind_text database statement 1 reference in
@@ -4350,7 +4577,12 @@ let record_excerpt
             let%bind snapshot_step =
               with_statement
                 database
-                "SELECT step_key FROM snapshots WHERE snapshot_ref = ?1"
+                {|
+SELECT COALESCE(s.step_key, p.step_key)
+FROM snapshots s
+LEFT JOIN snapshot_promotions p ON p.snapshot_ref = s.snapshot_ref
+WHERE s.snapshot_ref = ?1
+|}
                 ~f:(fun statement ->
                   let%bind () =
                     bind_text database statement 1 snapshot_reference

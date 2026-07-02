@@ -49,7 +49,7 @@ Changing a sealed finding creates a new draft revision.
 
   $ ./inspect_workspace.exe workspace/attach-test/database/sandwalk.sqlite3
   attach-test|researching
-  19
+  20
   wal
   ok
 
