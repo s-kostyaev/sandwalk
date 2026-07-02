@@ -42,6 +42,9 @@ module Error : sig
     | Excerpt_wrong_phase of Sandwalk_core.Phase.t
     | Excerpt_requires_claim
     | Excerpt_id_collision
+    | Finding_wrong_phase of Sandwalk_core.Phase.t
+    | Finding_step_mismatch
+    | Finding_exists of string
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -77,6 +80,15 @@ module Record_excerpt_result : sig
   val created : t -> bool
   val step_key : t -> Sandwalk_core.Plan_step.Key.t option
   val lease_expires_unix_seconds : t -> int64 option
+end
+
+module Create_finding_result : sig
+  type t
+
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val finding_key : t -> Sandwalk_core.Finding_key.t
+  val revision : t -> int
+  val lease_expires_unix_seconds : t -> int64
 end
 
 module Stored_hit : sig
@@ -341,3 +353,18 @@ val record_excerpt
   -> now_unix_seconds:int64
   -> unit
   -> (Record_excerpt_result.t, Error.t) Result.t
+
+val create_finding
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> step_key:Sandwalk_core.Plan_step.Key.t
+  -> finding_key:Sandwalk_core.Finding_key.t
+  -> claim_text:string
+  -> claim_md5:string
+  -> claim_size:int
+  -> now:string
+  -> now_unix_seconds:int64
+  -> unit
+  -> (Create_finding_result.t, Error.t) Result.t

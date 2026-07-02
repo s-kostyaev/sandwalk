@@ -153,6 +153,38 @@ module Excerpt : sig
   val byte_end : t -> int
 end
 
+module Finding_key : sig
+  type t
+
+  val of_string : string -> t option
+  val to_string : t -> string
+end
+
+module Finding_relation : sig
+  type t =
+    | Supports
+    | Contradicts
+    | Qualifies
+    | Context
+  [@@deriving equal, sexp_of]
+
+  val of_string : string -> t option
+  val to_string : t -> string
+end
+
+module Finding_claim : sig
+  type t
+
+  type error =
+    | Empty
+    | Too_large of int
+  [@@deriving sexp_of]
+
+  val maximum_bytes : int
+  val create : string -> (t, error) Result.t
+  val text : t -> string
+end
+
 module Step_state : sig
   type t =
     | Pending

@@ -361,7 +361,7 @@ Each attached excerpt has one relation:
 
 ```console
 sandwalk finding create --slug <slug> --step <step> \
-  --key <key> --claim-file <path>
+  --claim <claim> --key <key> --claim-file <path>
 sandwalk finding attach --slug <slug> --finding <step>/<key> \
   --excerpt <excerpt> --relation supports
 sandwalk finding seal --slug <slug> --finding <step>/<key>
@@ -377,6 +377,11 @@ Changing a sealed finding creates a new revision and marks prior reviews stale.
 The CLI checks reference integrity and snapshot freshness. A validation agent,
 not Sandwalk, judges semantic support, source quality, conflicts, and necessary
 qualifications.
+
+Finding statements are non-empty files of at most 65,536 bytes. Every finding
+mutation in `researching` also requires `--claim <claim>` for the active lease
+that owns the named plan step; `--claim-file` is the statement content, not the
+lease capability. Successful mutations renew that lease transactionally.
 
 ## Validation gates
 

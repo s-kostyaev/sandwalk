@@ -398,6 +398,64 @@ module Excerpt = struct
   ;;
 end
 
+module Finding_key = struct
+  type t = string
+
+  let of_string value =
+    match Plan_step.Key.of_string value with
+    | Ok _ -> Some value
+    | Error _ -> None
+  ;;
+
+  let to_string t = t
+end
+
+module Finding_relation = struct
+  type t =
+    | Supports
+    | Contradicts
+    | Qualifies
+    | Context
+  [@@deriving equal, sexp_of]
+
+  let of_string = function
+    | "supports" -> Some Supports
+    | "contradicts" -> Some Contradicts
+    | "qualifies" -> Some Qualifies
+    | "context" -> Some Context
+    | _ -> None
+  ;;
+
+  let to_string = function
+    | Supports -> "supports"
+    | Contradicts -> "contradicts"
+    | Qualifies -> "qualifies"
+    | Context -> "context"
+  ;;
+end
+
+module Finding_claim = struct
+  type t = string
+
+  type error =
+    | Empty
+    | Too_large of int
+  [@@deriving sexp_of]
+
+  let maximum_bytes = 65_536
+
+  let create text =
+    let size = String.length text in
+    if String.is_empty (String.strip text)
+    then Error Empty
+    else if size > maximum_bytes
+    then Error (Too_large size)
+    else Ok text
+  ;;
+
+  let text t = t
+end
+
 module Step_state = struct
   type t =
     | Pending
