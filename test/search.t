@@ -10,14 +10,14 @@ Create a released-schema v6 workspace with an active claim and search through v7
   >   --query "small topic" --limit 1 \
   >   --adapter ../adapters/ddgr-search | \
   >   sed -E 's/hit_[0-9a-f]{32}/hit_ID/g'
-  {"ok":true,"result":{"count":1,"hits":["hit_ID"]}}
+  {"ok":true,"result":{"count":1,"hits":[{"hit":"hit_ID","url":"https://example.test/primary","title":"Primary result","snippet":"A deterministic search result."}]}}
 
   $ ./inspect_workspace.exe --inspect-hits workspace/search-test/database/sandwalk.sqlite3
   36|1|https://example.test/primary|Primary result|A deterministic search result.
 
   $ ./inspect_workspace.exe workspace/search-test/database/sandwalk.sqlite3
   search-test|researching
-  12
+  13
   wal
   ok
 

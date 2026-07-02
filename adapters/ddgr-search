@@ -26,7 +26,19 @@ printf '%s' "$limit" | grep -Eq '^[0-9]+$' || {
   exit 64
 }
 
-raw=$(ddgr --json --num "$limit" -- "$query")
+stderr_file=$(mktemp "${TMPDIR:-/tmp}/sandwalk-ddgr.XXXXXX")
+trap 'rm -f "$stderr_file"' EXIT HUP INT TERM
+
+if ! raw=$(ddgr --json --num "$limit" -- "$query" 2>"$stderr_file"); then
+  cat "$stderr_file" >&2
+  exit 69
+fi
+
+result_count=$(printf '%s' "$raw" | jq -er 'if type == "array" then length else 0 end')
+if [ "$result_count" -eq 0 ] && [ -s "$stderr_file" ]; then
+  cat "$stderr_file" >&2
+  exit 69
+fi
 
 printf '%s' "$raw" | jq -c \
   --argjson limit "$limit" \

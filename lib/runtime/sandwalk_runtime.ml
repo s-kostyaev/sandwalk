@@ -10,6 +10,7 @@ module Workspace = struct
     ; research_plan_path : string
     ; research_plan_lock_path : string
     ; writer_pack_path : string
+    ; report_path : string
     }
 
   let root t = t.root
@@ -19,6 +20,7 @@ module Workspace = struct
   let research_plan_path t = t.research_plan_path
   let research_plan_lock_path t = t.research_plan_lock_path
   let writer_pack_path t = t.writer_pack_path
+  let report_path t = t.report_path
   let temporary_fetch_path t ~invocation_id =
     Filename.concat t.root ("artifacts/temporary/fetch-" ^ invocation_id)
   ;;
@@ -47,6 +49,7 @@ module Workspace = struct
     ; research_plan_lock_path =
         Filename.concat root "artifacts/temporary/research-plan.lock"
     ; writer_pack_path = Filename.concat root "exports/writer-pack.md"
+    ; report_path = Filename.concat root "exports/report.md"
     }
   ;;
 

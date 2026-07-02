@@ -425,6 +425,18 @@ After drafting, Sandwalk splits the report into bounded citation-bearing blocks.
 A validation agent records whether each block is supported, partially
 supported, unsupported, or contradicted.
 
+```console
+sandwalk draft submit --slug <slug> --report-file <path>
+```
+
+Submission accepts at most 1 MiB of Markdown and splits it at blank lines into
+blocks of at most 16 KiB. Heading blocks may be uncited; every prose block must
+contain at least one canonical `[cite:step-key/finding-key]` token. Citation
+targets must name current reviewed findings with `supported` or
+`partially-supported` verdicts. Sandwalk atomically records the report revision
+and blocks, publishes `exports/report.md`, and performs the checked
+`drafting → draft-review` transition.
+
 The final gate rejects unknown, stale, or unreviewed citation targets.
 
 ## Report format

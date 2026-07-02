@@ -542,6 +542,114 @@ module Writer_pack = struct
   ;;
 end
 
+module Report = struct
+  type citation =
+    { step : string
+    ; finding : string
+    }
+
+  type block =
+    { text : string
+    ; citations : citation list
+    }
+
+  type t =
+    { markdown : string
+    ; blocks : block list
+    }
+
+  type error =
+    | Empty
+    | Too_large
+    | Block_too_large of int
+    | Missing_citation of int
+    | Invalid_citation of string
+  [@@deriving sexp_of]
+
+  let maximum_bytes = 1_048_576
+  let maximum_block_bytes = 16_384
+  let markdown t = t.markdown
+  let blocks t = t.blocks
+  let block_text t = t.text
+  let block_citations t = t.citations
+  let citation_step t = t.step
+  let citation_finding t = t.finding
+
+  let citation reference =
+    match String.lsplit2 reference ~on:'/' with
+    | Some (step, finding) ->
+      (match
+         Plan_step.Key.of_string step, Finding_key.of_string finding
+       with
+       | Ok _, Some _ -> Ok { step; finding }
+       | _ -> Error (Invalid_citation reference))
+    | None -> Error (Invalid_citation reference)
+  ;;
+
+  let citations text =
+    let rec loop position found =
+      match String.substr_index text ~pattern:"[cite" ~pos:position with
+      | None -> Ok (List.rev found)
+      | Some start ->
+        if
+          start + 6 > String.length text
+          || not (String.equal (String.sub text ~pos:start ~len:6) "[cite:")
+        then Error (Invalid_citation "[cite")
+        else (
+          match String.index_from text (start + 6) ']' with
+          | None -> Error (Invalid_citation (String.drop_prefix text start))
+          | Some finish ->
+            let reference =
+              String.sub text ~pos:(start + 6) ~len:(finish - start - 6)
+            in
+            (match citation reference with
+             | Error _ as error -> error
+             | Ok citation -> loop (finish + 1) (citation :: found)))
+    in
+    loop 0 []
+  ;;
+
+  let paragraphs markdown =
+    let finish current blocks =
+      if List.is_empty current
+      then blocks
+      else String.concat_lines (List.rev current) :: blocks
+    in
+    let blocks, current =
+      markdown
+      |> String.split_lines
+      |> List.fold ~init:([], []) ~f:(fun (blocks, current) line ->
+        if String.is_empty (String.strip line)
+        then finish current blocks, []
+        else blocks, line :: current)
+    in
+    finish current blocks |> List.rev
+  ;;
+
+  let create markdown =
+    let size = String.length markdown in
+    if String.is_empty (String.strip markdown)
+    then Error Empty
+    else if size > maximum_bytes
+    then Error Too_large
+    else
+      paragraphs markdown
+      |> List.mapi ~f:(fun index text ->
+        if String.length text > maximum_block_bytes
+        then Error (Block_too_large (index + 1))
+        else
+          let open Result.Let_syntax in
+          let%bind citations = citations text in
+          if
+            List.is_empty citations
+            && not (String.is_prefix (String.strip text) ~prefix:"#")
+          then Error (Missing_citation (index + 1))
+          else Ok { text; citations })
+      |> Result.all
+      |> Result.map ~f:(fun blocks -> { markdown; blocks })
+  ;;
+end
+
 module Step_state = struct
   type t =
     | Pending
@@ -1081,4 +1189,29 @@ let%test_unit "exact text ranges round-trip snapshot bytes" =
         [%test_eq: string] "\000" (Excerpt.text excerpt);
         [%test_eq: int] (String.length prefix) (Excerpt.byte_start excerpt);
         [%test_eq: int] (String.length prefix + 1) (Excerpt.byte_end excerpt))
+;;
+
+let%test_unit "report blocks require canonical typed citations" =
+  let report =
+    Report.create
+      "# Heading\n\nSupported statement. [cite:fixture-step/small-claim]\n"
+  in
+  (match report with
+   | Error _ -> failwith "expected a valid cited report"
+   | Ok report ->
+     [%test_eq: int] 2 (List.length (Report.blocks report));
+     let citation =
+       Report.blocks report
+       |> List.last_exn
+       |> Report.block_citations
+       |> List.hd_exn
+     in
+     [%test_eq: string] "fixture-step" (Report.citation_step citation);
+     [%test_eq: string] "small-claim" (Report.citation_finding citation));
+  (match Report.create "Uncited statement." with
+   | Error (Report.Missing_citation 1) -> ()
+   | _ -> failwith "expected uncited prose rejection");
+  (match Report.create "Bad. [cite:../escape]" with
+   | Error (Report.Invalid_citation _) -> ()
+   | _ -> failwith "expected invalid citation rejection")
 ;;

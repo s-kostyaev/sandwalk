@@ -515,6 +515,64 @@ PRAGMA user_version = 11;
 |})
 ;;
 
+let create_v12 database slug =
+  create_v11 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE finding_reviews (
+  step_key TEXT NOT NULL,
+  finding_key TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  verdict TEXT NOT NULL CHECK (
+    verdict IN (
+      'supported', 'partially-supported', 'unsupported', 'contradicted'
+    )
+  ),
+  summary TEXT NOT NULL,
+  source_quality TEXT NOT NULL,
+  conflicts TEXT NOT NULL,
+  qualifications TEXT NOT NULL,
+  review_json TEXT NOT NULL,
+  review_md5 TEXT NOT NULL CHECK (
+    length(review_md5) = 32
+    AND review_md5 NOT GLOB '*[^a-f0-9]*'
+  ),
+  reviewed_at TEXT NOT NULL,
+  PRIMARY KEY (step_key, finding_key, revision),
+  FOREIGN KEY (step_key, finding_key, revision)
+    REFERENCES finding_revisions(step_key, finding_key, revision)
+);
+DELETE FROM finding_revisions
+WHERE step_key = 'fixture-step' AND finding_key = 'fixture-finding';
+DELETE FROM findings
+WHERE step_key = 'fixture-step' AND finding_key = 'fixture-finding';
+INSERT INTO finding_reviews (
+  step_key, finding_key, revision, verdict, summary, source_quality,
+  conflicts, qualifications, review_json, review_md5, reviewed_at
+) VALUES (
+  'fixture-step', 'sealed-finding', 1, 'supported', 'Supported fixture.',
+  'Primary source.', '', '', '{}',
+  'ffffffffffffffffffffffffffffffff', '2026-01-01 00:00:00Z'
+);
+UPDATE findings SET state = 'reviewed'
+WHERE step_key = 'fixture-step' AND finding_key = 'sealed-finding';
+UPDATE step_executions
+SET state = 'completed', active_claim_id = NULL,
+    lease_expires_unix_seconds = NULL
+WHERE step_key = 'fixture-step';
+UPDATE claims
+SET ended_at = '2026-01-01 00:00:00Z', end_reason = 'completed'
+WHERE claim_id = 'claim_00000000000000000000000000000001';
+UPDATE workspaces SET phase = 'drafting';
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (12, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 12;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -616,6 +674,23 @@ ORDER BY step_key, finding_key, revision
 |}
 ;;
 
+let inspect_reports database =
+  print_query
+    database
+    {|
+SELECT revision, length(report_md5), report_size, current
+FROM reports
+ORDER BY revision
+|};
+  print_query
+    database
+    {|
+SELECT report_revision, ordinal, length(block_md5), citations_json
+FROM report_blocks
+ORDER BY report_revision, ordinal
+|}
+;;
+
 let () =
   let action, path =
     match Sys.argv with
@@ -630,6 +705,7 @@ let () =
     | [| _; "--create-v9"; path; slug |] -> `Create (9, slug), path
     | [| _; "--create-v10"; path; slug |] -> `Create (10, slug), path
     | [| _; "--create-v11"; path; slug |] -> `Create (11, slug), path
+    | [| _; "--create-v12"; path; slug |] -> `Create (12, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
@@ -638,6 +714,7 @@ let () =
     | [| _; "--inspect-findings"; path |] -> `Inspect_findings, path
     | [| _; "--inspect-evidence"; path |] -> `Inspect_evidence, path
     | [| _; "--inspect-reviews"; path |] -> `Inspect_reviews, path
+    | [| _; "--inspect-reports"; path |] -> `Inspect_reports, path
     | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
     | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
@@ -658,6 +735,7 @@ let () =
       | `Create (9, slug) -> create_v9 database slug
       | `Create (10, slug) -> create_v10 database slug
       | `Create (11, slug) -> create_v11 database slug
+      | `Create (12, slug) -> create_v12 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
@@ -668,6 +746,7 @@ let () =
       | `Inspect_findings -> inspect_findings database
       | `Inspect_evidence -> inspect_evidence database
       | `Inspect_reviews -> inspect_reviews database
+      | `Inspect_reports -> inspect_reports database
       | `Expire_claim step ->
         let statement =
           Sqlite3.prepare

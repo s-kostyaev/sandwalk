@@ -205,6 +205,30 @@ module Writer_pack : sig
   val render : slug:string -> item list -> string
 end
 
+module Report : sig
+  type t
+  type block
+  type citation
+
+  type error =
+    | Empty
+    | Too_large
+    | Block_too_large of int
+    | Missing_citation of int
+    | Invalid_citation of string
+  [@@deriving sexp_of]
+
+  val maximum_bytes : int
+  val maximum_block_bytes : int
+  val create : string -> (t, error) Result.t
+  val markdown : t -> string
+  val blocks : t -> block list
+  val block_text : block -> string
+  val block_citations : block -> citation list
+  val citation_step : citation -> string
+  val citation_finding : citation -> string
+end
+
 module Step_state : sig
   type t =
     | Pending

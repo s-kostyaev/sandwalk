@@ -3,6 +3,15 @@
   > EOF
   {"protocol":"sandwalk.search-results.v1","adapter":{"name":"ddgr","protocol_version":1},"results":[{"url":"https://example.test/primary","title":"Primary result","snippet":"A deterministic search result."}]}
 
+ddgr diagnostics with an empty result set are adapter failures.
+
+  $ DDGR_FORCE_FAILURE=1 PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/ddgr-search >/dev/null <<'EOF'
+  > {"protocol":"sandwalk.search.v1","query":"small topic","limit":1}
+  > EOF
+  network unavailable
+  [69]
+
   $ mkdir fetch-output
   $ MQ_TEST_LOG="$PWD/mq.log" PATH="$PWD/fakes:$PATH" \
   >   ../adapters/curl-pandoc-fetch <<'EOF'

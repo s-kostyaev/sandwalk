@@ -57,6 +57,9 @@ module Error : sig
     | Step_has_rejected_findings of string
     | Draft_wrong_phase of Sandwalk_core.Phase.t
     | Draft_gate_failed
+    | Report_wrong_phase of Sandwalk_core.Phase.t
+    | Report_citation_invalid of string
+    | Report_conflict
     | Database_error of string
   [@@deriving sexp_of]
 end
@@ -151,6 +154,14 @@ module Writer_evidence : sig
   val source_url : t -> string
   val line_start : t -> int
   val line_end : t -> int
+end
+
+module Submit_report_result : sig
+  type t
+
+  val revision : t -> int
+  val block_count : t -> int
+  val phase : t -> Sandwalk_core.Phase.t
 end
 
 module Stored_hit : sig
@@ -500,3 +511,23 @@ val begin_drafting
   -> now:string
   -> unit
   -> (Sandwalk_core.Phase.t, Error.t) Result.t
+
+val submit_report
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> report_path:string
+  -> report_md5:string
+  -> report_size:int
+  -> blocks:(string * string * string list) list
+  -> now:string
+  -> unit
+  -> (Submit_report_result.t, Error.t) Result.t
+
+val validate_report_citations
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> citations:string list
+  -> unit
+  -> (unit, Error.t) Result.t
