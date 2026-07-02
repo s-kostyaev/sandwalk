@@ -116,11 +116,11 @@
   $ sed -n '/## Durable entities/,+6p' workspaces/plan-test/artifacts/resume/workspace.md
   ## Durable entities
   
-  The workspace record and these plan steps are durable:
+  Plan steps:
   - 1. "primary-sources": "Review primary sources" (required)
   - 2. "background": "Collect background" (optional)
   - 3. "follow-up": "Follow up" (required)
-  
+  Created research entities: none.
 
 Create a released-schema v1 fixture and prove the first plan mutation upgrades it.
 

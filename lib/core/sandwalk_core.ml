@@ -998,6 +998,7 @@ module Resume_pack = struct
         ~phase
         ~schema_version
         ~plan_steps
+        ~durable_entities
         ~active_claims
         ~latest_checkpoint
         ~recent_commands
@@ -1007,18 +1008,74 @@ module Resume_pack = struct
     =
     let recent_commands = List.take recent_commands 10 in
     let unmatched_commands = List.take unmatched_commands 10 in
+    let bounded value =
+      if String.length value <= 4_096
+      then value
+      else String.prefix value 4_096 ^ "\n[truncated]"
+    in
+    let step_scope_lines =
+      match active_claims, latest_checkpoint with
+      | (step_key, claim_id, _, _) :: _, _ ->
+        let title =
+          List.find_map plan_steps ~f:(fun (key, title, _, _) ->
+            if
+              String.equal
+                (Plan_step.Key.to_string key)
+                (Plan_step.Key.to_string step_key)
+            then Some title
+            else None)
+          |> Option.value ~default:"Untitled step"
+        in
+        [ sprintf "- Step: %S" (Plan_step.Key.to_string step_key)
+        ; sprintf "- Title: %S" title
+        ; sprintf "- Active claim: %S" (Claim_id.to_string claim_id)
+        ]
+      | [], Some (step_key, _, _, _) ->
+        [ sprintf
+            "The latest checkpoint belongs to step %S; no claim is currently active."
+            (Plan_step.Key.to_string step_key)
+        ]
+      | [], None ->
+        if List.is_empty plan_steps
+        then [ "No plan step is active." ]
+        else
+          [ sprintf
+              "The plan contains %d step(s); no claim is currently active."
+              (List.length plan_steps)
+          ]
+    in
     let durable_entity_lines =
-      match plan_steps with
-      | [] -> [ "The workspace record is initialized. No plan entities exist yet." ]
-      | steps ->
-        "The workspace record and these plan steps are durable:"
-        :: List.map steps ~f:(fun (key, title, required, position) ->
-          sprintf
-            "- %d. %S: %S (%s)"
-            position
-            (Plan_step.Key.to_string key)
-            title
-            (if required then "required" else "optional"))
+      let plan_lines =
+        match plan_steps with
+        | [] -> [ "The workspace record is initialized. No plan steps exist yet." ]
+        | steps ->
+          "Plan steps:"
+          :: List.map steps ~f:(fun (key, title, required, position) ->
+            sprintf
+              "- %d. %S: %S (%s)"
+              position
+              (Plan_step.Key.to_string key)
+              title
+              (if required then "required" else "optional"))
+      in
+      let entity_lines =
+        match List.take durable_entities 40 with
+        | [] -> [ "Created research entities: none." ]
+        | entities ->
+          "Created research entities:"
+          :: List.map entities ~f:(fun (kind, reference, step, detail) ->
+            let ownership =
+              Option.value_map step ~default:"" ~f:(fun step ->
+                sprintf ", step %S" step)
+            in
+            sprintf
+              "- %s %S%s: %S"
+              kind
+              reference
+              ownership
+              (bounded detail))
+      in
+      plan_lines @ entity_lines
     in
     let active_claim_lines =
       match List.take active_claims 10 with
@@ -1031,11 +1088,6 @@ module Resume_pack = struct
             (Claim_id.to_string claim_id)
             attempt
             expires_at)
-    in
-    let bounded value =
-      if String.length value <= 4_096
-      then value
-      else String.prefix value 4_096 ^ "\n[truncated]"
     in
     let latest_checkpoint_lines =
       match latest_checkpoint with
@@ -1070,8 +1122,22 @@ module Resume_pack = struct
     let unresolved =
       match phase with
       | Phase.Initialized -> "Workspace scope and plan are not yet defined."
+      | Scoping | Reconnaissance -> "Reconnaissance has not been finished."
       | Planning -> "Plan validation and sealing are pending."
-      | _ -> "Consult the current durable workspace state."
+      | Researching -> "One or more plan steps remain incomplete."
+      | Evidence_review -> "The drafting gate has not been run."
+      | Drafting -> "A current cited report revision has not been submitted."
+      | Draft_review -> "The current report blocks have not passed review."
+      | Finalizing -> "Final citation rendering has not completed."
+      | Completed -> "None."
+    in
+    let artifact_lines =
+      durable_entities
+      |> List.filter_map ~f:(fun (kind, reference, _, detail) ->
+        if String.equal kind "snapshot" || String.equal kind "excerpt"
+        then Some (sprintf "- %s %S: %S" kind reference detail)
+        else None)
+      |> fun paths -> List.take paths 20
     in
     let maximum_backtick_run =
       String.fold next_command ~init:(0, 0) ~f:(fun (maximum, current) character ->
@@ -1092,11 +1158,12 @@ module Resume_pack = struct
          ; ""
          ; "## Step objective and scope"
          ; ""
-         ; "No plan step is active."
-         ; ""
-         ; "## Latest checkpoint"
-         ; ""
          ]
+         @ step_scope_lines
+         @ [ ""
+           ; "## Latest checkpoint"
+           ; ""
+           ]
          @ latest_checkpoint_lines
          @ [ ""
            ; "## Durable entities"
@@ -1130,7 +1197,9 @@ module Resume_pack = struct
            ; "## Relevant artifact paths"
            ; ""
            ; sprintf "- Event log: %S" events_path
-           ; ""
+           ]
+         @ artifact_lines
+         @ [ ""
            ; "## Recommended next command"
            ; ""
            ; command_fence ^ "console"
@@ -1158,6 +1227,7 @@ let%expect_test "renders a bounded mechanical resume pack" =
         ~phase:Phase.Initialized
         ~schema_version:1
         ~plan_steps:[]
+        ~durable_entities:[]
         ~active_claims:[]
         ~latest_checkpoint:None
         ~recent_commands:[ "init", "success", None ]
@@ -1187,7 +1257,8 @@ let%expect_test "renders a bounded mechanical resume pack" =
 
     ## Durable entities
 
-    The workspace record is initialized. No plan entities exist yet.
+    The workspace record is initialized. No plan steps exist yet.
+    Created research entities: none.
 
     ## Active claims
 

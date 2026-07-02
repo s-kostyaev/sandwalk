@@ -210,6 +210,15 @@ module Stored_hit : sig
   val snippet : t -> string
 end
 
+module Resume_entity : sig
+  type t
+
+  val kind : t -> string
+  val reference : t -> string
+  val step : t -> string option
+  val detail : t -> string
+end
+
 module Record_search_result : sig
   type t
 
@@ -517,6 +526,12 @@ val read_active_claims
   -> database_path:string
   -> unit
   -> (Active_claim.t list, Error.t) Result.t
+
+val read_resume_entities
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> unit
+  -> (Resume_entity.t list, Error.t) Result.t
 
 val save_checkpoint
   :  ?busy_timeout_ms:int

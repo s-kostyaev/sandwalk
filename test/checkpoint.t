@@ -35,6 +35,12 @@
   - Summary: "Reviewed two primary sources.\n"
   - Next: "Extract exact excerpts next.\n"
   
+  $ sed -n '/## Recent commands/,+3p' \
+  >   workspaces/checkpoint-test/artifacts/resume/workspace.md
+  ## Recent commands
+  
+  - None.
+  
 
   $ ./inspect_workspace.exe --expire-claim workspaces/checkpoint-test/database/sandwalk.sqlite3 source-review
 

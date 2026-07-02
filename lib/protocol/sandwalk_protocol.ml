@@ -56,6 +56,7 @@ module Audit_event = struct
   type metadata =
     { kind : kind
     ; invocation_id : string
+    ; timestamp : string
     ; command : string
     ; outcome : string option
     ; error_code : string option
@@ -63,6 +64,7 @@ module Audit_event = struct
 
   let metadata_kind t = t.kind
   let metadata_invocation_id t = t.invocation_id
+  let metadata_timestamp t = t.timestamp
   let metadata_command t = t.command
   let metadata_outcome t = t.outcome
   let metadata_error_code t = t.error_code
@@ -93,6 +95,7 @@ module Audit_event = struct
         | _ -> None
       in
       let%bind invocation_id = string_field fields "invocation_id" in
+      let%bind timestamp = string_field fields "timestamp" in
       let%map command = string_field fields "command" in
       let outcome =
         match string_field fields "outcome" with
@@ -101,6 +104,7 @@ module Audit_event = struct
       in
       { kind
       ; invocation_id
+      ; timestamp
       ; command
       ; outcome
       ; error_code = string_field fields "error_code"

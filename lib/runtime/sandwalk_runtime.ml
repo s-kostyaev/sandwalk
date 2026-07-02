@@ -84,6 +84,7 @@ end
 module Audit = struct
   type summary =
     { command : string
+    ; timestamp : string
     ; outcome : string
     ; error_code : string option
     }
@@ -96,6 +97,7 @@ module Audit = struct
   let recent_commands t = t.recent_commands
   let unmatched_commands t = t.unmatched_commands
   let summary_command t = t.command
+  let summary_timestamp t = t.timestamp
   let summary_outcome t = t.outcome
   let summary_error_code t = t.error_code
 
@@ -179,6 +181,9 @@ module Audit = struct
                     Hashtbl.remove active invocation_id;
                     recent :=
                       { command
+                      ; timestamp =
+                          Sandwalk_protocol.Audit_event.metadata_timestamp
+                            metadata
                       ; outcome =
                           (Sandwalk_protocol.Audit_event.metadata_outcome metadata
                            |> Option.value ~default:"unknown")

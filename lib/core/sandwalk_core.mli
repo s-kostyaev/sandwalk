@@ -368,6 +368,7 @@ module Resume_pack : sig
     -> phase:Phase.t
     -> schema_version:int
     -> plan_steps:(Plan_step.Key.t * string * bool * int) list
+    -> durable_entities:(string * string * string option * string) list
     -> active_claims:(Plan_step.Key.t * Claim_id.t * int * string) list
     -> latest_checkpoint:(Plan_step.Key.t * string * string * string) option
     -> recent_commands:(string * string * string option) list

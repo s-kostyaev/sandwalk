@@ -282,6 +282,20 @@ module Stored_hit = struct
   let snippet t = t.snippet
 end
 
+module Resume_entity = struct
+  type t =
+    { kind : string
+    ; reference : string
+    ; step : string option
+    ; detail : string
+    }
+
+  let kind t = t.kind
+  let reference t = t.reference
+  let step t = t.step
+  let detail t = t.detail
+end
+
 module Record_search_result = struct
   type t =
     { previous_schema_version : int
@@ -3076,6 +3090,94 @@ let read_active_claims ?(busy_timeout_ms = 5_000) ~database_path () =
           else if schema_version > current_schema_version
           then Error (Error.Unsupported_schema_version schema_version)
           else query_active_claims database
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let query_resume_entities database ~schema_version =
+  let entities = ref [] in
+  let query kind sql =
+    check
+      database
+      (Sqlite3.exec database sql ~cb:(fun row _headers ->
+         match row with
+         | [| Some reference; step; Some detail |] ->
+           entities := { Resume_entity.kind; reference; step; detail } :: !entities
+         | _ -> failwith "Invalid persisted resume entity."))
+  in
+  let open Result.Let_syntax in
+  let%bind () =
+    if schema_version < 7
+    then Ok ()
+    else
+      query
+        "hit"
+        {|
+SELECT h.hit_ref, q.step_key, h.url
+FROM search_hits h
+JOIN search_queries q ON q.query_id = h.query_id
+ORDER BY h.rowid DESC
+LIMIT 10
+|}
+  in
+  let%bind () =
+    if schema_version < 8
+    then Ok ()
+    else
+      query
+        "snapshot"
+        {|
+SELECT snapshot_ref, step_key, artifact_path
+FROM snapshots
+ORDER BY rowid DESC
+LIMIT 10
+|}
+  in
+  let%bind () =
+    if schema_version < 9
+    then Ok ()
+    else
+      query
+        "excerpt"
+        {|
+SELECT excerpt_ref, step_key, artifact_path
+FROM excerpts
+ORDER BY rowid DESC
+LIMIT 10
+|}
+  in
+  let%map () =
+    if schema_version < 10
+    then Ok ()
+    else
+      query
+        "finding"
+        {|
+SELECT step_key || '/' || finding_key, step_key,
+       'revision ' || current_revision || ', ' || state
+FROM findings
+ORDER BY rowid DESC
+LIMIT 10
+|}
+  in
+  List.rev !entities
+;;
+
+let read_resume_entities ?(busy_timeout_ms = 5_000) ~database_path () =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          if schema_version > current_schema_version
+          then Error (Error.Unsupported_schema_version schema_version)
+          else query_resume_entities database ~schema_version
         with
         | exn -> Error (Error.Database_error (Exn.to_string exn)))
       ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))

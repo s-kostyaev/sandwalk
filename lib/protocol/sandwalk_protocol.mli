@@ -28,6 +28,7 @@ module Audit_event : sig
   val metadata_of_yojson : Yojson.Safe.t -> metadata option
   val metadata_kind : metadata -> kind
   val metadata_invocation_id : metadata -> string
+  val metadata_timestamp : metadata -> string
   val metadata_command : metadata -> string
   val metadata_outcome : metadata -> string option
   val metadata_error_code : metadata -> string option

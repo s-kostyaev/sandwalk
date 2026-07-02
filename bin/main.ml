@@ -595,7 +595,10 @@ let resume_command =
                 let phase =
                   Sandwalk_store.Workspace_status.phase status
                 in
-                let%bind ((plan_steps, active_claims), latest_checkpoint), history =
+                let%bind
+                  ( ((plan_steps, active_claims), latest_checkpoint)
+                  , (resume_entities, history) )
+                  =
                   Deferred.both
                     (Deferred.both
                        (Deferred.both
@@ -614,26 +617,69 @@ let resume_command =
                             ~database_path:
                               (Sandwalk_runtime.Workspace.database_path workspace)
                             ())))
-                    (Sandwalk_runtime.Audit.read_history
-                       ~path:(Sandwalk_runtime.Workspace.events_path workspace)
-                       ~exclude_invocation_id:invocation_id)
+                    (Deferred.both
+                       (In_thread.run (fun () ->
+                          Sandwalk_store.read_resume_entities
+                            ~database_path:
+                              (Sandwalk_runtime.Workspace.database_path
+                                 workspace)
+                            ()))
+                       (Sandwalk_runtime.Audit.read_history
+                          ~path:
+                            (Sandwalk_runtime.Workspace.events_path workspace)
+                          ~exclude_invocation_id:invocation_id))
                 in
-                (match plan_steps, active_claims, latest_checkpoint, history with
-                 | Error _, _, _, _
-                 | _, Error _, _, _
-                 | _, _, Error _, _ ->
+                (match
+                   ( plan_steps
+                   , active_claims
+                   , latest_checkpoint
+                   , resume_entities
+                   , history )
+                 with
+                 | Error _, _, _, _, _
+                 | _, Error _, _, _, _
+                 | _, _, Error _, _, _
+                 | _, _, _, Error _, _ ->
                    fail_with_audit
                      ~phase:(Some (Sandwalk_core.Phase.to_string phase))
                      ~code:"RECOVERY_STATE_ERROR"
                      ~message:"Could not read durable recovery state."
-                 | _, _, _, Error _ ->
+                 | _, _, _, _, Error _ ->
                    fail_with_audit
                      ~phase:(Some (Sandwalk_core.Phase.to_string phase))
                      ~code:"RECOVERY_LOG_ERROR"
                      ~message:"Could not read workspace audit history."
-                 | Ok plan_steps, Ok active_claims, Ok latest_checkpoint, Ok history ->
+                 | ( Ok plan_steps
+                   , Ok active_claims
+                   , Ok latest_checkpoint
+                   , Ok resume_entities
+                   , Ok history ) ->
+                   let checkpoint_timestamp =
+                     Option.map latest_checkpoint ~f:(fun checkpoint ->
+                       Sandwalk_store.Latest_checkpoint.created_at checkpoint)
+                   in
                    let recent_commands =
                      Sandwalk_runtime.Audit.recent_commands history
+                     |> List.filter ~f:(fun summary ->
+                       Option.value_map
+                         checkpoint_timestamp
+                         ~default:true
+                         ~f:(fun checkpoint ->
+                           String.compare
+                             (Sandwalk_runtime.Audit.summary_timestamp summary)
+                             checkpoint
+                           > 0))
+                     |> (fun summaries ->
+                       match summaries with
+                       | summary :: rest
+                         when String.equal
+                                (Sandwalk_runtime.Audit.summary_command summary)
+                                "step checkpoint"
+                              && String.equal
+                                   (Sandwalk_runtime.Audit.summary_outcome
+                                      summary)
+                                   "success" -> rest
+                       | summaries -> summaries)
                      |> List.map ~f:(fun summary ->
                        ( Sandwalk_runtime.Audit.summary_command summary
                        , Sandwalk_runtime.Audit.summary_outcome summary
@@ -641,7 +687,7 @@ let resume_command =
                    in
                    let next_command =
                      sprintf
-                       "sandwalk status --slug %s --directory-prefix %s"
+                       "sandwalk next --slug %s --directory-prefix %s"
                        (Sandwalk_protocol.Shell_command.quote
                           (Sandwalk_core.Slug.to_string slug))
                        (Sandwalk_protocol.Shell_command.quote directory_prefix)
@@ -658,6 +704,12 @@ let resume_command =
                             , Sandwalk_store.Stored_plan_step.title stored
                             , Sandwalk_store.Stored_plan_step.required stored
                             , Sandwalk_store.Stored_plan_step.position stored )))
+                       ~durable_entities:
+                         (List.map resume_entities ~f:(fun entity ->
+                            ( Sandwalk_store.Resume_entity.kind entity
+                            , Sandwalk_store.Resume_entity.reference entity
+                            , Sandwalk_store.Resume_entity.step entity
+                            , Sandwalk_store.Resume_entity.detail entity )))
                        ~active_claims:
                          (List.map active_claims ~f:(fun active ->
                             ( Sandwalk_store.Active_claim.step_key active

@@ -43,6 +43,7 @@ module Audit : sig
   val recent_commands : history -> summary list
   val unmatched_commands : history -> string list
   val summary_command : summary -> string
+  val summary_timestamp : summary -> string
   val summary_outcome : summary -> string
   val summary_error_code : summary -> string option
 end
