@@ -59,10 +59,47 @@ let compact_hint code =
     workspace_hint [ "plan"; "validate" ]
   | "STEP_DEPENDENCIES_INCOMPLETE" ->
     workspace_hint [ "next" ]
-  | "STEP_ALREADY_CLAIMED" ->
+  | "STEP_ALREADY_CLAIMED" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_ACTIVE" ->
     workspace_hint [ "resume" ]
+  | "PLAN_MUTATION_NOT_ALLOWED"
+  | "PLAN_VALIDATION_NOT_ALLOWED"
+  | "PLAN_SEAL_NOT_ALLOWED"
+  | "PLAN_OBJECTIVE_NOT_ALLOWED"
+  | "PLAN_DEPENDENCY_NOT_ALLOWED"
+  | "PLAN_EXTENSION_NOT_ALLOWED"
+  | "RECON_START_NOT_ALLOWED"
+  | "STEP_CLAIM_NOT_ALLOWED"
+  | "STEP_COMPLETED"
+  | "SEARCH_REQUIRES_CLAIM"
+  | "FETCH_REQUIRES_CLAIM"
+  | "EXCERPT_REQUIRES_CLAIM"
+  | "SEARCH_NOT_ALLOWED"
+  | "FETCH_NOT_ALLOWED"
+  | "SNAPSHOT_PROMOTION_NOT_ALLOWED"
+  | "EXCERPT_NOT_ALLOWED"
+  | "FINDING_NOT_ALLOWED"
+  | "DRAFT_NOT_ALLOWED"
+  | "REPORT_NOT_ALLOWED"
+  | "REPORT_REVIEW_NOT_ALLOWED"
+  | "FINALIZE_NOT_ALLOWED"
+  | "STEP_HAS_NO_FINDINGS"
+  | "STEP_HAS_UNREVIEWED_FINDINGS"
+  | "STEP_HAS_REJECTED_FINDINGS"
+  | "FINDING_HAS_NO_EVIDENCE"
+  | "FINDING_NOT_SEALED"
+  | "DRAFT_GATE_FAILED"
+  | "FINALIZE_GATE_FAILED"
+  | "GC_ACTIVE_CLAIMS" ->
+    workspace_hint [ "next" ]
   | "GC_PLAN_STALE" -> workspace_hint [ "gc"; "--raw"; "--plan" ]
   | _ -> None
+;;
+
+let phase_error_message operation phase =
+  sprintf
+    "%s is not allowed while the workspace phase is %s."
+    operation
+    (Sandwalk_core.Phase.to_string phase)
 ;;
 
 let print_failure_and_exit ~code ~message =
@@ -401,6 +438,364 @@ let status_error = function
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
+type recommendation =
+  { action : string
+  ; reason : string
+  ; words : string list
+  ; details : (string * Yojson.Safe.t) list
+  ; alternatives_possible : bool
+  }
+
+let workspace_words ~slug ~directory_prefix command =
+  "sandwalk"
+  :: command
+  @ [ "--slug"
+    ; Sandwalk_core.Slug.to_string slug
+    ; "--directory-prefix"
+    ; directory_prefix
+    ]
+;;
+
+let research_recommendation ~slug ~directory_prefix = function
+  | Sandwalk_store.Research_guidance.Search { claim_id; step_key; query } ->
+    { action = "search"
+    ; reason =
+        "The selected active step has no stored source candidate to inspect."
+    ; words =
+        workspace_words
+          ~slug
+          ~directory_prefix
+          [ "search"
+          ; "--claim"
+          ; Sandwalk_core.Claim_id.to_string claim_id
+          ; "--query"
+          ; query
+          ]
+    ; details =
+        [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
+        ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
+        ]
+    ; alternatives_possible = true
+    }
+  | Fetch { claim_id; step_key; hit_id } ->
+    { action = "fetch"
+    ; reason =
+        "The selected active step has an unfetched search result and no snapshot."
+    ; words =
+        workspace_words
+          ~slug
+          ~directory_prefix
+          [ "fetch"
+          ; "--claim"
+          ; Sandwalk_core.Claim_id.to_string claim_id
+          ; Sandwalk_core.Hit_id.to_string hit_id
+          ]
+    ; details =
+        [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
+        ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
+        ; "hit", `String (Sandwalk_core.Hit_id.to_string hit_id)
+        ]
+    ; alternatives_possible = true
+    }
+  | Create_excerpt
+      { claim_id; step_key; snapshot_id; document_path } ->
+    { action = "create-excerpt"
+    ; reason =
+        "Inspect the selected normalized snapshot, then create an exact excerpt from a semantically relevant range."
+    ; words = [ "sed"; "-n"; "1,200p"; document_path ]
+    ; details =
+        [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
+        ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
+        ; "snapshot", `String (Sandwalk_core.Snapshot_id.to_string snapshot_id)
+        ]
+    ; alternatives_possible = true
+    }
+  | Create_finding
+      { claim_id; step_key; excerpt_id; excerpt_path = _ } ->
+    { action = "create-finding"
+    ; reason =
+        "The selected active step has exact evidence but no finding. Author a bounded statement in finding.md."
+    ; words =
+        workspace_words
+          ~slug
+          ~directory_prefix
+          [ "finding"
+          ; "create"
+          ; "--step"
+          ; Sandwalk_core.Plan_step.Key.to_string step_key
+          ; "--claim"
+          ; Sandwalk_core.Claim_id.to_string claim_id
+          ; "--key"
+          ; "finding"
+          ; "--claim-file"
+          ; "finding.md"
+          ]
+    ; details =
+        [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
+        ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
+        ; "candidate_excerpt", `String (Sandwalk_core.Excerpt_id.to_string excerpt_id)
+        ]
+    ; alternatives_possible = true
+    }
+  | Attach_evidence
+      { claim_id; step_key; finding_key; excerpt_id; excerpt_path } ->
+    { action = "attach-evidence"
+    ; reason =
+        "Inspect the selected exact excerpt, then attach appropriate evidence with a relation chosen from its semantic role."
+    ; words = [ "sed"; "-n"; "1,200p"; excerpt_path ]
+    ; details =
+        [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
+        ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
+        ; ( "finding"
+          , `String
+              (Sandwalk_core.Plan_step.Key.to_string step_key
+               ^ "/"
+               ^ Sandwalk_core.Finding_key.to_string finding_key) )
+        ; "candidate_excerpt", `String (Sandwalk_core.Excerpt_id.to_string excerpt_id)
+        ]
+    ; alternatives_possible = true
+    }
+  | Seal_finding { claim_id; step_key; finding_key } ->
+    let finding =
+      Sandwalk_core.Plan_step.Key.to_string step_key
+      ^ "/"
+      ^ Sandwalk_core.Finding_key.to_string finding_key
+    in
+    { action = "seal-finding"
+    ; reason =
+        "The selected draft finding has evidence and is ready for its immutable review boundary."
+    ; words =
+        workspace_words
+          ~slug
+          ~directory_prefix
+          [ "finding"
+          ; "seal"
+          ; "--claim"
+          ; Sandwalk_core.Claim_id.to_string claim_id
+          ; "--finding"
+          ; finding
+          ]
+    ; details =
+        [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
+        ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
+        ; "finding", `String finding
+        ]
+    ; alternatives_possible = true
+    }
+  | Review_finding { claim_id; step_key; finding_key } ->
+    let finding =
+      Sandwalk_core.Plan_step.Key.to_string step_key
+      ^ "/"
+      ^ Sandwalk_core.Finding_key.to_string finding_key
+    in
+    { action = "review-finding"
+    ; reason =
+        "The selected sealed finding needs a current semantic review. Author finding-review.json before running the command."
+    ; words =
+        workspace_words
+          ~slug
+          ~directory_prefix
+          [ "finding"
+          ; "review"
+          ; "--claim"
+          ; Sandwalk_core.Claim_id.to_string claim_id
+          ; "--finding"
+          ; finding
+          ; "--review-file"
+          ; "finding-review.json"
+          ]
+    ; details =
+        [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
+        ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
+        ; "finding", `String finding
+        ]
+    ; alternatives_possible = true
+    }
+  | Complete_step { claim_id; step_key } ->
+    { action = "complete-step"
+    ; reason =
+        "Every current finding for the selected step has an accepted current review."
+    ; words =
+        workspace_words
+          ~slug
+          ~directory_prefix
+          [ "step"
+          ; "complete"
+          ; "--claim"
+          ; Sandwalk_core.Claim_id.to_string claim_id
+          ]
+    ; details =
+        [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
+        ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
+        ]
+    ; alternatives_possible = true
+    }
+;;
+
+let recommendation_for_phase
+      ~database_path
+      ~slug
+      ~directory_prefix
+      ~phase
+  =
+  let fixed ?(alternatives_possible = false) action reason command =
+    Deferred.return
+      (Ok
+         { action
+         ; reason
+         ; words = workspace_words ~slug ~directory_prefix command
+         ; details = []
+         ; alternatives_possible
+         })
+  in
+  match phase with
+  | Sandwalk_core.Phase.Initialized | Scoping ->
+    fixed
+      ~alternatives_possible:true
+      "start-reconnaissance"
+      "Workspace scope and plan are not yet defined."
+      [ "recon"; "start"; "--goal-file"; "goal.md" ]
+  | Reconnaissance ->
+    fixed
+      ~alternatives_possible:true
+      "finish-reconnaissance"
+      "Record the reconnaissance summary before planning."
+      [ "recon"; "finish"; "--summary-file"; "recon-summary.md" ]
+  | Planning ->
+    In_thread.run (fun () ->
+      Sandwalk_store.read_plan_state
+        ~database_path
+        ~expected_slug:slug
+        ())
+    >>| Result.map ~f:(fun plan ->
+      if List.is_empty (Sandwalk_store.Plan_state.steps plan)
+      then
+        { action = "add-plan-step"
+        ; reason = "The research plan has no steps."
+        ; words =
+            workspace_words
+              ~slug
+              ~directory_prefix
+              [ "plan"
+              ; "add-step"
+              ; "--key"
+              ; "research-step"
+              ; "--title"
+              ; "Research step"
+              ]
+        ; details = []
+        ; alternatives_possible = true
+        }
+      else if
+        not
+          (Option.value_map
+             (Sandwalk_store.Plan_state.validated_revision plan)
+             ~default:false
+             ~f:
+               (Int.equal (Sandwalk_store.Plan_state.revision plan)))
+      then
+        { action = "validate-plan"
+        ; reason = "The current plan revision has not been validated."
+        ; words =
+            workspace_words ~slug ~directory_prefix [ "plan"; "validate" ]
+        ; details = []
+        ; alternatives_possible = true
+        }
+      else
+        { action = "seal-plan"
+        ; reason = "The current plan revision is validated but not sealed."
+        ; words =
+            workspace_words ~slug ~directory_prefix [ "plan"; "seal" ]
+        ; details = []
+        ; alternatives_possible = true
+        })
+  | Researching ->
+    In_thread.run (fun () ->
+      Sandwalk_store.read_research_guidance ~database_path ())
+    >>= (function
+     | Error _ as error -> Deferred.return error
+     | Ok (Some guidance) ->
+       Deferred.return
+         (Ok (research_recommendation ~slug ~directory_prefix guidance))
+     | Ok None ->
+       In_thread.run (fun () ->
+         Sandwalk_store.read_next_step ~database_path ())
+       >>| Result.map ~f:(function
+         | Some key ->
+           { action = "claim-step"
+           ; reason =
+               "The selected dependency-ready plan step has no active claim."
+           ; words =
+               workspace_words
+                 ~slug
+                 ~directory_prefix
+                 [ "step"
+                 ; "claim"
+                 ; "--step"
+                 ; Sandwalk_core.Plan_step.Key.to_string key
+                 ]
+           ; details =
+               [ "step", `String (Sandwalk_core.Plan_step.Key.to_string key) ]
+           ; alternatives_possible = true
+           }
+         | None ->
+           { action = "inspect-recovery-state"
+           ; reason =
+               "No active claim or dependency-ready incomplete step was found."
+           ; words =
+               workspace_words ~slug ~directory_prefix [ "resume" ]
+           ; details = []
+           ; alternatives_possible = false
+           }))
+  | Evidence_review ->
+    fixed
+      "prepare-draft"
+      "Required research steps are complete; prepare the writer pack."
+      [ "draft"; "prepare" ]
+  | Drafting ->
+    fixed
+      "submit-draft"
+      "Author a cited report in draft.md from the writer pack."
+      [ "draft"; "submit"; "--report-file"; "draft.md" ]
+  | Draft_review ->
+    fixed
+      "review-draft"
+      "Author a complete report block review in report-review.json."
+      [ "draft"; "review"; "--review-file"; "report-review.json" ]
+  | Finalizing ->
+    fixed
+      "finalize"
+      "The current report and reviews satisfy the transition into finalization."
+      [ "finalize" ]
+  | Completed ->
+    fixed
+      ~alternatives_possible:true
+      "inspect-completed-workspace"
+      "The workflow is complete."
+      [ "status" ]
+;;
+
+let recommendation_result ~phase recommendation =
+  `Assoc
+    ([ "phase", `String (Sandwalk_core.Phase.to_string phase)
+     ; "action", `String recommendation.action
+     ; "reason", `String recommendation.reason
+     ; "advisory", `Bool true
+     ; "alternatives_possible", `Bool recommendation.alternatives_possible
+     ]
+     @ recommendation.details)
+;;
+
+let recommendation_summary recommendation =
+  let variability =
+    if recommendation.alternatives_possible
+    then
+      " This is one deterministic recommendation; other valid actions may exist."
+    else ""
+  in
+  recommendation.reason ^ variability
+;;
+
 let status_command =
   Async.Command.async
     ~summary:"Print the current state of a Sandwalk workspace."
@@ -579,6 +974,7 @@ let resume_command =
                  ~kind
                  ~timestamp
                  ~phase
+                 ?(state_changes = [])
                  ?duration_ms
                  ?outcome
                  ?error_code
@@ -594,7 +990,7 @@ let resume_command =
                   ~arguments
                   ~phase
                   ~raw_argv:(Sys.get_argv () |> Array.to_list)
-                  ~state_changes:[]
+                  ~state_changes
                   ?duration_ms
                   ?outcome
                   ?error_code
@@ -637,22 +1033,54 @@ let resume_command =
                ~code:"AUDIT_LOG_ERROR"
                ~message:"Could not append workspace audit log."
            | Ok () ->
-             let%bind status =
+             let migration_time = Sandwalk_runtime.timestamp_utc started_at in
+             let%bind migrated_and_status =
                In_thread.run (fun () ->
-                 Sandwalk_store.read_status
-                   ~database_path:
-                     (Sandwalk_runtime.Workspace.database_path workspace)
-                   ~expected_slug:slug
-                   ())
+                 let open Result.Let_syntax in
+                 let database_path =
+                   Sandwalk_runtime.Workspace.database_path workspace
+                 in
+                 let%bind previous_schema_version =
+                   Sandwalk_store.migrate_workspace
+                     ~database_path
+                     ~expected_slug:slug
+                     ~now:migration_time
+                     ()
+                 in
+                 let%map status =
+                   Sandwalk_store.read_status
+                     ~database_path
+                     ~expected_slug:slug
+                     ()
+                 in
+                 previous_schema_version, status)
              in
-             (match status with
+             (match migrated_and_status with
               | Error error ->
                 let code, message = status_error error in
                 fail_with_audit ~phase:None ~code ~message
-              | Ok status ->
+              | Ok (previous_schema_version, status) ->
                 let phase =
                   Sandwalk_store.Workspace_status.phase status
                 in
+                let database_path =
+                  Sandwalk_runtime.Workspace.database_path workspace
+                in
+                let%bind recommendation =
+                  recommendation_for_phase
+                    ~database_path
+                    ~slug
+                    ~directory_prefix
+                    ~phase
+                in
+                (match recommendation with
+                 | Error error ->
+                   let code, message = status_error error in
+                   fail_with_audit
+                     ~phase:(Some (Sandwalk_core.Phase.to_string phase))
+                     ~code
+                     ~message
+                 | Ok recommendation ->
                 let%bind
                   ( ((plan_steps, active_claims), latest_checkpoint)
                   , (resume_entities, history) )
@@ -744,11 +1172,8 @@ let resume_command =
                        , Sandwalk_runtime.Audit.summary_error_code summary ))
                    in
                    let next_command =
-                     sprintf
-                       "sandwalk next --slug %s --directory-prefix %s"
-                       (Sandwalk_protocol.Shell_command.quote
-                          (Sandwalk_core.Slug.to_string slug))
-                       (Sandwalk_protocol.Shell_command.quote directory_prefix)
+                     Sandwalk_protocol.Shell_command.of_words
+                       recommendation.words
                    in
                    let pack =
                      Sandwalk_core.Resume_pack.render
@@ -785,6 +1210,7 @@ let resume_command =
                          (Sandwalk_runtime.Audit.unmatched_commands history)
                        ~events_path:
                          (Sandwalk_runtime.Workspace.events_path workspace)
+                       ~next_action:(recommendation_summary recommendation)
                        ~next_command
                    in
                    (match pack with
@@ -823,6 +1249,21 @@ let resume_command =
                                (Sandwalk_runtime.timestamp_utc finished_at)
                              ~phase:
                                (Some (Sandwalk_core.Phase.to_string phase))
+                             ~state_changes:
+                               (if
+                                  previous_schema_version
+                                  < Sandwalk_store.current_schema_version
+                                then
+                                  [ `Assoc
+                                      [ "entity", `String "workspace.schema"
+                                      ; "from", `Int previous_schema_version
+                                      ; ( "to"
+                                        , `Int
+                                            Sandwalk_store
+                                            .current_schema_version )
+                                      ]
+                                  ]
+                                else [])
                              ~duration_ms
                              ~outcome:"success"
                              ()
@@ -834,40 +1275,49 @@ let resume_command =
                               ~message:"Could not append workspace audit log."
                           | Ok () ->
                             let result =
-                              `Assoc
-                                [ ( "slug"
-                                  , `String
-                                      (Sandwalk_core.Slug.to_string slug) )
-                                ; ( "phase"
-                                  , `String
-                                      (Sandwalk_core.Phase.to_string phase) )
-                                ; "resume_path", `String resume_path
-                                ]
+                              match
+                                recommendation_result ~phase recommendation
+                              with
+                              | `Assoc fields ->
+                                `Assoc
+                                  ([ ( "slug"
+                                     , `String
+                                         (Sandwalk_core.Slug.to_string slug) )
+                                   ; "resume_path", `String resume_path
+                                   ; ( "schema_version"
+                                     , `Int
+                                         Sandwalk_store.current_schema_version )
+                                   ]
+                                   @ fields)
+                              | _ -> assert false
                             in
-                            Sandwalk_protocol.Envelope.success ~result ()
+                            Sandwalk_protocol.Envelope.success
+                              ~result
+                              ~next:next_command
+                              ()
                             |> Sandwalk_protocol.Envelope.render
                             |> print_endline;
-                            Deferred.unit)))))))
+                            Deferred.unit))))))))
 ;;
 
 let plan_error = function
   | Sandwalk_store.Error.Duplicate_plan_step key ->
     "PLAN_STEP_EXISTS", sprintf "Plan step %S already exists." key
-  | Plan_mutation_wrong_phase _ ->
-    "PLAN_MUTATION_NOT_ALLOWED", "Plan cannot be changed in the current phase."
+  | Plan_mutation_wrong_phase phase ->
+    "PLAN_MUTATION_NOT_ALLOWED", phase_error_message "Plan mutation" phase
   | Empty_plan -> "PLAN_EMPTY", "Plan must contain at least one step."
-  | Plan_validation_wrong_phase _ ->
-    "PLAN_VALIDATION_NOT_ALLOWED", "Plan cannot be validated in the current phase."
+  | Plan_validation_wrong_phase phase ->
+    "PLAN_VALIDATION_NOT_ALLOWED", phase_error_message "Plan validation" phase
   | Plan_not_validated ->
     "PLAN_NOT_VALIDATED", "Plan must be validated before sealing."
   | Plan_validation_stale _ ->
     "PLAN_VALIDATION_STALE", "Plan changed after its last validation."
-  | Plan_seal_wrong_phase _ ->
-    "PLAN_SEAL_NOT_ALLOWED", "Plan cannot be sealed in the current phase."
-  | Plan_objective_wrong_phase _ ->
-    "PLAN_OBJECTIVE_NOT_ALLOWED", "Plan objective cannot change in this phase."
-  | Plan_dependency_wrong_phase _ ->
-    "PLAN_DEPENDENCY_NOT_ALLOWED", "Dependencies cannot change in this phase."
+  | Plan_seal_wrong_phase phase ->
+    "PLAN_SEAL_NOT_ALLOWED", phase_error_message "Plan sealing" phase
+  | Plan_objective_wrong_phase phase ->
+    "PLAN_OBJECTIVE_NOT_ALLOWED", phase_error_message "Plan objective mutation" phase
+  | Plan_dependency_wrong_phase phase ->
+    "PLAN_DEPENDENCY_NOT_ALLOWED", phase_error_message "Plan dependency mutation" phase
   | Plan_dependency_self ->
     "PLAN_DEPENDENCY_SELF", "A plan step cannot depend on itself."
   | Plan_dependency_exists ->
@@ -876,8 +1326,8 @@ let plan_error = function
     "PLAN_DEPENDENCY_CYCLE", "Plan dependency would create a cycle."
   | Plan_step_not_found key ->
     "PLAN_STEP_NOT_FOUND", sprintf "Plan step %S does not exist." key
-  | Plan_extension_wrong_phase _ ->
-    "PLAN_EXTENSION_NOT_ALLOWED", "Plan can be extended only while researching."
+  | Plan_extension_wrong_phase phase ->
+    "PLAN_EXTENSION_NOT_ALLOWED", phase_error_message "Plan extension" phase
   | error -> status_error error
 ;;
 
@@ -2732,10 +3182,10 @@ let plan_command =
 ;;
 
 let recon_error = function
-  | Sandwalk_store.Error.Recon_start_wrong_phase _ ->
-    "RECON_START_NOT_ALLOWED", "Reconnaissance cannot start in this phase."
-  | Recon_not_active _ ->
-    "RECON_NOT_ACTIVE", "Reconnaissance is not active."
+  | Sandwalk_store.Error.Recon_start_wrong_phase phase ->
+    "RECON_START_NOT_ALLOWED", phase_error_message "Reconnaissance start" phase
+  | Recon_not_active phase ->
+    "RECON_NOT_ACTIVE", phase_error_message "Reconnaissance mutation" phase
   | error -> status_error error
 ;;
 
@@ -3036,8 +3486,8 @@ let recon_command =
 let claim_error = function
   | Sandwalk_store.Error.Plan_step_not_found key ->
     "PLAN_STEP_NOT_FOUND", sprintf "Plan step %S does not exist." key
-  | Step_claim_wrong_phase _ ->
-    "STEP_CLAIM_NOT_ALLOWED", "Steps can only be claimed while researching."
+  | Step_claim_wrong_phase phase ->
+    "STEP_CLAIM_NOT_ALLOWED", phase_error_message "Step claim" phase
   | Step_already_claimed ->
     "STEP_ALREADY_CLAIMED", "Plan step already has an active claim."
   | Step_completed key ->
@@ -3546,8 +3996,8 @@ let step_checkpoint_command =
 ;;
 
 let search_error = function
-  | Sandwalk_store.Error.Search_wrong_phase _ ->
-    "SEARCH_NOT_ALLOWED", "Search is not allowed in the current phase."
+  | Sandwalk_store.Error.Search_wrong_phase phase ->
+    "SEARCH_NOT_ALLOWED", phase_error_message "Search" phase
   | Search_requires_claim ->
     "SEARCH_REQUIRES_CLAIM", "Research search requires an active claim."
   | Hit_id_collision ->
@@ -3561,8 +4011,8 @@ let fetch_error = function
   | Hit_not_owned_by_claim reference ->
     "HIT_NOT_OWNED_BY_CLAIM",
     sprintf "Search hit %S belongs to another research step." reference
-  | Fetch_wrong_phase _ ->
-    "FETCH_NOT_ALLOWED", "Fetch is not allowed in the current phase."
+  | Fetch_wrong_phase phase ->
+    "FETCH_NOT_ALLOWED", phase_error_message "Fetch" phase
   | Fetch_requires_claim ->
     "FETCH_REQUIRES_CLAIM", "Research fetch requires an active claim."
   | Snapshot_id_collision ->
@@ -3576,8 +4026,8 @@ let excerpt_store_error = function
   | Snapshot_not_owned_by_claim reference ->
     "SNAPSHOT_NOT_OWNED_BY_CLAIM",
     sprintf "Snapshot %S belongs to another research step." reference
-  | Excerpt_wrong_phase _ ->
-    "EXCERPT_NOT_ALLOWED", "Excerpt creation is not allowed in the current phase."
+  | Excerpt_wrong_phase phase ->
+    "EXCERPT_NOT_ALLOWED", phase_error_message "Excerpt creation" phase
   | Excerpt_requires_claim ->
     "EXCERPT_REQUIRES_CLAIM", "Research excerpt creation requires an active claim."
   | Excerpt_id_collision ->
@@ -3588,9 +4038,9 @@ let excerpt_store_error = function
 let snapshot_promotion_error = function
   | Sandwalk_store.Error.Snapshot_not_found reference ->
     "SNAPSHOT_NOT_FOUND", sprintf "Snapshot %S does not exist." reference
-  | Snapshot_promotion_wrong_phase _ ->
+  | Snapshot_promotion_wrong_phase phase ->
     "SNAPSHOT_PROMOTION_NOT_ALLOWED",
-    "Snapshot promotion is allowed only while researching."
+    phase_error_message "Snapshot promotion" phase
   | Snapshot_promotion_conflict reference ->
     "SNAPSHOT_PROMOTION_CONFLICT",
     sprintf "Snapshot %S already belongs to another plan step." reference
@@ -4979,8 +5429,8 @@ let search_command =
 ;;
 
 let finding_error = function
-  | Sandwalk_store.Error.Finding_wrong_phase _ ->
-    "FINDING_NOT_ALLOWED", "Finding creation is not allowed in the current phase."
+  | Sandwalk_store.Error.Finding_wrong_phase phase ->
+    "FINDING_NOT_ALLOWED", phase_error_message "Finding mutation" phase
   | Finding_step_mismatch ->
     "FINDING_STEP_MISMATCH", "Active claim belongs to another plan step."
   | Finding_exists reference ->
@@ -5017,23 +5467,23 @@ let complete_step_error = function
 ;;
 
 let draft_error = function
-  | Sandwalk_store.Error.Draft_wrong_phase _ ->
-    "DRAFT_NOT_ALLOWED", "Writer-pack preparation is not allowed in this phase."
+  | Sandwalk_store.Error.Draft_wrong_phase phase ->
+    "DRAFT_NOT_ALLOWED", phase_error_message "Writer-pack preparation" phase
   | Draft_gate_failed ->
     "DRAFT_GATE_FAILED", "Current reviewed findings do not pass the draft gate."
   | error -> status_error error
 ;;
 
 let report_error = function
-  | Sandwalk_store.Error.Report_wrong_phase _ ->
-    "REPORT_NOT_ALLOWED", "Report submission is not allowed in this phase."
+  | Sandwalk_store.Error.Report_wrong_phase phase ->
+    "REPORT_NOT_ALLOWED", phase_error_message "Report submission" phase
   | Report_citation_invalid reference ->
     "REPORT_CITATION_INVALID",
     sprintf "Citation target %S is unknown, stale, or rejected." reference
   | Report_conflict ->
     "REPORT_CONFLICT", "A conflicting report revision already exists."
-  | Report_review_wrong_phase _ ->
-    "REPORT_REVIEW_NOT_ALLOWED", "Report review is not allowed in this phase."
+  | Report_review_wrong_phase phase ->
+    "REPORT_REVIEW_NOT_ALLOWED", phase_error_message "Report review" phase
   | Report_revision_stale ->
     "REPORT_REVISION_STALE", "Report review does not target the current revision."
   | Report_review_incomplete ->
@@ -5044,8 +5494,8 @@ let report_error = function
 ;;
 
 let finalize_error = function
-  | Sandwalk_store.Error.Finalize_wrong_phase _ ->
-    "FINALIZE_NOT_ALLOWED", "Finalization is not allowed in this phase."
+  | Sandwalk_store.Error.Finalize_wrong_phase phase ->
+    "FINALIZE_NOT_ALLOWED", phase_error_message "Finalization" phase
   | Finalize_gate_failed ->
     "FINALIZE_GATE_FAILED", "Current report or block reviews are stale or rejected."
   | error -> status_error error
@@ -7563,6 +8013,7 @@ let next_command =
                  ~kind
                  ~timestamp
                  ~phase
+                 ?(state_changes = [])
                  ?duration_ms
                  ?outcome
                  ?error_code
@@ -7578,7 +8029,7 @@ let next_command =
                   ~arguments
                   ~phase
                   ~raw_argv:(Sys.get_argv () |> Array.to_list)
-                  ~state_changes:[]
+                  ~state_changes
                   ?duration_ms
                   ?outcome
                   ?error_code
@@ -7597,14 +8048,25 @@ let next_command =
                ~code:"AUDIT_LOG_ERROR"
                ~message:"Could not append workspace audit log."
            | Ok () ->
-             let%bind status =
+             let%bind migrated_and_status =
                In_thread.run (fun () ->
-                 Sandwalk_store.read_status
-                   ~database_path
-                   ~expected_slug:slug
-                   ())
+                 let open Result.Let_syntax in
+                 let%bind previous_schema_version =
+                   Sandwalk_store.migrate_workspace
+                     ~database_path
+                     ~expected_slug:slug
+                     ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                     ()
+                 in
+                 let%map status =
+                   Sandwalk_store.read_status
+                     ~database_path
+                     ~expected_slug:slug
+                     ()
+                 in
+                 previous_schema_version, status)
              in
-             (match status with
+             (match migrated_and_status with
               | Error error ->
                 let code, message = status_error error in
                 let%bind _ =
@@ -7618,107 +8080,14 @@ let next_command =
                     ()
                 in
                 print_failure_and_exit ~code ~message
-              | Ok status ->
+              | Ok (previous_schema_version, status) ->
                 let phase = Sandwalk_store.Workspace_status.phase status in
-                let workspace_words command =
-                  "sandwalk"
-                  :: command
-                  @ [ "--slug"
-                    ; Sandwalk_core.Slug.to_string slug
-                    ; "--directory-prefix"
-                    ; directory_prefix
-                    ]
-                in
                 let%bind recommendation =
-                  match phase with
-                  | Sandwalk_core.Phase.Initialized
-                  | Scoping ->
-                    Deferred.return
-                      (Ok
-                         (workspace_words
-                            [ "recon"; "start"; "--goal-file"; "goal.md" ]))
-                  | Reconnaissance ->
-                    Deferred.return
-                      (Ok
-                         (workspace_words
-                            [ "recon"
-                            ; "finish"
-                            ; "--summary-file"
-                            ; "recon-summary.md"
-                            ]))
-                  | Planning ->
-                    In_thread.run (fun () ->
-                      Sandwalk_store.read_plan_state
-                        ~database_path
-                        ~expected_slug:slug
-                        ())
-                    >>| Result.map ~f:(fun plan ->
-                      if List.is_empty (Sandwalk_store.Plan_state.steps plan)
-                      then
-                        workspace_words
-                          [ "plan"
-                          ; "add-step"
-                          ; "--key"
-                          ; "research-step"
-                          ; "--title"
-                          ; "Research step"
-                          ]
-                      else if
-                        not
-                          (Option.value_map
-                             (Sandwalk_store.Plan_state.validated_revision plan)
-                             ~default:false
-                             ~f:
-                               (Int.equal
-                                  (Sandwalk_store.Plan_state.revision plan)))
-                      then workspace_words [ "plan"; "validate" ]
-                      else workspace_words [ "plan"; "seal" ])
-                  | Researching ->
-                    let%bind active_claims =
-                      In_thread.run (fun () ->
-                        Sandwalk_store.read_active_claims ~database_path ())
-                    in
-                    (match active_claims with
-                     | Error _ as error -> Deferred.return error
-                     | Ok (_ :: _) ->
-                       Deferred.return (Ok (workspace_words [ "resume" ]))
-                     | Ok [] ->
-                       In_thread.run (fun () ->
-                         Sandwalk_store.read_next_step ~database_path ())
-                       >>| Result.map ~f:(function
-                         | Some key ->
-                           workspace_words
-                             [ "step"
-                             ; "claim"
-                             ; "--step"
-                             ; Sandwalk_core.Plan_step.Key.to_string key
-                             ]
-                         | None -> workspace_words [ "resume" ]))
-                  | Evidence_review ->
-                    Deferred.return
-                      (Ok (workspace_words [ "draft"; "prepare" ]))
-                  | Drafting ->
-                    Deferred.return
-                      (Ok
-                         (workspace_words
-                            [ "draft"
-                            ; "submit"
-                            ; "--report-file"
-                            ; "draft.md"
-                            ]))
-                  | Draft_review ->
-                    Deferred.return
-                      (Ok
-                         (workspace_words
-                            [ "draft"
-                            ; "review"
-                            ; "--review-file"
-                            ; "report-review.json"
-                            ]))
-                  | Finalizing ->
-                    Deferred.return (Ok (workspace_words [ "finalize" ]))
-                  | Completed ->
-                    Deferred.return (Ok (workspace_words [ "status" ]))
+                  recommendation_for_phase
+                    ~database_path
+                    ~slug
+                    ~directory_prefix
+                    ~phase
                 in
                 let phase_text = Sandwalk_core.Phase.to_string phase in
                 (match recommendation with
@@ -7736,8 +8105,11 @@ let next_command =
                        ()
                    in
                    print_failure_and_exit ~code ~message
-                 | Ok words ->
-                   let command = Sandwalk_protocol.Shell_command.of_words words in
+                 | Ok recommendation ->
+                   let command =
+                     Sandwalk_protocol.Shell_command.of_words
+                       recommendation.words
+                   in
                    let finished_at = Time_float_unix.now () in
                    let duration_ms =
                      Time_float.diff finished_at started_at
@@ -7749,6 +8121,20 @@ let next_command =
                        ~kind:`Finished
                        ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
                        ~phase:(Some phase_text)
+                       ~state_changes:
+                         (if
+                            previous_schema_version
+                            < Sandwalk_store.current_schema_version
+                          then
+                            [ `Assoc
+                                [ "entity", `String "workspace.schema"
+                                ; "from", `Int previous_schema_version
+                                ; ( "to"
+                                  , `Int
+                                      Sandwalk_store.current_schema_version )
+                                ]
+                            ]
+                          else [])
                        ~duration_ms
                        ~outcome:"success"
                        ()
@@ -7760,7 +8146,7 @@ let next_command =
                         ~message:"Could not append workspace audit log."
                     | Ok () ->
                       Sandwalk_protocol.Envelope.success
-                        ~result:(`Assoc [ "phase", `String phase_text ])
+                        ~result:(recommendation_result ~phase recommendation)
                         ~next:command
                         ()
                       |> Sandwalk_protocol.Envelope.render

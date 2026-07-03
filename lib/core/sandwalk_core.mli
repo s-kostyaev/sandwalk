@@ -370,6 +370,7 @@ module Resume_pack : sig
     -> recent_commands:(string * string * string option) list
     -> unmatched_commands:string list
     -> events_path:string
+    -> next_action:string
     -> next_command:string
     -> (string, Error.t) Result.t
 end

@@ -6,7 +6,7 @@ Simulate a command whose process exited before recording its terminal event.
   $ printf '%s\n' '{"version":1,"event":"command.started","invocation_id":"crashed-1","timestamp":"2026-07-01 12:00:00Z","command":"plan add-step","phase":"initialized","claim":null,"step":null,"raw_argv":[],"arguments":{},"consumed_references":[],"created_references":[],"state_changes":[],"hint":null}' >> workspaces/recovery-test/logs/events.jsonl
 
   $ sandwalk resume --slug recovery-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"recovery-test","phase":"initialized","resume_path":"workspaces/recovery-test/artifacts/resume/workspace.md"}}
+  {"ok":true,"result":{"slug":"recovery-test","resume_path":"workspaces/recovery-test/artifacts/resume/workspace.md","schema_version":21,"phase":"initialized","action":"start-reconnaissance","reason":"Workspace scope and plan are not yet defined.","advisory":true,"alternatives_possible":true},"next":"'sandwalk' 'recon' 'start' '--goal-file' 'goal.md' '--slug' 'recovery-test' '--directory-prefix' 'workspaces'"}
 
   $ cat workspaces/recovery-test/artifacts/resume/workspace.md
   # Sandwalk resume pack
@@ -34,13 +34,15 @@ Simulate a command whose process exited before recording its terminal event.
   
   ## Recent commands
   
+  These are historical audit entries. They do not override the current phase, active claims, or durable entities above.
+  
   - "init": success
   
   ## Unmatched command starts
   
   - "plan add-step"
   
-  ## Last error or blocker
+  ## Last historical error or blocker
   
   None.
   
@@ -52,10 +54,14 @@ Simulate a command whose process exited before recording its terminal event.
   
   - Event log: "workspaces/recovery-test/logs/events.jsonl"
   
+  ## Recommended next action
+  
+  Workspace scope and plan are not yet defined. This is one deterministic recommendation; other valid actions may exist.
+  
   ## Recommended next command
   
   ```console
-  sandwalk next --slug 'recovery-test' --directory-prefix 'workspaces'
+  'sandwalk' 'recon' 'start' '--goal-file' 'goal.md' '--slug' 'recovery-test' '--directory-prefix' 'workspaces'
   ```
 
   $ find workspaces/recovery-test/artifacts/resume -name '*.tmp.*'
@@ -112,4 +118,32 @@ Durable research identifiers and artifact paths survive context loss.
   - snapshot "snap_00000000000000000000000000000001": "workspace/rich-recovery/artifacts/snapshots/snap_00000000000000000000000000000001"
   - excerpt "excerpt_00000000000000000000000000000001": "fixture-excerpt.md"
   
+  ## Recommended next action
+  
+  Inspect the selected exact excerpt, then attach appropriate evidence with a relation chosen from its semantic role. This is one deterministic recommendation; other valid actions may exist.
+  
   ## Recommended next command
+
+Recovery upgrades legacy state before generating guidance.
+
+  $ mkdir -p legacy/legacy-recovery/database legacy/legacy-recovery/logs \
+  >   legacy/legacy-recovery/artifacts/resume
+  $ ./inspect_workspace.exe --create-v20 \
+  >   legacy/legacy-recovery/database/sandwalk.sqlite3 legacy-recovery
+
+  $ sandwalk resume --slug legacy-recovery --directory-prefix legacy
+  {"ok":true,"result":{"slug":"legacy-recovery","resume_path":"legacy/legacy-recovery/artifacts/resume/workspace.md","schema_version":21,"phase":"researching","action":"claim-step","reason":"The selected dependency-ready plan step has no active claim.","advisory":true,"alternatives_possible":true,"step":"fixture-step"},"next":"'sandwalk' 'step' 'claim' '--step' 'fixture-step' '--slug' 'legacy-recovery' '--directory-prefix' 'legacy'"}
+
+  $ ./inspect_workspace.exe --inspect-claims \
+  >   legacy/legacy-recovery/database/sandwalk.sqlite3
+  completed-step|completed|1|NULL|0
+  fixture-step|suspended|1|NULL|0
+  completed-step|1|completed
+  fixture-step|1|suspended
+
+  $ sed -n '1,5p' legacy/legacy-recovery/artifacts/resume/workspace.md
+  # Sandwalk resume pack
+  
+  - Workspace: "legacy-recovery"
+  - Phase: researching
+  - Schema version: 21

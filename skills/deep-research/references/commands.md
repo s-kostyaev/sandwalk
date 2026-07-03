@@ -142,8 +142,16 @@ sandwalk resume --slug <slug>
 ```
 
 Use `next` for one phase-aware, shell-safe recommendation. Use `resume` after a
-crash or context loss; it regenerates a bounded pack from durable state and
-reports unmatched command starts. Do not repeat a mutating command solely
+crash or context loss; it first applies schema migrations, then regenerates a
+bounded pack from durable state and reports unmatched command starts. Both
+commands return a recommended action and at most one advisory command.
+Alternative legal research actions may exist. When the action requires a
+semantic decision, inspect the selected artifact and choose the excerpt range,
+finding statement, or evidence relation yourself.
+
+Current phase, active claims, and durable entities override chat history,
+controller checklists, and historical errors in the pack. Reconcile any
+session-local plan before continuing. Do not repeat a mutating command solely
 because its prior response was lost: inspect the resume pack first.
 
 After completion, raw payload cleanup is an explicit hash-bound two-step

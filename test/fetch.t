@@ -36,7 +36,7 @@ Research fetches fail before invoking an adapter when no claim is supplied.
   >   --slug fetch-test --directory-prefix workspace \
   >   --adapter ../adapters/curl-pandoc-fetch \
   >   hit_00000000000000000000000000000001
-  {"ok":false,"error":{"code":"FETCH_REQUIRES_CLAIM","message":"Research fetch requires an active claim."}}
+  {"ok":false,"error":{"code":"FETCH_REQUIRES_CLAIM","message":"Research fetch requires an active claim."},"next":"'sandwalk' 'next' '--slug' 'fetch-test' '--directory-prefix' 'workspace'"}
   [1]
 
 An active claim cannot persist a snapshot for another step's hit.

@@ -30,5 +30,5 @@
   $ sandwalk step complete \
   >   --slug rejected-test --directory-prefix workspace \
   >   --claim claim_00000000000000000000000000000001
-  {"ok":false,"error":{"code":"STEP_HAS_REJECTED_FINDINGS","message":"Step \"fixture-step\" has unsupported or contradicted findings."}}
+  {"ok":false,"error":{"code":"STEP_HAS_REJECTED_FINDINGS","message":"Step \"fixture-step\" has unsupported or contradicted findings."},"next":"'sandwalk' 'next' '--slug' 'rejected-test' '--directory-prefix' 'workspace'"}
   [1]

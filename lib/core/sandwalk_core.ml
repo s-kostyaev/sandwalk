@@ -997,6 +997,7 @@ module Resume_pack = struct
         ~recent_commands
         ~unmatched_commands
         ~events_path
+        ~next_action
         ~next_command
     =
     let recent_commands = List.take recent_commands 10 in
@@ -1169,8 +1170,10 @@ module Resume_pack = struct
          @ active_claim_lines
          @ [ ""
            ; "## Recent commands"
-         ; ""
-         ]
+           ; ""
+           ; "These are historical audit entries. They do not override the current phase, active claims, or durable entities above."
+           ; ""
+           ]
          @ command_lines
          @ [ ""
            ; "## Unmatched command starts"
@@ -1178,7 +1181,7 @@ module Resume_pack = struct
            ]
          @ unmatched_lines
          @ [ ""
-           ; "## Last error or blocker"
+           ; "## Last historical error or blocker"
            ; ""
            ; last_error
            ; ""
@@ -1192,6 +1195,10 @@ module Resume_pack = struct
            ]
          @ artifact_lines
          @ [ ""
+           ; "## Recommended next action"
+           ; ""
+           ; next_action
+           ; ""
            ; "## Recommended next command"
            ; ""
            ; command_fence ^ "console"
@@ -1225,6 +1232,7 @@ let%expect_test "renders a bounded mechanical resume pack" =
         ~recent_commands:[ "init", "success", None ]
         ~unmatched_commands:[]
         ~events_path:"workspace/logs/events.jsonl"
+        ~next_action:"Inspect the initialized workspace."
         ~next_command:"sandwalk status --slug 'typed-harness'"
     with
     | Ok pack -> pack
@@ -1258,13 +1266,15 @@ let%expect_test "renders a bounded mechanical resume pack" =
 
     ## Recent commands
 
+    These are historical audit entries. They do not override the current phase, active claims, or durable entities above.
+
     - "init": success
 
     ## Unmatched command starts
 
     - None.
 
-    ## Last error or blocker
+    ## Last historical error or blocker
 
     None.
 
@@ -1275,6 +1285,10 @@ let%expect_test "renders a bounded mechanical resume pack" =
     ## Relevant artifact paths
 
     - Event log: "workspace/logs/events.jsonl"
+
+    ## Recommended next action
+
+    Inspect the initialized workspace.
 
     ## Recommended next command
 

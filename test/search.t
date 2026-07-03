@@ -25,5 +25,5 @@ Create a released-schema v6 workspace with an active claim and search through v7
   >   --slug search-test --directory-prefix workspace \
   >   --query "missing claim" --limit 1 \
   >   --adapter ../adapters/ddgr-search
-  {"ok":false,"error":{"code":"SEARCH_REQUIRES_CLAIM","message":"Research search requires an active claim."}}
+  {"ok":false,"error":{"code":"SEARCH_REQUIRES_CLAIM","message":"Research search requires an active claim."},"next":"'sandwalk' 'next' '--slug' 'search-test' '--directory-prefix' 'workspace'"}
   [1]

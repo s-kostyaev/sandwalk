@@ -44,7 +44,7 @@
   $ test ! -e workspaces/missing
 
   $ sandwalk plan validate --slug typed-harness --directory-prefix workspaces
-  {"ok":false,"error":{"code":"PLAN_VALIDATION_NOT_ALLOWED","message":"Plan cannot be validated in the current phase."}}
+  {"ok":false,"error":{"code":"PLAN_VALIDATION_NOT_ALLOWED","message":"Plan validation is not allowed while the workspace phase is initialized."},"next":"'sandwalk' 'next' '--slug' 'typed-harness' '--directory-prefix' 'workspaces'"}
   [1]
 
   $ sandwalk init --slug ../escape --directory-prefix workspaces

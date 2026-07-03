@@ -95,11 +95,11 @@
 
   $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
   >   --key too-late --title "Too late"
-  {"ok":false,"error":{"code":"PLAN_MUTATION_NOT_ALLOWED","message":"Plan cannot be changed in the current phase."}}
+  {"ok":false,"error":{"code":"PLAN_MUTATION_NOT_ALLOWED","message":"Plan mutation is not allowed while the workspace phase is researching."},"next":"'sandwalk' 'next' '--slug' 'plan-test' '--directory-prefix' 'workspaces'"}
   [1]
 
   $ sandwalk plan validate --slug plan-test --directory-prefix workspaces
-  {"ok":false,"error":{"code":"PLAN_VALIDATION_NOT_ALLOWED","message":"Plan cannot be validated in the current phase."}}
+  {"ok":false,"error":{"code":"PLAN_VALIDATION_NOT_ALLOWED","message":"Plan validation is not allowed while the workspace phase is researching."},"next":"'sandwalk' 'next' '--slug' 'plan-test' '--directory-prefix' 'workspaces'"}
   [1]
 
   $ wc -l < workspaces/plan-test/logs/events.jsonl
@@ -111,7 +111,7 @@
   [1]
 
   $ sandwalk resume --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"researching","resume_path":"workspaces/plan-test/artifacts/resume/workspace.md"}}
+  {"ok":true,"result":{"slug":"plan-test","resume_path":"workspaces/plan-test/artifacts/resume/workspace.md","schema_version":21,"phase":"researching","action":"claim-step","reason":"The selected dependency-ready plan step has no active claim.","advisory":true,"alternatives_possible":true,"step":"primary-sources"},"next":"'sandwalk' 'step' 'claim' '--step' 'primary-sources' '--slug' 'plan-test' '--directory-prefix' 'workspaces'"}
 
   $ sed -n '/## Durable entities/,+6p' workspaces/plan-test/artifacts/resume/workspace.md
   ## Durable entities

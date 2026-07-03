@@ -222,6 +222,53 @@ module Resume_entity : sig
   val detail : t -> string
 end
 
+module Research_guidance : sig
+  type t =
+    | Search of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; query : string
+        }
+    | Fetch of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; hit_id : Sandwalk_core.Hit_id.t
+        }
+    | Create_excerpt of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; snapshot_id : Sandwalk_core.Snapshot_id.t
+        ; document_path : string
+        }
+    | Create_finding of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; excerpt_id : Sandwalk_core.Excerpt_id.t
+        ; excerpt_path : string
+        }
+    | Attach_evidence of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; finding_key : Sandwalk_core.Finding_key.t
+        ; excerpt_id : Sandwalk_core.Excerpt_id.t
+        ; excerpt_path : string
+        }
+    | Seal_finding of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; finding_key : Sandwalk_core.Finding_key.t
+        }
+    | Review_finding of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; finding_key : Sandwalk_core.Finding_key.t
+        }
+    | Complete_step of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        }
+end
+
 module Record_search_result : sig
   type t
 
@@ -522,6 +569,20 @@ val read_active_claims
   -> database_path:string
   -> unit
   -> (Active_claim.t list, Error.t) Result.t
+
+val migrate_workspace
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> now:string
+  -> unit
+  -> (int, Error.t) Result.t
+
+val read_research_guidance
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> unit
+  -> (Research_guidance.t option, Error.t) Result.t
 
 val read_resume_entities
   :  ?busy_timeout_ms:int

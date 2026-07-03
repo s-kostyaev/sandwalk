@@ -297,6 +297,53 @@ module Resume_entity = struct
   let detail t = t.detail
 end
 
+module Research_guidance = struct
+  type t =
+    | Search of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; query : string
+        }
+    | Fetch of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; hit_id : Sandwalk_core.Hit_id.t
+        }
+    | Create_excerpt of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; snapshot_id : Sandwalk_core.Snapshot_id.t
+        ; document_path : string
+        }
+    | Create_finding of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; excerpt_id : Sandwalk_core.Excerpt_id.t
+        ; excerpt_path : string
+        }
+    | Attach_evidence of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; finding_key : Sandwalk_core.Finding_key.t
+        ; excerpt_id : Sandwalk_core.Excerpt_id.t
+        ; excerpt_path : string
+        }
+    | Seal_finding of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; finding_key : Sandwalk_core.Finding_key.t
+        }
+    | Review_finding of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        ; finding_key : Sandwalk_core.Finding_key.t
+        }
+    | Complete_step of
+        { claim_id : Sandwalk_core.Claim_id.t
+        ; step_key : Sandwalk_core.Plan_step.Key.t
+        }
+end
+
 module Record_search_result = struct
   type t =
     { previous_schema_version : int
@@ -3073,6 +3120,387 @@ let read_active_claims ?(busy_timeout_ms = 5_000) ~database_path () =
           else if schema_version > current_schema_version
           then Error (Error.Unsupported_schema_version schema_version)
           else query_active_claims database
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let migrate_workspace
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind previous_schema_version = query_schema_version database in
+            let%bind () =
+              migrate database ~from_version:previous_schema_version ~now
+            in
+            let%bind slug_text, _ = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%map () =
+              if String.equal expected slug_text
+              then Ok ()
+              else
+                Error
+                  (Error.Workspace_slug_mismatch
+                     { expected; actual = slug_text })
+            in
+            previous_schema_version
+          in
+          (match outcome with
+           | Ok previous_schema_version ->
+             let%map () = execute database "COMMIT" in
+             previous_schema_version
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let query_step_title database step_key =
+  with_statement
+    database
+    "SELECT title FROM plan_steps WHERE step_key = ?1"
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Plan_step.Key.to_string step_key)
+      in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_text statement 0)
+      | Sqlite3.Rc.DONE ->
+        Error
+          (Error.Plan_step_not_found
+             (Sandwalk_core.Plan_step.Key.to_string step_key))
+      | return_code ->
+        check database return_code |> Result.map ~f:(Fn.const ""))
+;;
+
+let query_first_unfetched_hit database step_key =
+  with_statement
+    database
+    {|
+SELECT h.hit_ref
+FROM search_hits h
+JOIN search_queries q ON q.query_id = h.query_id
+LEFT JOIN snapshots s ON s.hit_ref = h.hit_ref
+WHERE q.step_key = ?1 AND s.snapshot_ref IS NULL
+ORDER BY q.query_id, h.position
+LIMIT 1
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Plan_step.Key.to_string step_key)
+      in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        Sandwalk_core.Hit_id.of_string (Sqlite3.column_text statement 0)
+        |> Result.of_option
+             ~error:(Error.Database_error "Invalid persisted hit reference")
+        |> Result.map ~f:Option.some
+      | Sqlite3.Rc.DONE -> Ok None
+      | return_code ->
+        check database return_code |> Result.map ~f:(Fn.const None))
+;;
+
+let query_first_snapshot database step_key =
+  with_statement
+    database
+    {|
+SELECT s.snapshot_ref, s.artifact_path
+FROM snapshots s
+LEFT JOIN snapshot_promotions p ON p.snapshot_ref = s.snapshot_ref
+WHERE COALESCE(s.step_key, p.step_key) = ?1
+ORDER BY s.rowid
+LIMIT 1
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text
+          database
+          statement
+          1
+          (Sandwalk_core.Plan_step.Key.to_string step_key)
+      in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        let%map snapshot_id =
+          Sandwalk_core.Snapshot_id.of_string
+            (Sqlite3.column_text statement 0)
+          |> Result.of_option
+               ~error:
+                 (Error.Database_error "Invalid persisted snapshot reference")
+        in
+        Some (snapshot_id, Sqlite3.column_text statement 1)
+      | Sqlite3.Rc.DONE -> Ok None
+      | return_code ->
+        check database return_code |> Result.map ~f:(Fn.const None))
+;;
+
+let query_first_excerpt ?finding database step_key =
+  let sql =
+    match finding with
+    | None ->
+      {|
+SELECT e.excerpt_ref, e.artifact_path
+FROM excerpts e
+WHERE e.step_key = ?1
+ORDER BY e.rowid
+LIMIT 1
+|}
+    | Some _ ->
+      {|
+SELECT e.excerpt_ref, e.artifact_path
+FROM excerpts e
+WHERE e.step_key = ?1
+  AND NOT EXISTS (
+    SELECT 1
+    FROM finding_evidence fe
+    WHERE fe.step_key = ?1
+      AND fe.finding_key = ?2
+      AND fe.revision = ?3
+      AND fe.excerpt_ref = e.excerpt_ref
+  )
+ORDER BY e.rowid
+LIMIT 1
+|}
+  in
+  with_statement database sql ~f:(fun statement ->
+    let open Result.Let_syntax in
+    let%bind () =
+      bind_text
+        database
+        statement
+        1
+        (Sandwalk_core.Plan_step.Key.to_string step_key)
+    in
+    let%bind () =
+      match finding with
+      | None -> Ok ()
+      | Some (finding_key, revision) ->
+        let%bind () =
+          bind_text
+            database
+            statement
+            2
+            (Sandwalk_core.Finding_key.to_string finding_key)
+        in
+        check database (Sqlite3.bind_int statement 3 revision)
+    in
+    match Sqlite3.step statement with
+    | Sqlite3.Rc.ROW ->
+      let%map excerpt_id =
+        Sandwalk_core.Excerpt_id.of_string (Sqlite3.column_text statement 0)
+        |> Result.of_option
+             ~error:
+               (Error.Database_error "Invalid persisted excerpt reference")
+      in
+      Some (excerpt_id, Sqlite3.column_text statement 1)
+    | Sqlite3.Rc.DONE -> Ok None
+    | return_code ->
+      check database return_code |> Result.map ~f:(Fn.const None))
+;;
+
+let query_finding_progress database step_key =
+  let findings = ref [] in
+  let open Result.Let_syntax in
+  let%map () =
+    with_statement
+      database
+      {|
+SELECT f.finding_key, f.state, f.current_revision,
+       EXISTS (
+         SELECT 1
+         FROM finding_evidence fe
+         WHERE fe.step_key = f.step_key
+           AND fe.finding_key = f.finding_key
+           AND fe.revision = f.current_revision
+       ),
+       COALESCE(r.verdict, '')
+FROM findings f
+LEFT JOIN finding_reviews r
+  ON r.step_key = f.step_key
+ AND r.finding_key = f.finding_key
+ AND r.revision = f.current_revision
+WHERE f.step_key = ?1
+ORDER BY f.finding_key
+|}
+      ~f:(fun statement ->
+        let%bind () =
+          bind_text
+            database
+            statement
+            1
+            (Sandwalk_core.Plan_step.Key.to_string step_key)
+        in
+        let rec collect () =
+          match Sqlite3.step statement with
+          | Sqlite3.Rc.ROW ->
+            let%bind finding_key =
+              Sandwalk_core.Finding_key.of_string
+                (Sqlite3.column_text statement 0)
+              |> Result.of_option
+                   ~error:
+                     (Error.Database_error
+                        "Invalid persisted finding key")
+            in
+            findings :=
+              ( finding_key
+              , Sqlite3.column_text statement 1
+              , Sqlite3.column_int statement 2
+              , Sqlite3.column_int statement 3 <> 0
+              , Sqlite3.column_text statement 4 )
+              :: !findings;
+            collect ()
+          | Sqlite3.Rc.DONE -> Ok ()
+          | return_code -> check database return_code
+        in
+        collect ())
+  in
+  List.rev !findings
+;;
+
+let query_research_guidance database =
+  let open Result.Let_syntax in
+  let%bind active_claims = query_active_claims database in
+  match active_claims with
+  | [] -> Ok None
+  | active :: _ ->
+    let claim_id = Active_claim.claim_id active in
+    let step_key = Active_claim.step_key active in
+    let source_guidance () =
+      let%bind snapshot = query_first_snapshot database step_key in
+      match snapshot with
+      | Some (snapshot_id, artifact_path) ->
+        Ok
+          (Research_guidance.Create_excerpt
+             { claim_id
+             ; step_key
+             ; snapshot_id
+             ; document_path = Filename.concat artifact_path "document.md"
+             })
+      | None ->
+        let%bind hit = query_first_unfetched_hit database step_key in
+        (match hit with
+         | Some hit_id ->
+           Ok (Research_guidance.Fetch { claim_id; step_key; hit_id })
+         | None ->
+           let%map query = query_step_title database step_key in
+           Research_guidance.Search { claim_id; step_key; query })
+    in
+    let evidence_guidance finding_key revision =
+      let%bind excerpt =
+        query_first_excerpt
+          ~finding:(finding_key, revision)
+          database
+          step_key
+      in
+      match excerpt with
+      | Some (excerpt_id, excerpt_path) ->
+        Ok
+          (Research_guidance.Attach_evidence
+             { claim_id
+             ; step_key
+             ; finding_key
+             ; excerpt_id
+             ; excerpt_path
+             })
+      | None -> source_guidance ()
+    in
+    let%bind findings = query_finding_progress database step_key in
+    let actionable =
+      List.find findings ~f:(fun (_, state, _, _, verdict) ->
+        not
+          (String.equal state "reviewed"
+           && (String.equal verdict "supported"
+               || String.equal verdict "partially-supported")))
+    in
+    (match actionable with
+     | Some (finding_key, "draft", revision, false, _) ->
+       evidence_guidance finding_key revision
+     | Some (finding_key, "draft", _, true, _) ->
+       Ok
+         (Research_guidance.Seal_finding
+            { claim_id; step_key; finding_key })
+     | Some (finding_key, "sealed", _, _, _) ->
+       Ok
+         (Research_guidance.Review_finding
+            { claim_id; step_key; finding_key })
+     | Some (finding_key, "reviewed", revision, _, verdict)
+       when String.equal verdict "unsupported"
+            || String.equal verdict "contradicted" ->
+       evidence_guidance finding_key revision
+     | Some (_, state, _, _, _) ->
+       Error (Error.Invalid_step_state state)
+     | None ->
+       if not (List.is_empty findings)
+       then
+         Ok
+           (Research_guidance.Complete_step
+              { claim_id; step_key })
+       else (
+         let%bind excerpt = query_first_excerpt database step_key in
+         match excerpt with
+         | Some (excerpt_id, excerpt_path) ->
+           Ok
+             (Research_guidance.Create_finding
+                { claim_id
+                ; step_key
+                ; excerpt_id
+                ; excerpt_path
+                })
+         | None -> source_guidance ()))
+    |> Result.map ~f:Option.some
+;;
+
+let read_research_guidance
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          if schema_version < current_schema_version
+          then
+            Error
+              (Error.Database_error
+                 "Research guidance requires a migrated workspace.")
+          else if schema_version > current_schema_version
+          then Error (Error.Unsupported_schema_version schema_version)
+          else query_research_guidance database
         with
         | exn -> Error (Error.Database_error (Exn.to_string exn)))
       ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))

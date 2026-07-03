@@ -34,7 +34,7 @@ Draft findings cannot be reviewed.
   >   --slug review-test --directory-prefix workspace \
   >   --claim claim_00000000000000000000000000000001 \
   >   --finding fixture-step/fixture-finding --review-file review.json
-  {"ok":false,"error":{"code":"FINDING_NOT_SEALED","message":"Finding \"fixture-step/fixture-finding\" must be sealed before review."}}
+  {"ok":false,"error":{"code":"FINDING_NOT_SEALED","message":"Finding \"fixture-step/fixture-finding\" must be sealed before review."},"next":"'sandwalk' 'next' '--slug' 'review-test' '--directory-prefix' 'workspace'"}
   [1]
 
 A different review cannot silently replace the current revision's review.

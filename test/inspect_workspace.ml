@@ -837,6 +837,7 @@ UPDATE claims
 SET ended_at = '2026-01-01 00:15:00Z',
     end_reason = 'expired'
 WHERE claim_id = 'claim_00000000000000000000000000000001';
+UPDATE workspaces SET phase = 'researching';
 INSERT INTO schema_migrations (version, applied_at)
 VALUES (20, '2026-01-01 00:00:00Z');
 PRAGMA user_version = 20;
@@ -1054,6 +1055,7 @@ let () =
     | [| _; "--inspect-recon"; path |] -> `Inspect_recon, path
     | [| _; "--inspect-extensions"; path |] -> `Inspect_extensions, path
     | [| _; "--inspect-promotions"; path |] -> `Inspect_promotions, path
+    | [| _; "--clear-findings"; path |] -> `Clear_findings, path
     | [| _; "--set-legacy-deadline"; path; step |] ->
       `Set_legacy_deadline step, path
     | [| _; path |] -> `Inspect, path
@@ -1100,6 +1102,11 @@ let () =
       | `Inspect_recon -> inspect_recon database
       | `Inspect_extensions -> inspect_extensions database
       | `Inspect_promotions -> inspect_promotions database
+      | `Clear_findings ->
+        check database (Sqlite3.exec database "DELETE FROM finding_evidence");
+        check database (Sqlite3.exec database "DELETE FROM finding_reviews");
+        check database (Sqlite3.exec database "DELETE FROM finding_revisions");
+        check database (Sqlite3.exec database "DELETE FROM findings")
       | `Set_legacy_deadline step ->
         let statement =
           Sqlite3.prepare

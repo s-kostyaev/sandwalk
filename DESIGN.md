@@ -97,6 +97,12 @@ SQLite uses WAL mode and a configurable busy timeout. Independent commands use
 short transactions. Network and adapter processes must never run inside a
 database transaction.
 
+`resume` and `next` are recovery boundaries. They apply pending schema
+migrations in a short transaction before reading state, so a replacement agent
+never has to infer current semantics from a legacy schema. `status` remains a
+read-only observation and may report an older supported schema until recovery
+or the next mutation upgrades it.
+
 ## Workflow state machine
 
 ```text
@@ -222,7 +228,9 @@ pending | suspended | blocked → claimed → completed
 Every mutating research command associated with a step accepts its claim.
 Commands from a claim that is not the step's current active capability are
 rejected. Interrupted agents recover the same claim identifier from `resume`;
-they do not need to acquire a replacement because time elapsed.
+they do not need to acquire a replacement because time elapsed. A replacement
+session starts only after the prior worker has stopped; two live workers must
+not share one claim capability.
 
 Agents record semantic checkpoints at meaningful milestones:
 
@@ -259,10 +267,13 @@ A resume pack is bounded Markdown containing:
 - the last error or blocker;
 - unresolved items;
 - relevant artifact paths;
+- one recommended next action and why it applies;
 - one recommended next command.
 
 Large artifacts and complete histories are referenced by path rather than
-inlined.
+inlined. The current phase, active claims, and durable entities are
+authoritative. Audit entries and prior errors are explicitly labeled as
+historical and never override current state.
 
 ## Search and fetch adapters
 
@@ -566,6 +577,14 @@ byte budget.
 Sandwalk does not modify hint templates from runtime data. Logs may be analyzed
 offline, and improved versioned templates ship in later releases.
 
+`next` reports a phase-aware action, its reason, and one shell-safe advisory
+command. Research often permits several valid actions, claims, sources, or
+findings. Sandwalk selects one candidate with stable ordering to reduce choice
+load; it does not reject other legal mutations. When progress requires a
+semantic decision such as choosing an excerpt range or evidence relation,
+Sandwalk recommends inspecting a deterministic artifact rather than making the
+decision itself.
+
 ## Portable skill
 
 The deep-research skill is distributed with Sandwalk, not with Ellama.
@@ -578,6 +597,10 @@ The core skill:
 - uses Sandwalk claims when parallel workers are available;
 - loads detailed command references only when needed;
 - keeps the main skill instructions concise.
+
+On session replacement, the skill runs `resume` before acting, treats durable
+Sandwalk state as authoritative over chat or controller checklists, and
+reconciles the local plan before following the recommended action.
 
 Platform-specific installation metadata may be provided separately, but the
 workflow remains canonical and agent-agnostic.

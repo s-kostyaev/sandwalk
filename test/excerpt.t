@@ -64,7 +64,7 @@ Research excerpt creation requires the snapshot-owning claim.
   >   --slug excerpt-test --directory-prefix workspace \
   >   --snapshot snap_00000000000000000000000000000001 \
   >   --lines 4:4
-  {"ok":false,"error":{"code":"EXCERPT_REQUIRES_CLAIM","message":"Research excerpt creation requires an active claim."}}
+  {"ok":false,"error":{"code":"EXCERPT_REQUIRES_CLAIM","message":"Research excerpt creation requires an active claim."},"next":"'sandwalk' 'next' '--slug' 'excerpt-test' '--directory-prefix' 'workspace'"}
   [1]
 
   $ find workspace/excerpt-test/artifacts/excerpts -type f | wc -l | tr -d ' '

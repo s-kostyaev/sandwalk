@@ -40,5 +40,5 @@ Active research claims block cleanup planning.
   $ mkdir -p active/active-gc/database active/active-gc/logs
   $ ./inspect_workspace.exe --create-v7 active/active-gc/database/sandwalk.sqlite3 active-gc
   $ sandwalk gc --slug active-gc --directory-prefix active --raw --plan
-  {"ok":false,"error":{"code":"GC_ACTIVE_CLAIMS","message":"Raw cleanup is blocked while claims are active."}}
+  {"ok":false,"error":{"code":"GC_ACTIVE_CLAIMS","message":"Raw cleanup is blocked while claims are active."},"next":"'sandwalk' 'next' '--slug' 'active-gc' '--directory-prefix' 'active'"}
   [1]

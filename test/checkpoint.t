@@ -38,7 +38,7 @@
   >   workspaces/checkpoint-test/artifacts/resume/workspace.md
   ## Recent commands
   
-  - None.
+  These are historical audit entries. They do not override the current phase, active claims, or durable entities above.
   
 
   $ ./inspect_workspace.exe --set-legacy-deadline \
@@ -55,7 +55,7 @@
   $ sandwalk step checkpoint --slug checkpoint-test --directory-prefix workspaces \
   >   --claim claim_ffffffffffffffffffffffffffffffff \
   >   --summary-file summary.md --next-file next.md
-  {"ok":false,"error":{"code":"CLAIM_NOT_FOUND","message":"Claim does not exist."}}
+  {"ok":false,"error":{"code":"CLAIM_NOT_FOUND","message":"Claim does not exist."},"next":"'sandwalk' 'resume' '--slug' 'checkpoint-test' '--directory-prefix' 'workspaces'"}
   [1]
 
 Create a released-schema v5 fixture and checkpoint through migration v6.

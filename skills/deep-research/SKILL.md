@@ -26,6 +26,26 @@ Choose exactly one writable directory prefix:
 After `sandwalk init --slug <slug>` succeeds, do not initialize that workspace
 again. Continue with `status`, `next`, or `resume` using the same prefix.
 
+## Resume existing research
+
+When the user asks to continue an existing workspace, do not create a new slug
+or reconstruct progress from chat:
+
+First ensure the previous worker has stopped. Never run two sessions
+concurrently with the same claim capability.
+
+1. Run `sandwalk resume --slug <slug>` with the established directory prefix.
+   `resume` upgrades the workspace schema before generating recovery state.
+2. Read the generated resume pack. Current phase, active claims, durable
+   entities, and the recommended action are authoritative. Recent commands and
+   errors are historical context only.
+3. If an agent-controller checklist contradicts Sandwalk, immediately update
+   the checklist to match durable state and reopen any unfinished work.
+4. Follow the recommended action, not merely the recommended command. The
+   command is one deterministic advisory choice; other valid actions may exist.
+   For semantic choices such as excerpt ranges or evidence relations, inspect
+   the indicated artifact and make the choice yourself.
+
 ## Exclusive retrieval
 
 While this skill is active, Sandwalk is the only permitted path for every
@@ -65,8 +85,9 @@ retrieval path.
    the report, review every hashed block, and finalize.
 
 On interruption, run `sandwalk resume` before continuing. Treat the generated
-resume pack and command JSON as authoritative; do not infer state from memory or
-edit the SQLite database, projections, snapshots, excerpts, or audit log.
+resume pack and command JSON as authoritative over chat history and
+session-local plans; do not edit the SQLite database, projections, snapshots,
+excerpts, or audit log.
 
 ## Guardrails
 
@@ -78,8 +99,9 @@ edit the SQLite database, projections, snapshots, excerpts, or audit log.
   identifiers.
 - Never rewrite citation numbering. Use
   `[cite:step-key/finding-key]`; Sandwalk renders final citations.
-- If a command fails, use `sandwalk explain CODE`, repair the stated invariant,
-  and retry.
+- If a command fails, execute its `next` command when present. Otherwise use
+  `sandwalk explain CODE`, repair the stated invariant, and retry. Wrong-phase
+  errors report the current phase.
 - Keep at most one active claim per worker. Claims do not expire; recover the
   existing claim with `resume` after interruption, and checkpoint before handing
   work off.

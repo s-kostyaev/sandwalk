@@ -19,7 +19,7 @@
   [1]
 
   $ sandwalk next --slug guidance-test --directory-prefix workspaces
-  {"ok":true,"result":{"phase":"initialized"},"next":"'sandwalk' 'recon' 'start' '--goal-file' 'goal.md' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
+  {"ok":true,"result":{"phase":"initialized","action":"start-reconnaissance","reason":"Workspace scope and plan are not yet defined.","advisory":true,"alternatives_possible":true},"next":"'sandwalk' 'recon' 'start' '--goal-file' 'goal.md' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
 
   $ sandwalk plan add-step --slug guidance-test --directory-prefix workspaces \
   >   --key source-review --title "Review source"
@@ -36,15 +36,40 @@
   [1]
 
   $ sandwalk next --slug guidance-test --directory-prefix workspaces
-  {"ok":true,"result":{"phase":"planning"},"next":"'sandwalk' 'plan' 'validate' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
+  {"ok":true,"result":{"phase":"planning","action":"validate-plan","reason":"The current plan revision has not been validated.","advisory":true,"alternatives_possible":true},"next":"'sandwalk' 'plan' 'validate' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
 
   $ sandwalk plan validate --slug guidance-test --directory-prefix workspaces >/dev/null
   $ sandwalk next --slug guidance-test --directory-prefix workspaces
-  {"ok":true,"result":{"phase":"planning"},"next":"'sandwalk' 'plan' 'seal' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
+  {"ok":true,"result":{"phase":"planning","action":"seal-plan","reason":"The current plan revision is validated but not sealed.","advisory":true,"alternatives_possible":true},"next":"'sandwalk' 'plan' 'seal' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
 
   $ sandwalk plan seal --slug guidance-test --directory-prefix workspaces >/dev/null
   $ sandwalk next --slug guidance-test --directory-prefix workspaces
-  {"ok":true,"result":{"phase":"researching"},"next":"'sandwalk' 'step' 'claim' '--step' 'source-review' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
+  {"ok":true,"result":{"phase":"researching","action":"claim-step","reason":"The selected dependency-ready plan step has no active claim.","advisory":true,"alternatives_possible":true,"step":"source-review"},"next":"'sandwalk' 'step' 'claim' '--step' 'source-review' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
+
+Wrong-phase failures identify the current phase and route back through durable
+guidance.
+
+  $ sandwalk finalize --slug guidance-test --directory-prefix workspaces
+  {"ok":false,"error":{"code":"FINALIZE_NOT_ALLOWED","message":"Finalization is not allowed while the workspace phase is researching."},"next":"'sandwalk' 'next' '--slug' 'guidance-test' '--directory-prefix' 'workspaces'"}
+  [1]
+
+Research guidance selects one stable candidate without claiming it is the only
+legal action.
+
+  $ mkdir -p active/active-guidance/database active/active-guidance/logs
+  $ ./inspect_workspace.exe --create-v10 \
+  >   active/active-guidance/database/sandwalk.sqlite3 active-guidance
+
+  $ sandwalk next --slug active-guidance --directory-prefix active
+  {"ok":true,"result":{"phase":"researching","action":"attach-evidence","reason":"Inspect the selected exact excerpt, then attach appropriate evidence with a relation chosen from its semantic role.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","finding":"fixture-step/fixture-finding","candidate_excerpt":"excerpt_00000000000000000000000000000001"},"next":"'sed' '-n' '1,200p' 'fixture-excerpt.md'"}
+
+With exact evidence but no finding, the recommendation advances to authoring a
+finding instead of cycling between `next` and `resume`.
+
+  $ ./inspect_workspace.exe --clear-findings \
+  >   active/active-guidance/database/sandwalk.sqlite3
+  $ sandwalk next --slug active-guidance --directory-prefix active
+  {"ok":true,"result":{"phase":"researching","action":"create-finding","reason":"The selected active step has exact evidence but no finding. Author a bounded statement in finding.md.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","candidate_excerpt":"excerpt_00000000000000000000000000000001"},"next":"'sandwalk' 'finding' 'create' '--step' 'fixture-step' '--claim' 'claim_00000000000000000000000000000001' '--key' 'finding' '--claim-file' 'finding.md' '--slug' 'active-guidance' '--directory-prefix' 'active'"}
 
   $ sandwalk next --slug missing --directory-prefix workspaces
   {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}

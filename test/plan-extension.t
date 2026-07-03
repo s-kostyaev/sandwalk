@@ -6,7 +6,7 @@ Extensions are rejected until the initial plan is sealed.
   $ printf 'A source gap appeared during research.' > reason.md
   $ sandwalk plan extend --slug extension-test --directory-prefix workspaces \
   >   --key follow-up --title 'Resolve source gap' --reason-file reason.md
-  {"ok":false,"error":{"code":"PLAN_EXTENSION_NOT_ALLOWED","message":"Plan can be extended only while researching."}}
+  {"ok":false,"error":{"code":"PLAN_EXTENSION_NOT_ALLOWED","message":"Plan extension is not allowed while the workspace phase is initialized."},"next":"'sandwalk' 'next' '--slug' 'extension-test' '--directory-prefix' 'workspaces'"}
   [1]
 
   $ sandwalk plan add-step --slug extension-test --directory-prefix workspaces \
@@ -41,7 +41,7 @@ validated and sealed.
 The new dependency participates in eligibility; the original step remains next.
 
   $ sandwalk next --slug extension-test --directory-prefix workspaces
-  {"ok":true,"result":{"phase":"researching"},"next":"'sandwalk' 'step' 'claim' '--step' 'primary' '--slug' 'extension-test' '--directory-prefix' 'workspaces'"}
+  {"ok":true,"result":{"phase":"researching","action":"claim-step","reason":"The selected dependency-ready plan step has no active claim.","advisory":true,"alternatives_possible":true,"step":"primary"},"next":"'sandwalk' 'step' 'claim' '--step' 'primary' '--slug' 'extension-test' '--directory-prefix' 'workspaces'"}
 
 Invalid dependencies roll back the entire extension.
 
