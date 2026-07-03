@@ -12,10 +12,6 @@ its commands. Use the default compact hint mode (or set
 
 ## Required startup
 
-Before the first Sandwalk or network command, read
-[references/commands.md](references/commands.md) completely. Treat its command
-forms as canonical; do not guess flags or subcommands.
-
 Choose exactly one writable directory prefix:
 
 - If `SANDWALK_DIRECTORY_PREFIX` is non-empty, use it and never pass a
@@ -23,28 +19,42 @@ Choose exactly one writable directory prefix:
 - Otherwise choose one prefix and pass the same `--directory-prefix` to every
   workspace command.
 
-After `sandwalk init --slug <slug>` succeeds, do not initialize that workspace
-again. Continue with `status`, `next`, or `resume` using the same prefix.
+If the user names an existing workspace, start with the continuation loop
+below. Do not initialize it and do not reconstruct its state from chat.
+
+For a new workspace, read
+[references/commands.md](references/commands.md) completely before the first
+Sandwalk or network command. Treat its command forms as canonical; do not guess
+flags or subcommands. After `sandwalk init --slug <slug>` succeeds, never
+initialize that workspace again.
 
 ## Resume existing research
 
-When the user asks to continue an existing workspace, do not create a new slug
-or reconstruct progress from chat:
-
 First ensure the previous worker has stopped. Never run two sessions
-concurrently with the same claim capability.
+concurrently against the same claim. Then repeat this loop:
 
-1. Run `sandwalk resume --slug <slug>` with the established directory prefix.
-   `resume` upgrades the workspace schema before generating recovery state.
-2. Read the generated resume pack. Current phase, active claims, durable
-   entities, and the recommended action are authoritative. Recent commands and
-   errors are historical context only.
-3. If an agent-controller checklist contradicts Sandwalk, immediately update
-   the checklist to match durable state and reopen any unfinished work.
-4. Follow the recommended action, not merely the recommended command. The
-   command is one deterministic advisory choice; other valid actions may exist.
-   For semantic choices such as excerpt ranges or evidence relations, inspect
-   the indicated artifact and make the choice yourself.
+1. Run `sandwalk continue --slug <slug>` with the established directory
+   prefix.
+   If it reports phase `completed`, stop and report the exported result.
+2. Read the returned `artifacts/work/current.json` and every artifact it
+   explicitly asks you to inspect.
+3. Edit only fields inside `editable`. Never change `fixed`, `workspace`,
+   `action`, or identifiers. Make the requested semantic decisions from the
+   exact artifacts, not from memory or search snippets.
+4. Run the exact `sandwalk apply --file ...` command returned by `continue`.
+5. Run the `continue` command returned by `apply` and repeat until the reported
+   phase is `completed`.
+
+The current packet and durable state override chat history, controller
+checklists, old errors, and any lost command response. After compaction,
+uncertainty, or a partially applied action, discard the session-local procedure
+and run `continue` again. It migrates old state and derives a valid action from
+the state that actually committed.
+
+The packet presents one deterministic valid path; other legal research actions
+may exist. If inspecting its fixed artifact shows that candidate is unsuitable,
+do not rewrite `fixed`. Read the detailed command reference, take another legal
+action, and return to `continue`.
 
 ## Exclusive retrieval
 
@@ -68,8 +78,7 @@ retrieval path.
    `document.md`, never from memory or search snippets, before recording the
    objective or sealing the plan.
 3. Record the objective, an append-only step plan, and dependency edges;
-   validate and seal the plan. Run `sandwalk next` when the required command is
-   unclear.
+   validate and seal the plan. Then enter the continuation loop.
 4. Claim one eligible step. When parallel workers are available, give each
    worker a different claim. Otherwise process steps sequentially.
 5. Search, select relevant hit identifiers from the JSON response, fetch those
@@ -84,10 +93,9 @@ retrieval path.
 8. Prepare the writer pack, draft using only its typed citation tokens, submit
    the report, review every hashed block, and finalize.
 
-On interruption, run `sandwalk resume` before continuing. Treat the generated
-resume pack and command JSON as authoritative over chat history and
-session-local plans; do not edit the SQLite database, projections, snapshots,
-excerpts, or audit log.
+On interruption, use the continuation loop. Use `sandwalk resume` only when
+you need its richer crash diagnostics or bounded recovery report. Do not edit
+the SQLite database, projections, snapshots, excerpts, or audit log.
 
 ## Guardrails
 
@@ -99,9 +107,10 @@ excerpts, or audit log.
   identifiers.
 - Never rewrite citation numbering. Use
   `[cite:step-key/finding-key]`; Sandwalk renders final citations.
-- If a command fails, execute its `next` command when present. Otherwise use
-  `sandwalk explain CODE`, repair the stated invariant, and retry. Wrong-phase
-  errors report the current phase.
+- If a manual command fails, execute its `next` command when present. Otherwise
+  use `sandwalk explain CODE`, repair the stated invariant, and retry. If
+  `apply` fails after a child mutation committed, run `continue`; do not replay
+  the entire packet blindly.
 - Keep at most one active claim per worker. Claims do not expire; recover the
-  existing claim with `resume` after interruption, and checkpoint before handing
-  work off.
+  existing claim through `continue` after interruption, and checkpoint before
+  handing work off.

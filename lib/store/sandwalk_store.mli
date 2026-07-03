@@ -193,6 +193,22 @@ module Review_report_result : sig
   val phase : t -> Sandwalk_core.Phase.t
 end
 
+module Current_report_block : sig
+  type t
+
+  val report_revision : t -> int
+  val ordinal : t -> int
+  val block_md5 : t -> string
+  val block_text : t -> string
+end
+
+module Finding_review_context : sig
+  type t
+
+  val statement : t -> string
+  val evidence : t -> (string * string * string) list
+end
+
 module Finalization_state : sig
   type t
 
@@ -583,6 +599,19 @@ val read_research_guidance
   -> database_path:string
   -> unit
   -> (Research_guidance.t option, Error.t) Result.t
+
+val read_current_report_blocks
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> unit
+  -> (Current_report_block.t list, Error.t) Result.t
+
+val read_finding_review_context
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> finding_reference:string
+  -> unit
+  -> (Finding_review_context.t, Error.t) Result.t
 
 val read_resume_entities
   :  ?busy_timeout_ms:int

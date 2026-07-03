@@ -507,11 +507,12 @@ let research_recommendation ~slug ~directory_prefix = function
         [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
         ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
         ; "snapshot", `String (Sandwalk_core.Snapshot_id.to_string snapshot_id)
+        ; "document_path", `String document_path
         ]
     ; alternatives_possible = true
     }
   | Create_finding
-      { claim_id; step_key; excerpt_id; excerpt_path = _ } ->
+      { claim_id; step_key; excerpt_id; excerpt_path } ->
     { action = "create-finding"
     ; reason =
         "The selected active step has exact evidence but no finding. Author a bounded statement in finding.md."
@@ -534,6 +535,7 @@ let research_recommendation ~slug ~directory_prefix = function
         [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
         ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
         ; "candidate_excerpt", `String (Sandwalk_core.Excerpt_id.to_string excerpt_id)
+        ; "candidate_excerpt_path", `String excerpt_path
         ]
     ; alternatives_possible = true
     }
@@ -552,6 +554,7 @@ let research_recommendation ~slug ~directory_prefix = function
                ^ "/"
                ^ Sandwalk_core.Finding_key.to_string finding_key) )
         ; "candidate_excerpt", `String (Sandwalk_core.Excerpt_id.to_string excerpt_id)
+        ; "candidate_excerpt_path", `String excerpt_path
         ]
     ; alternatives_possible = true
     }
@@ -794,6 +797,306 @@ let recommendation_summary recommendation =
     else ""
   in
   recommendation.reason ^ variability
+;;
+
+let recommendation_detail recommendation name =
+  List.Assoc.find recommendation.details ~equal:String.equal name
+;;
+
+let recommendation_detail_string_exn recommendation name =
+  match recommendation_detail recommendation name with
+  | Some (`String value) -> value
+  | _ -> failwithf "Recommendation is missing %s" name ()
+;;
+
+let rec canonical_json = function
+  | `Assoc fields ->
+    fields
+    |> List.map ~f:(fun (name, value) -> name, canonical_json value)
+    |> List.sort ~compare:(fun (left, _) (right, _) ->
+      String.compare left right)
+    |> fun fields -> `Assoc fields
+  | `List values -> `List (List.map values ~f:canonical_json)
+  | (`Null | `Bool _ | `Int _ | `Intlit _ | `Float _ | `String _) as value ->
+    value
+;;
+
+let work_packet_integrity packet =
+  match packet with
+  | `Assoc fields ->
+    fields
+    |> List.filter ~f:(fun (name, _) ->
+      not (String.equal name "editable" || String.equal name "integrity_md5"))
+    |> fun fields -> canonical_json (`Assoc fields)
+    |> Yojson.Safe.to_string
+    |> Md5.digest_string
+    |> Md5.to_hex
+  | _ -> failwith "Work packet must be an object"
+;;
+
+let seal_work_packet = function
+  | `Assoc fields as packet ->
+    `Assoc (fields @ [ "integrity_md5", `String (work_packet_integrity packet) ])
+  | _ -> failwith "Work packet must be an object"
+;;
+
+let packet_workspace ~slug ~directory_prefix =
+  `Assoc
+    [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+    ; "directory_prefix", `String directory_prefix
+    ]
+;;
+
+let generic_work_packet
+      ~slug
+      ~directory_prefix
+      ~phase
+      recommendation
+  =
+  let arguments =
+    match recommendation.words with
+    | "sandwalk" :: arguments -> arguments
+    | arguments -> arguments
+  in
+  `Assoc
+    [ "protocol", `String "sandwalk.work.v1"
+    ; "action", `String "run-command"
+    ; "workflow_action", `String recommendation.action
+    ; "workspace", packet_workspace ~slug ~directory_prefix
+    ; "phase", `String (Sandwalk_core.Phase.to_string phase)
+    ; "instructions", `String recommendation.reason
+    ; "fixed", `Assoc [ "arguments", `List (List.map arguments ~f:(fun value -> `String value)) ]
+    ; "editable", `Assoc []
+    ]
+;;
+
+let work_packet
+      ~workspace
+      ~slug
+      ~directory_prefix
+      ~phase
+      ~report_blocks
+      ~finding_review_context
+      recommendation
+  =
+  let base action instructions fixed editable =
+    `Assoc
+      [ "protocol", `String "sandwalk.work.v1"
+      ; "action", `String action
+      ; "workflow_action", `String recommendation.action
+      ; "workspace", packet_workspace ~slug ~directory_prefix
+      ; "phase", `String (Sandwalk_core.Phase.to_string phase)
+      ; "instructions", `String instructions
+      ; "fixed", `Assoc fixed
+      ; "editable", `Assoc editable
+      ]
+  in
+  match recommendation.action with
+  | "create-excerpt" ->
+    base
+      "create-excerpt"
+      "Read fixed.document_path. Set editable.line_start and editable.line_end to one exact, semantically relevant inclusive range. Do not edit fixed fields or immutable artifacts."
+      [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
+      ; "snapshot", `String (recommendation_detail_string_exn recommendation "snapshot")
+      ; "document_path", `String (recommendation_detail_string_exn recommendation "document_path")
+      ]
+      [ "line_start", `Null; "line_end", `Null ]
+  | "create-finding" ->
+    base
+      "create-finding"
+      "Read fixed.candidate_excerpt_path. Fill a narrow statement supported by that exact excerpt, choose a lowercase-hyphenated key, and choose the excerpt relation. Apply creates, attaches, and seals the finding."
+      [ "step", `String (recommendation_detail_string_exn recommendation "step")
+      ; "claim", `String (recommendation_detail_string_exn recommendation "claim")
+      ; ( "candidate_excerpt"
+        , `String
+            (recommendation_detail_string_exn recommendation "candidate_excerpt") )
+      ; ( "candidate_excerpt_path"
+        , `String
+            (recommendation_detail_string_exn
+               recommendation
+               "candidate_excerpt_path") )
+      ; ( "allowed_relations"
+        , `List
+            (List.map
+               [ "supports"; "contradicts"; "qualifies"; "context" ]
+               ~f:(fun value -> `String value)) )
+      ]
+      [ "key", `String "finding"
+      ; "statement", `String ""
+      ; "relation", `String ""
+      ]
+  | "attach-evidence" ->
+    base
+      "attach-evidence"
+      "Read fixed.candidate_excerpt_path and set editable.relation from fixed.allowed_relations. Apply attaches the exact excerpt and seals the finding."
+      [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
+      ; "finding", `String (recommendation_detail_string_exn recommendation "finding")
+      ; ( "candidate_excerpt"
+        , `String
+            (recommendation_detail_string_exn recommendation "candidate_excerpt") )
+      ; ( "candidate_excerpt_path"
+        , `String
+            (recommendation_detail_string_exn
+               recommendation
+               "candidate_excerpt_path") )
+      ; ( "allowed_relations"
+        , `List
+            (List.map
+               [ "supports"; "contradicts"; "qualifies"; "context" ]
+               ~f:(fun value -> `String value)) )
+      ]
+      [ "relation", `String "" ]
+  | "review-finding" ->
+    let finding_review_context =
+      Option.value_exn finding_review_context
+    in
+    let evidence =
+      Sandwalk_store.Finding_review_context.evidence finding_review_context
+      |> List.map ~f:(fun (excerpt, path, relation) ->
+        `Assoc
+          [ "excerpt", `String excerpt
+          ; "path", `String path
+          ; "relation", `String relation
+          ])
+    in
+    base
+      "review-finding"
+      "Review fixed.statement against every fixed.evidence artifact. Fill every editable review field. Do not add wrapper fields."
+      [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
+      ; "finding", `String (recommendation_detail_string_exn recommendation "finding")
+      ; ( "statement"
+        , `String
+            (Sandwalk_store.Finding_review_context.statement
+               finding_review_context) )
+      ; "evidence", `List evidence
+      ; ( "allowed_verdicts"
+        , `List
+            (List.map
+               [ "supported"
+               ; "partially-supported"
+               ; "unsupported"
+               ; "contradicted"
+               ]
+               ~f:(fun value -> `String value)) )
+      ]
+      [ ( "review"
+        , `Assoc
+            [ "protocol", `String "sandwalk.finding-review.v1"
+            ; "verdict", `String ""
+            ; "summary", `String ""
+            ; "source_quality", `String ""
+            ; "conflicts", `String ""
+            ; "qualifications", `String ""
+            ] )
+      ]
+  | "submit-draft" ->
+    base
+      "submit-report"
+      "Read fixed.writer_pack_path. Fill editable.report_markdown using only current typed citation tokens from that writer pack."
+      [ "writer_pack_path", `String (Sandwalk_runtime.Workspace.writer_pack_path workspace) ]
+      [ "report_markdown", `String "" ]
+  | "review-draft" ->
+    let revision =
+      List.hd report_blocks
+      |> Option.map ~f:Sandwalk_store.Current_report_block.report_revision
+      |> Option.value ~default:0
+    in
+    let contexts, reviews =
+      List.map report_blocks ~f:(fun block ->
+        let ordinal = Sandwalk_store.Current_report_block.ordinal block in
+        let md5 = Sandwalk_store.Current_report_block.block_md5 block in
+        ( `Assoc
+            [ "ordinal", `Int ordinal
+            ; "block_md5", `String md5
+            ; ( "text"
+              , `String (Sandwalk_store.Current_report_block.block_text block) )
+            ]
+        , `Assoc
+            [ "ordinal", `Int ordinal
+            ; "block_md5", `String md5
+            ; "verdict", `String ""
+            ; "summary", `String ""
+            ] ))
+      |> List.unzip
+    in
+    base
+      "review-report"
+      "Review every fixed context block. Fill verdict and summary for every editable review while preserving ordinals and hashes."
+      [ "report_revision", `Int revision
+      ; "context_blocks", `List contexts
+      ; ( "allowed_verdicts"
+        , `List
+            (List.map
+               [ "supported"
+               ; "partially-supported"
+               ; "unsupported"
+               ; "contradicted"
+               ]
+               ~f:(fun value -> `String value)) )
+      ]
+      [ "reviews", `List reviews ]
+  | _ ->
+    generic_work_packet ~slug ~directory_prefix ~phase recommendation
+;;
+
+let json_member_assoc name = function
+  | `Assoc fields ->
+    List.Assoc.find fields ~equal:String.equal name
+    |> Option.value_exn
+  | _ -> failwithf "Expected object containing %s" name ()
+;;
+
+let json_string_member name json =
+  match json_member_assoc name json with
+  | `String value -> value
+  | _ -> failwithf "Expected string field %s" name ()
+;;
+
+let json_int_member name json =
+  match json_member_assoc name json with
+  | `Int value -> value
+  | _ -> failwithf "Expected integer field %s" name ()
+;;
+
+let json_string_list_member name json =
+  match json_member_assoc name json with
+  | `List values ->
+    List.map values ~f:(function
+      | `String value -> value
+      | _ -> failwithf "Expected string values in %s" name ())
+  | _ -> failwithf "Expected list field %s" name ()
+;;
+
+let validate_work_protocol packet =
+  if String.equal (json_string_member "protocol" packet) "sandwalk.work.v1"
+  then (
+    let expected = json_string_member "integrity_md5" packet in
+    let actual = work_packet_integrity packet in
+    if String.equal expected actual
+    then ()
+    else failwith "Work-packet fixed fields were modified")
+  else failwith "Unsupported work packet protocol"
+;;
+
+let work_packet_workspace packet =
+  let workspace = json_member_assoc "workspace" packet in
+  json_string_member "slug" workspace, json_string_member "directory_prefix" workspace
+;;
+
+let run_self_command arguments =
+  let search_path =
+    Sys.getenv "PATH"
+    |> Option.value ~default:""
+    |> String.split ~on:':'
+  in
+  let%bind process =
+    Process.create_exn
+      ~prog_search_path:search_path
+      ~prog:(Sys.get_argv ()).(0)
+      ~args:arguments
+      ()
+  in
+  Process.collect_output_and_wait process
 ;;
 
 let status_command =
@@ -7971,6 +8274,667 @@ let step_command =
     ]
 ;;
 
+let continue_command =
+  Async.Command.async
+    ~summary:"Materialize one durable work packet for the next research action."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let database_path =
+           Sandwalk_runtime.Workspace.database_path workspace
+         in
+         let packet_path =
+           Sandwalk_runtime.Workspace.work_packet_path workspace
+         in
+         let arguments = parsed_arguments ~slug ~directory_prefix in
+         let%bind database_exists = Async.Sys.file_exists_exn database_path in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let started_at = Time_float_unix.now () in
+           let%bind invocation_id =
+             In_thread.run (fun () ->
+               Sandwalk_runtime.invocation_id ~now:started_at)
+           in
+           let append_event
+                 ~kind
+                 ~timestamp
+                 ~phase
+                 ?(state_changes = [])
+                 ?duration_ms
+                 ?outcome
+                 ?error_code
+                 ()
+             =
+             Sandwalk_runtime.Audit.append
+               ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+               (Sandwalk_protocol.Audit_event.create
+                  ~invocation_id
+                  ~timestamp
+                  ~kind
+                  ~command:"continue"
+                  ~arguments
+                  ~phase
+                  ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                  ~state_changes
+                  ?duration_ms
+                  ?outcome
+                  ?error_code
+                  ())
+           in
+           let fail_with_audit ~phase ~code ~message =
+             let finished_at = Time_float_unix.now () in
+             let duration_ms =
+               Time_float.diff finished_at started_at
+               |> Time_float.Span.to_ms
+               |> Float.iround_nearest_exn
+             in
+             let%bind _ =
+               append_event
+                 ~kind:`Failed
+                 ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                 ~phase
+                 ~duration_ms
+                 ~outcome:"failure"
+                 ~error_code:code
+                 ()
+             in
+             print_failure_and_exit ~code ~message
+           in
+           let%bind started =
+             append_event
+               ~kind:`Started
+               ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+               ~phase:None
+               ()
+           in
+           match started with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"AUDIT_LOG_ERROR"
+               ~message:"Could not append workspace audit log."
+           | Ok () ->
+             let%bind migrated_and_status =
+               In_thread.run (fun () ->
+                 let open Result.Let_syntax in
+                 let%bind previous_schema_version =
+                   Sandwalk_store.migrate_workspace
+                     ~database_path
+                     ~expected_slug:slug
+                     ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                     ()
+                 in
+                 let%map status =
+                   Sandwalk_store.read_status
+                     ~database_path
+                     ~expected_slug:slug
+                     ()
+                 in
+                 previous_schema_version, status)
+             in
+             (match migrated_and_status with
+              | Error error ->
+                let code, message = status_error error in
+                fail_with_audit ~phase:None ~code ~message
+              | Ok (previous_schema_version, status) ->
+                let phase = Sandwalk_store.Workspace_status.phase status in
+                let phase_text = Sandwalk_core.Phase.to_string phase in
+                let%bind recommendation =
+                  recommendation_for_phase
+                    ~database_path
+                    ~slug
+                    ~directory_prefix
+                    ~phase
+                in
+                (match recommendation with
+                 | Error error ->
+                   let code, message = status_error error in
+                   fail_with_audit
+                     ~phase:(Some phase_text)
+                     ~code
+                     ~message
+                 | Ok recommendation ->
+                   let%bind report_blocks =
+                     if
+                       Sandwalk_core.Phase.equal
+                         phase
+                         Sandwalk_core.Phase.Draft_review
+                     then
+                       In_thread.run (fun () ->
+                         Sandwalk_store.read_current_report_blocks
+                           ~database_path
+                           ())
+                     else Deferred.return (Ok [])
+                   in
+                   (match report_blocks with
+                    | Error error ->
+                      let code, message = status_error error in
+                      fail_with_audit
+                        ~phase:(Some phase_text)
+                        ~code
+                        ~message
+                    | Ok report_blocks ->
+                      let%bind finding_review_context =
+                        if String.equal recommendation.action "review-finding"
+                        then
+                          In_thread.run (fun () ->
+                            Sandwalk_store.read_finding_review_context
+                              ~database_path
+                              ~finding_reference:
+                                (recommendation_detail_string_exn
+                                   recommendation
+                                   "finding")
+                              ()
+                            |> Result.map ~f:Option.some)
+                        else Deferred.return (Ok None)
+                      in
+                      (match finding_review_context with
+                       | Error error ->
+                         let code, message = status_error error in
+                         fail_with_audit
+                           ~phase:(Some phase_text)
+                           ~code
+                           ~message
+                       | Ok finding_review_context ->
+                         let packet =
+                           work_packet
+                             ~workspace
+                             ~slug
+                             ~directory_prefix
+                             ~phase
+                             ~report_blocks
+                             ~finding_review_context
+                             recommendation
+                           |> seal_work_packet
+                         in
+                      let packet_text = Yojson.Safe.pretty_to_string packet ^ "\n" in
+                      let%bind directory_created =
+                        Deferred.Or_error.try_with (fun () ->
+                          Unix.mkdir ~p:() (Filename.dirname packet_path))
+                      in
+                      (match directory_created with
+                       | Error _ ->
+                         fail_with_audit
+                           ~phase:(Some phase_text)
+                           ~code:"WORKSPACE_IO_ERROR"
+                           ~message:"Could not create work-packet directory."
+                       | Ok () ->
+                         let%bind written =
+                           Sandwalk_runtime.Atomic_file.write
+                             ~path:packet_path
+                             ~temporary_suffix:invocation_id
+                             packet_text
+                         in
+                         (match written with
+                          | Error _ ->
+                            fail_with_audit
+                              ~phase:(Some phase_text)
+                              ~code:"WORKSPACE_IO_ERROR"
+                              ~message:"Could not write current work packet."
+                          | Ok () ->
+                            let finished_at = Time_float_unix.now () in
+                            let duration_ms =
+                              Time_float.diff finished_at started_at
+                              |> Time_float.Span.to_ms
+                              |> Float.iround_nearest_exn
+                            in
+                            let%bind logged =
+                              append_event
+                                ~kind:`Finished
+                                ~timestamp:
+                                  (Sandwalk_runtime.timestamp_utc finished_at)
+                                ~phase:(Some phase_text)
+                                ~state_changes:
+                                  (if
+                                     previous_schema_version
+                                     < Sandwalk_store.current_schema_version
+                                   then
+                                     [ `Assoc
+                                         [ "entity", `String "workspace.schema"
+                                         ; "from", `Int previous_schema_version
+                                         ; ( "to"
+                                           , `Int
+                                               Sandwalk_store
+                                               .current_schema_version )
+                                         ]
+                                     ]
+                                   else [])
+                                ~duration_ms
+                                ~outcome:"success"
+                                ()
+                            in
+                            (match logged with
+                             | Error _ ->
+                               print_failure_and_exit
+                                 ~code:"AUDIT_LOG_ERROR"
+                                 ~message:"Could not append workspace audit log."
+                             | Ok () ->
+                               let result =
+                                 match
+                                   recommendation_result
+                                     ~phase
+                                     recommendation
+                                 with
+                                 | `Assoc fields ->
+                                   `Assoc
+                                     ([ "packet", `String packet_path
+                                      ; ( "loop"
+                                        , `String
+                                            "Read and edit only the packet, apply it, then run continue again." )
+                                      ]
+                                      @ fields)
+                                 | _ -> assert false
+                               in
+                               (if
+                                  Sandwalk_core.Phase.equal
+                                    phase
+                                    Sandwalk_core.Phase.Completed
+                                then
+                                  Sandwalk_protocol.Envelope.success ~result ()
+                                else
+                                  let next =
+                                    Sandwalk_protocol.Shell_command.of_words
+                                      [ "sandwalk"
+                                      ; "apply"
+                                      ; "--file"
+                                      ; packet_path
+                                      ]
+                                  in
+                                  Sandwalk_protocol.Envelope.success
+                                    ~result
+                                    ~next
+                                    ())
+                               |> Sandwalk_protocol.Envelope.render
+                               |> print_endline;
+                               Deferred.unit)))))))))
+;;
+
+let apply_command =
+  Async.Command.async
+    ~summary:"Validate and apply one current Sandwalk work packet."
+    (let%map_open.Command packet_path =
+       flag "--file" (required string) ~doc:"PATH Current work packet"
+     in
+     fun () ->
+       let%bind packet_input =
+         Sandwalk_runtime.File_input.read
+           ~path:packet_path
+           ~maximum_bytes:(3 * 1024 * 1024)
+       in
+       match packet_input with
+       | Error _ ->
+         print_failure_and_exit
+           ~code:"WORK_PACKET_READ_ERROR"
+           ~message:"Could not read the bounded work packet."
+       | Ok packet_input ->
+         let parsed =
+           Or_error.try_with (fun () ->
+             let packet =
+               Yojson.Safe.from_string
+                 (Sandwalk_runtime.File_input.content packet_input)
+             in
+             validate_work_protocol packet;
+             let slug_text, directory_prefix = work_packet_workspace packet in
+             let slug =
+               match Sandwalk_core.Slug.of_string slug_text with
+               | Ok slug -> slug
+               | Error _ -> failwith "Invalid work-packet workspace slug"
+             in
+             let workspace =
+               Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+             in
+             if
+               not
+                 (String.equal
+                    packet_path
+                    (Sandwalk_runtime.Workspace.work_packet_path workspace))
+             then failwith "Only the current workspace packet may be applied";
+             packet, slug, directory_prefix, workspace)
+         in
+         (match parsed with
+          | Error _ ->
+            print_failure_and_exit
+              ~code:"INVALID_WORK_PACKET"
+              ~message:"Work packet is invalid, stale, or unsupported."
+          | Ok (packet, slug, directory_prefix, workspace) ->
+            let action = json_string_member "action" packet in
+            let fixed = json_member_assoc "fixed" packet in
+            let editable = json_member_assoc "editable" packet in
+            let workspace_arguments arguments =
+              arguments
+              @ [ "--slug"
+                ; Sandwalk_core.Slug.to_string slug
+                ; "--directory-prefix"
+                ; directory_prefix
+                ]
+            in
+            let input_path =
+              Sandwalk_runtime.Workspace.work_input_path workspace
+            in
+            let prepared =
+              Or_error.try_with (fun () ->
+                match action with
+                | "run-command" ->
+                  let arguments = json_string_list_member "arguments" fixed in
+                  `Commands [ arguments ], None
+                | "create-excerpt" ->
+                  let first = json_int_member "line_start" editable in
+                  let last = json_int_member "line_end" editable in
+                  if first < 1 || last < first
+                  then failwith "Invalid inclusive excerpt line range";
+                  let command =
+                    workspace_arguments
+                      [ "excerpt"
+                      ; "create"
+                      ; "--claim"
+                      ; json_string_member "claim" fixed
+                      ; "--snapshot"
+                      ; json_string_member "snapshot" fixed
+                      ; "--lines"
+                      ; sprintf "%d:%d" first last
+                      ]
+                  in
+                  `Commands [ command ], None
+                | "create-finding" ->
+                  let relation = json_string_member "relation" editable in
+                  if Option.is_none (Sandwalk_core.Finding_relation.of_string relation)
+                  then failwith "Invalid evidence relation";
+                  let statement = json_string_member "statement" editable in
+                  if String.is_empty (String.strip statement)
+                  then failwith "Finding statement must not be empty";
+                  let key = json_string_member "key" editable in
+                  let step = json_string_member "step" fixed in
+                  let claim = json_string_member "claim" fixed in
+                  let finding = step ^ "/" ^ key in
+                  let excerpt = json_string_member "candidate_excerpt" fixed in
+                  let statement_path = input_path ^ ".md" in
+                  ( `Commands
+                      [ workspace_arguments
+                          [ "finding"
+                          ; "create"
+                          ; "--step"
+                          ; step
+                          ; "--claim"
+                          ; claim
+                          ; "--key"
+                          ; key
+                          ; "--claim-file"
+                          ; statement_path
+                          ]
+                      ; workspace_arguments
+                          [ "finding"
+                          ; "attach"
+                          ; "--claim"
+                          ; claim
+                          ; "--finding"
+                          ; finding
+                          ; "--excerpt"
+                          ; excerpt
+                          ; "--relation"
+                          ; relation
+                          ]
+                      ; workspace_arguments
+                          [ "finding"
+                          ; "seal"
+                          ; "--claim"
+                          ; claim
+                          ; "--finding"
+                          ; finding
+                          ]
+                      ]
+                  , Some (statement_path, statement) )
+                | "attach-evidence" ->
+                  let relation = json_string_member "relation" editable in
+                  if Option.is_none (Sandwalk_core.Finding_relation.of_string relation)
+                  then failwith "Invalid evidence relation";
+                  let claim = json_string_member "claim" fixed in
+                  let finding = json_string_member "finding" fixed in
+                  let excerpt = json_string_member "candidate_excerpt" fixed in
+                  ( `Commands
+                      [ workspace_arguments
+                          [ "finding"
+                          ; "attach"
+                          ; "--claim"
+                          ; claim
+                          ; "--finding"
+                          ; finding
+                          ; "--excerpt"
+                          ; excerpt
+                          ; "--relation"
+                          ; relation
+                          ]
+                      ; workspace_arguments
+                          [ "finding"
+                          ; "seal"
+                          ; "--claim"
+                          ; claim
+                          ; "--finding"
+                          ; finding
+                          ]
+                      ]
+                  , None )
+                | "review-finding" ->
+                  let review = json_member_assoc "review" editable in
+                  let review_path = input_path ^ ".json" in
+                  ( `Commands
+                      [ workspace_arguments
+                          [ "finding"
+                          ; "review"
+                          ; "--claim"
+                          ; json_string_member "claim" fixed
+                          ; "--finding"
+                          ; json_string_member "finding" fixed
+                          ; "--review-file"
+                          ; review_path
+                          ]
+                      ]
+                  , Some (review_path, Yojson.Safe.to_string review ^ "\n") )
+                | "submit-report" ->
+                  let report = json_string_member "report_markdown" editable in
+                  if String.is_empty (String.strip report)
+                  then failwith "Report Markdown must not be empty";
+                  let report_path = input_path ^ ".md" in
+                  ( `Commands
+                      [ workspace_arguments
+                          [ "draft"
+                          ; "submit"
+                          ; "--report-file"
+                          ; report_path
+                          ]
+                      ]
+                  , Some (report_path, report) )
+                | "review-report" ->
+                  let revision = json_int_member "report_revision" fixed in
+                  let reviews = json_member_assoc "reviews" editable in
+                  let review_path = input_path ^ ".json" in
+                  let review =
+                    `Assoc
+                      [ "protocol", `String "sandwalk.report-review.v1"
+                      ; "report_revision", `Int revision
+                      ; "blocks", reviews
+                      ]
+                  in
+                  ( `Commands
+                      [ workspace_arguments
+                          [ "draft"
+                          ; "review"
+                          ; "--review-file"
+                          ; review_path
+                          ]
+                      ]
+                  , Some (review_path, Yojson.Safe.to_string review ^ "\n") )
+                | _ -> failwith "Unsupported work packet action")
+            in
+            (match prepared with
+             | Error _ ->
+               print_failure_and_exit
+                 ~code:"INVALID_WORK_PACKET"
+                 ~message:
+                   "Fill every editable field with a valid value and retry apply."
+             | Ok (`Commands commands, input) ->
+               let started_at = Time_float_unix.now () in
+               let%bind invocation_id =
+                 In_thread.run (fun () ->
+                   Sandwalk_runtime.invocation_id ~now:started_at)
+               in
+               let phase_text = json_string_member "phase" packet in
+               let append_event
+                     ~kind
+                     ~timestamp
+                     ?duration_ms
+                     ?outcome
+                     ?error_code
+                     ()
+                 =
+                 Sandwalk_runtime.Audit.append
+                   ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                   (Sandwalk_protocol.Audit_event.create
+                      ~invocation_id
+                      ~timestamp
+                      ~kind
+                      ~command:"apply"
+                      ~arguments:
+                        (`Assoc
+                           [ "file", `String packet_path
+                           ; ( "slug"
+                             , `String (Sandwalk_core.Slug.to_string slug) )
+                           ; "directory_prefix", `String directory_prefix
+                           ])
+                      ~phase:(Some phase_text)
+                      ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                      ~state_changes:[]
+                      ?duration_ms
+                      ?outcome
+                      ?error_code
+                      ())
+               in
+               let finish_event ~kind ~outcome ?error_code () =
+                 let finished_at = Time_float_unix.now () in
+                 let duration_ms =
+                   Time_float.diff finished_at started_at
+                   |> Time_float.Span.to_ms
+                   |> Float.iround_nearest_exn
+                 in
+                 append_event
+                   ~kind
+                   ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                   ~duration_ms
+                   ~outcome
+                   ?error_code
+                   ()
+               in
+               let%bind started =
+                 append_event
+                   ~kind:`Started
+                   ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                   ()
+               in
+               (match started with
+                | Error _ ->
+                  print_failure_and_exit
+                    ~code:"AUDIT_LOG_ERROR"
+                    ~message:"Could not append workspace audit log."
+                | Ok () ->
+                  let%bind input_written =
+                    match input with
+                    | None -> Deferred.return (Ok ())
+                    | Some (path, content) ->
+                      Sandwalk_runtime.Atomic_file.write
+                        ~path
+                        ~temporary_suffix:invocation_id
+                        content
+                  in
+                  (match input_written with
+                   | Error _ ->
+                     let%bind _ =
+                       finish_event
+                         ~kind:`Failed
+                         ~outcome:"failure"
+                         ~error_code:"WORKSPACE_IO_ERROR"
+                         ()
+                     in
+                     print_failure_and_exit
+                       ~code:"WORKSPACE_IO_ERROR"
+                       ~message:"Could not materialize work-packet input."
+                   | Ok () ->
+                     let rec run = function
+                       | [] -> Deferred.return (Ok ())
+                       | command :: rest ->
+                         let%bind output = run_self_command command in
+                         (match
+                            Core_unix.Exit_or_signal.or_error output.exit_status
+                          with
+                          | Ok () -> run rest
+                          | Error _ ->
+                            if not (String.is_empty output.stdout)
+                            then print_string output.stdout;
+                            if not (String.is_empty output.stderr)
+                            then eprintf "%s" output.stderr;
+                            Deferred.return (Error ()))
+                     in
+                     let%bind applied = run commands in
+                     (match applied with
+                      | Error () ->
+                        let%bind _ =
+                          finish_event
+                            ~kind:`Failed
+                            ~outcome:"failure"
+                            ~error_code:"APPLY_COMMAND_FAILED"
+                            ()
+                        in
+                        Shutdown.exit 1
+                      | Ok () ->
+                        let%bind logged =
+                          finish_event ~kind:`Finished ~outcome:"success" ()
+                        in
+                        (match logged with
+                         | Error _ ->
+                           print_failure_and_exit
+                             ~code:"AUDIT_LOG_ERROR"
+                             ~message:"Could not append workspace audit log."
+                         | Ok () ->
+                           let next =
+                             Sandwalk_protocol.Shell_command.of_words
+                               [ "sandwalk"
+                               ; "continue"
+                               ; "--slug"
+                               ; Sandwalk_core.Slug.to_string slug
+                               ; "--directory-prefix"
+                               ; directory_prefix
+                               ]
+                           in
+                           Sandwalk_protocol.Envelope.success
+                             ~result:
+                               (`Assoc
+                                  [ "applied", `String action
+                                  ; "packet", `String packet_path
+                                  ])
+                             ~next
+                             ()
+                           |> Sandwalk_protocol.Envelope.render
+                           |> print_endline;
+                           Deferred.unit)))))))
+;;
+
 let next_command =
   Async.Command.async
     ~summary:"Recommend one deterministic command from durable workspace state."
@@ -8158,6 +9122,8 @@ let command =
   Async.Command.group
     ~summary:"Deterministic research orchestration for AI agents."
     [ "about", about_command
+    ; "apply", apply_command
+    ; "continue", continue_command
     ; "draft", draft_command
     ; "explain", explain_command
     ; "excerpt", excerpt_command

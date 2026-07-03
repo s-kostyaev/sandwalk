@@ -136,14 +136,22 @@ a new complete report revision after repair. Finalization writes
 
 ```console
 sandwalk status --slug <slug>
+sandwalk continue --slug <slug>
+sandwalk apply --file <workspace>/artifacts/work/current.json
 sandwalk next --slug <slug>
 sandwalk explain <ERROR_CODE>
 sandwalk resume --slug <slug>
 ```
 
-Use `next` for one phase-aware, shell-safe recommendation. Use `resume` after a
-crash or context loss; it first applies schema migrations, then regenerates a
-bounded pack from durable state and reports unmatched command starts. Both
+Use `continue` as the normal agent loop. It migrates the workspace and writes a
+bounded current packet. Inspect its referenced artifacts, change only
+`editable`, run the returned `apply`, then follow the returned `continue`.
+`apply` supplies fixed identifiers and command flags and validates the semantic
+fields. Stop when `continue` reports phase `completed`.
+
+Use `next` for a read-only phase-aware, shell-safe recommendation. Use `resume`
+for detailed crash diagnostics; it applies schema migrations, regenerates a
+bounded pack from durable state, and reports unmatched command starts. These
 commands return a recommended action and at most one advisory command.
 Alternative legal research actions may exist. When the action requires a
 semantic decision, inspect the selected artifact and choose the excerpt range,

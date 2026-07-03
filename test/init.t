@@ -8,6 +8,7 @@
   workspaces/typed-harness/artifacts/resume
   workspaces/typed-harness/artifacts/snapshots
   workspaces/typed-harness/artifacts/temporary
+  workspaces/typed-harness/artifacts/work
   workspaces/typed-harness/database
   workspaces/typed-harness/exports
   workspaces/typed-harness/logs

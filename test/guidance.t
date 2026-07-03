@@ -61,7 +61,7 @@ legal action.
   >   active/active-guidance/database/sandwalk.sqlite3 active-guidance
 
   $ sandwalk next --slug active-guidance --directory-prefix active
-  {"ok":true,"result":{"phase":"researching","action":"attach-evidence","reason":"Inspect the selected exact excerpt, then attach appropriate evidence with a relation chosen from its semantic role.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","finding":"fixture-step/fixture-finding","candidate_excerpt":"excerpt_00000000000000000000000000000001"},"next":"'sed' '-n' '1,200p' 'fixture-excerpt.md'"}
+  {"ok":true,"result":{"phase":"researching","action":"attach-evidence","reason":"Inspect the selected exact excerpt, then attach appropriate evidence with a relation chosen from its semantic role.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","finding":"fixture-step/fixture-finding","candidate_excerpt":"excerpt_00000000000000000000000000000001","candidate_excerpt_path":"fixture-excerpt.md"},"next":"'sed' '-n' '1,200p' 'fixture-excerpt.md'"}
 
 With exact evidence but no finding, the recommendation advances to authoring a
 finding instead of cycling between `next` and `resume`.
@@ -69,7 +69,7 @@ finding instead of cycling between `next` and `resume`.
   $ ./inspect_workspace.exe --clear-findings \
   >   active/active-guidance/database/sandwalk.sqlite3
   $ sandwalk next --slug active-guidance --directory-prefix active
-  {"ok":true,"result":{"phase":"researching","action":"create-finding","reason":"The selected active step has exact evidence but no finding. Author a bounded statement in finding.md.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","candidate_excerpt":"excerpt_00000000000000000000000000000001"},"next":"'sandwalk' 'finding' 'create' '--step' 'fixture-step' '--claim' 'claim_00000000000000000000000000000001' '--key' 'finding' '--claim-file' 'finding.md' '--slug' 'active-guidance' '--directory-prefix' 'active'"}
+  {"ok":true,"result":{"phase":"researching","action":"create-finding","reason":"The selected active step has exact evidence but no finding. Author a bounded statement in finding.md.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","candidate_excerpt":"excerpt_00000000000000000000000000000001","candidate_excerpt_path":"fixture-excerpt.md"},"next":"'sandwalk' 'finding' 'create' '--step' 'fixture-step' '--claim' 'claim_00000000000000000000000000000001' '--key' 'finding' '--claim-file' 'finding.md' '--slug' 'active-guidance' '--directory-prefix' 'active'"}
 
   $ sandwalk next --slug missing --directory-prefix workspaces
   {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}

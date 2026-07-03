@@ -67,6 +67,9 @@ The workspace root is:
 │   ├── excerpts/
 │   ├── resume/
 │   │   └── workspace.md
+│   ├── work/
+│   │   ├── current.json
+│   │   └── current-input.*
 │   └── temporary/
 ├── exports/
 │   ├── research-plan.md
@@ -91,13 +94,14 @@ not select an implicit `latest` workspace.
 sandwalk init --slug <slug> [--directory-prefix <path>]
 sandwalk status --slug <slug> [--directory-prefix <path>]
 sandwalk resume --slug <slug> [--directory-prefix <path>]
+sandwalk continue --slug <slug> [--directory-prefix <path>]
 ```
 
 SQLite uses WAL mode and a configurable busy timeout. Independent commands use
 short transactions. Network and adapter processes must never run inside a
 database transaction.
 
-`resume` and `next` are recovery boundaries. They apply pending schema
+`resume`, `next`, and `continue` are recovery boundaries. They apply pending schema
 migrations in a short transaction before reading state, so a replacement agent
 never has to infer current semantics from a legacy schema. `status` remains a
 read-only observation and may report an older supported schema until recovery
@@ -274,6 +278,41 @@ Large artifacts and complete histories are referenced by path rather than
 inlined. The current phase, active claims, and durable entities are
 authoritative. Audit entries and prior errors are explicitly labeled as
 historical and never override current state.
+
+### Packet-driven continuation
+
+`continue` is the primary continuation boundary for an agent session. It
+derives one legal forward action from current durable state and atomically
+replaces `artifacts/work/current.json` with a bounded
+`sandwalk.work.v1` packet. The packet separates immutable mechanical context
+under `fixed` from the semantic fields the agent may fill under `editable`.
+It includes exact artifact paths, allowed enum values, and complete nested
+review protocols where applicable.
+
+The agent reads the referenced artifacts, edits only `editable`, and invokes
+the single returned command:
+
+```console
+sandwalk apply --file <workspace>/artifacts/work/current.json
+```
+
+`apply` accepts only the current packet at the path derived from its embedded
+workspace identity. An integrity hash covers every field except `editable`, so
+changing fixed context invalidates the packet before a child command runs.
+`apply` validates editable values, materializes bounded input files under
+`artifacts/work/`, and invokes the ordinary invariant-checking commands with
+the fixed identifiers and flags. A successful apply emits only one `continue`
+command. Multi-command applications, such as create/attach/seal, are
+deliberately crash-recoverable rather than transactionally combined: each
+child mutation is durable and a subsequent `continue` derives the legal action
+from the resulting intermediate state.
+
+The selected packet is one deterministic valid path, not a declaration that
+no alternative exists. Stable selection reduces agent choice load. If source
+inspection shows that the selected semantic path is unsuitable, the agent may
+perform another legal mutation using the detailed command reference, then
+return to `continue`; it must never alter `fixed` to smuggle in a different
+identity.
 
 ## Search and fetch adapters
 
@@ -585,6 +624,13 @@ semantic decision such as choosing an excerpt range or evidence relation,
 Sandwalk recommends inspecting a deterministic artifact rather than making the
 decision itself.
 
+`continue` exposes the same recommendation as a durable work packet and is the
+default agent loop. `apply` suppresses successful child-command payloads so
+the loop remains bounded, but preserves failed child output for diagnosis.
+Both orchestration commands have their own audit events; child mutations retain
+their ordinary events. Once `continue` observes `completed`, it emits no next
+command and the loop terminates.
+
 ## Portable skill
 
 The deep-research skill is distributed with Sandwalk, not with Ellama.
@@ -598,9 +644,11 @@ The core skill:
 - loads detailed command references only when needed;
 - keeps the main skill instructions concise.
 
-On session replacement, the skill runs `resume` before acting, treats durable
-Sandwalk state as authoritative over chat or controller checklists, and
-reconciles the local plan before following the recommended action.
+On session replacement, the skill runs `continue`, treats the generated current
+packet and durable Sandwalk state as authoritative over chat or controller
+checklists, and stays in the `continue → edit editable → apply` loop. `resume`
+remains the richer diagnostic boundary for crashes, unmatched audit starts, and
+manual recovery.
 
 Platform-specific installation metadata may be provided separately, but the
 workflow remains canonical and agent-agnostic.

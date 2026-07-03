@@ -251,6 +251,30 @@ module Review_report_result = struct
   let phase t = t.phase
 end
 
+module Current_report_block = struct
+  type t =
+    { report_revision : int
+    ; ordinal : int
+    ; block_md5 : string
+    ; block_text : string
+    }
+
+  let report_revision t = t.report_revision
+  let ordinal t = t.ordinal
+  let block_md5 t = t.block_md5
+  let block_text t = t.block_text
+end
+
+module Finding_review_context = struct
+  type t =
+    { statement : string
+    ; evidence : (string * string * string) list
+    }
+
+  let statement t = t.statement
+  let evidence t = t.evidence
+end
+
 module Finalization_state = struct
   type t =
     { report_revision : int
@@ -3506,6 +3530,145 @@ let read_research_guidance
       ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
   with
   | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let read_current_report_blocks
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          if schema_version < 13
+          then Ok []
+          else if schema_version > current_schema_version
+          then Error (Error.Unsupported_schema_version schema_version)
+          else (
+            let blocks = ref [] in
+            let%map () =
+              check
+                database
+                (Sqlite3.exec
+                   database
+                   {|
+SELECT b.report_revision, b.ordinal, b.block_md5, b.block_text
+FROM report_blocks b
+JOIN reports r ON r.revision = b.report_revision
+WHERE r.current = 1
+ORDER BY b.ordinal
+|}
+                   ~cb:(fun row _headers ->
+                     match row with
+                     | [| Some revision; Some ordinal; Some md5; Some text |] ->
+                       blocks :=
+                         { Current_report_block.report_revision =
+                             Int.of_string revision
+                         ; ordinal = Int.of_string ordinal
+                         ; block_md5 = md5
+                         ; block_text = text
+                         }
+                         :: !blocks
+                     | _ -> failwith "Invalid persisted report block"))
+            in
+            List.rev !blocks)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let read_finding_review_context
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~finding_reference
+      ()
+  =
+  match String.lsplit2 finding_reference ~on:'/' with
+  | None -> Error (Error.Finding_not_found finding_reference)
+  | Some (step, finding) ->
+    (try
+       let database = Sqlite3.db_open ~mode:`READONLY database_path in
+       Exn.protect
+         ~f:(fun () ->
+           try
+             Sqlite3.busy_timeout database busy_timeout_ms;
+             let open Result.Let_syntax in
+             let%bind schema_version = query_schema_version database in
+             if schema_version < 11
+             then Error (Error.Finding_not_found finding_reference)
+             else if schema_version > current_schema_version
+             then Error (Error.Unsupported_schema_version schema_version)
+             else (
+               let%bind statement =
+                 with_statement
+                   database
+                   {|
+SELECT fr.claim_text
+FROM findings f
+JOIN finding_revisions fr
+  ON fr.step_key = f.step_key
+ AND fr.finding_key = f.finding_key
+ AND fr.revision = f.current_revision
+WHERE f.step_key = ?1 AND f.finding_key = ?2
+|}
+                   ~f:(fun query ->
+                     let%bind () = bind_text database query 1 step in
+                     let%bind () = bind_text database query 2 finding in
+                     match Sqlite3.step query with
+                     | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_text query 0)
+                     | Sqlite3.Rc.DONE ->
+                       Error (Error.Finding_not_found finding_reference)
+                     | return_code ->
+                       check database return_code
+                       |> Result.map ~f:(fun () -> assert false))
+               in
+               let evidence = ref [] in
+               let%map () =
+                 with_statement
+                   database
+                   {|
+SELECT fe.excerpt_ref, e.artifact_path, fe.relation
+FROM findings f
+JOIN finding_evidence fe
+  ON fe.step_key = f.step_key
+ AND fe.finding_key = f.finding_key
+ AND fe.revision = f.current_revision
+JOIN excerpts e ON e.excerpt_ref = fe.excerpt_ref
+WHERE f.step_key = ?1 AND f.finding_key = ?2
+ORDER BY fe.excerpt_ref, fe.relation
+|}
+                   ~f:(fun query ->
+                     let%bind () = bind_text database query 1 step in
+                     let%bind () = bind_text database query 2 finding in
+                     let rec loop () =
+                       match Sqlite3.step query with
+                       | Sqlite3.Rc.ROW ->
+                         evidence :=
+                           ( Sqlite3.column_text query 0
+                           , Sqlite3.column_text query 1
+                           , Sqlite3.column_text query 2 )
+                           :: !evidence;
+                         loop ()
+                       | Sqlite3.Rc.DONE -> Ok ()
+                       | return_code -> check database return_code
+                     in
+                     loop ())
+               in
+               { Finding_review_context.statement
+               ; evidence = List.rev !evidence
+               })
+           with
+           | exn -> Error (Error.Database_error (Exn.to_string exn)))
+         ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+     with
+     | exn -> Error (Error.Database_error (Exn.to_string exn)))
 ;;
 
 let query_resume_entities database ~schema_version =
