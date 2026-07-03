@@ -53,8 +53,13 @@ the state that actually committed.
 
 The packet presents one deterministic valid path; other legal research actions
 may exist. If inspecting its fixed artifact shows that candidate is unsuitable,
-do not rewrite `fixed`. Read the detailed command reference, take another legal
-action, and return to `continue`.
+set its editable decision to `reject`, give a concise reason, and apply the
+packet. Sandwalk will durably skip it and derive another action. Never create an
+excerpt or finding from a bot challenge, access-denied page, irrelevant result,
+or content that does not address the packet's research objective and step.
+
+Search packets contain an editable query. Confirm that it names the research
+subject and current step goal; refine it before apply when it is ambiguous.
 
 ## Exclusive retrieval
 
@@ -103,6 +108,8 @@ the SQLite database, projections, snapshots, excerpts, or audit log.
 - Preserve source disagreement using `contradicts` or `qualifies`; never erase
   it to force consensus.
 - Cite exact excerpts, not search snippets or remembered page content.
+- Never query or edit the Sandwalk SQLite database directly. Candidate
+  selection and recovery must go through the current packet.
 - Never fabricate or manually alter `hit_`, `snap_`, `excerpt_`, or `claim_`
   identifiers.
 - Never rewrite citation numbering. Use
@@ -114,3 +121,5 @@ the SQLite database, projections, snapshots, excerpts, or audit log.
 - Keep at most one active claim per worker. Claims do not expire; recover the
   existing claim through `continue` after interruption, and checkpoint before
   handing work off.
+- Relation `context` is supplemental. Every finding needs at least one
+  `supports`, `contradicts`, or `qualifies` excerpt before sealing.

@@ -29,6 +29,8 @@ module Error : sig
     | Invalid_step_state of string
     | Claim_not_found
     | Claim_not_active
+    | Candidate_not_found of string
+    | Candidate_not_owned_by_claim of string
     | Search_wrong_phase of Sandwalk_core.Phase.t
     | Search_requires_claim
     | Hit_id_collision
@@ -57,6 +59,9 @@ module Error : sig
     | Step_has_no_findings of string
     | Step_has_unreviewed_findings of string
     | Step_has_rejected_findings of string
+    | Finding_repair_wrong_phase of Sandwalk_core.Phase.t
+    | Finding_repair_requires_completed_step of string
+    | Finding_repair_has_completed_dependents of string
     | Draft_wrong_phase of Sandwalk_core.Phase.t
     | Draft_gate_failed
     | Report_wrong_phase of Sandwalk_core.Phase.t
@@ -160,6 +165,25 @@ module Complete_step_result : sig
   val phase : t -> Sandwalk_core.Phase.t
 end
 
+module Candidate_rejection_result : sig
+  type t
+
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val kind : t -> Sandwalk_core.Candidate_kind.t
+  val reference : t -> string
+  val rejected : t -> bool
+end
+
+module Repair_finding_result : sig
+  type t
+
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val finding_key : t -> Sandwalk_core.Finding_key.t
+  val revision : t -> int
+  val suspended_claims : t -> int
+  val rejected_excerpts : t -> int
+end
+
 module Writer_evidence : sig
   type t
 
@@ -209,6 +233,14 @@ module Finding_review_context : sig
   val evidence : t -> (string * string * string) list
 end
 
+module Step_context : sig
+  type t
+
+  val objective : t -> string
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val step_title : t -> string
+end
+
 module Finalization_state : sig
   type t
 
@@ -249,6 +281,9 @@ module Research_guidance : sig
         { claim_id : Sandwalk_core.Claim_id.t
         ; step_key : Sandwalk_core.Plan_step.Key.t
         ; hit_id : Sandwalk_core.Hit_id.t
+        ; title : string
+        ; url : string
+        ; snippet : string
         }
     | Create_excerpt of
         { claim_id : Sandwalk_core.Claim_id.t
@@ -606,12 +641,48 @@ val read_current_report_blocks
   -> unit
   -> (Current_report_block.t list, Error.t) Result.t
 
+val read_step_context
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> step_key:string
+  -> unit
+  -> (Step_context.t, Error.t) Result.t
+
 val read_finding_review_context
   :  ?busy_timeout_ms:int
   -> database_path:string
   -> finding_reference:string
   -> unit
   -> (Finding_review_context.t, Error.t) Result.t
+
+val reject_candidate
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> kind:Sandwalk_core.Candidate_kind.t
+  -> reference:string
+  -> reason_text:string
+  -> reason_path:string
+  -> reason_md5:string
+  -> reason_size:int
+  -> now:string
+  -> unit
+  -> (Candidate_rejection_result.t, Error.t) Result.t
+
+val repair_finding
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> step_key:Sandwalk_core.Plan_step.Key.t
+  -> finding_key:Sandwalk_core.Finding_key.t
+  -> reason_text:string
+  -> reason_path:string
+  -> reason_md5:string
+  -> reason_size:int
+  -> now:string
+  -> unit
+  -> (Repair_finding_result.t, Error.t) Result.t
 
 val read_resume_entities
   :  ?busy_timeout_ms:int

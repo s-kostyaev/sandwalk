@@ -302,6 +302,17 @@ module Step_state : sig
   val of_string : string -> t option
 end
 
+module Candidate_kind : sig
+  type t =
+    | Hit
+    | Snapshot
+    | Excerpt
+  [@@deriving equal, sexp]
+
+  val to_string : t -> string
+  val of_string : string -> t option
+end
+
 module Claim_decision : sig
   module Error : sig
     type t =

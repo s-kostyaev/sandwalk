@@ -62,6 +62,8 @@ It binds the immutable snapshot to the claimed step without fetching it again.
 Evidence relations are `supports`, `contradicts`, `qualifies`, and `context`.
 Attaching evidence to an already sealed finding creates a new revision that
 must be sealed and reviewed again.
+`context` cannot seal a finding by itself; at least one excerpt must use
+`supports`, `contradicts`, or `qualifies`.
 
 Checkpoint long work or handoffs:
 
@@ -149,6 +151,11 @@ bounded current packet. Inspect its referenced artifacts, change only
 `apply` supplies fixed identifiers and command flags and validates the semantic
 fields. Stop when `continue` reports phase `completed`.
 
+Search packets provide an editable subject-aware query. Candidate packets
+require `accept` or `reject`; rejection reasons are persisted and the rejected
+hit, snapshot, or excerpt will not be recommended again. Do not force unusable
+content through the workflow.
+
 Use `next` for a read-only phase-aware, shell-safe recommendation. Use `resume`
 for detailed crash diagnostics; it applies schema migrations, regenerates a
 bounded pack from durable state, and reports unmatched command starts. These
@@ -161,6 +168,17 @@ Current phase, active claims, and durable entities override chat history,
 controller checklists, and historical errors in the pack. Reconcile any
 session-local plan before continuing. Do not repeat a mutating command solely
 because its prior response was lost: inspect the resume pack first.
+
+Before drafting, a completed finding with a bad semantic review can be reopened:
+
+```console
+sandwalk finding repair --slug <slug> --finding <step>/<finding> \
+  --reason-file <reason.md>
+```
+
+This suspends active claims, reopens the completed step, creates a fresh draft
+revision without evidence, and rejects the prior revision's excerpts for that
+step. It is rejected after a dependent step has completed.
 
 After completion, raw payload cleanup is an explicit hash-bound two-step
 operation:

@@ -844,6 +844,21 @@ PRAGMA user_version = 20;
 |})
 ;;
 
+let create_v21 database slug =
+  create_v20 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+UPDATE step_executions SET state = 'suspended' WHERE state = 'expired';
+UPDATE claims SET end_reason = 'suspended' WHERE end_reason = 'expired';
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (21, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 21;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -1041,6 +1056,7 @@ let () =
     | [| _; "--create-v18"; path; slug |] -> `Create (18, slug), path
     | [| _; "--create-v19"; path; slug |] -> `Create (19, slug), path
     | [| _; "--create-v20"; path; slug |] -> `Create (20, slug), path
+    | [| _; "--create-v21"; path; slug |] -> `Create (21, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
@@ -1086,6 +1102,7 @@ let () =
       | `Create (18, slug) -> create_v18 database slug
       | `Create (19, slug) -> create_v19 database slug
       | `Create (20, slug) -> create_v20 database slug
+      | `Create (21, slug) -> create_v21 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database

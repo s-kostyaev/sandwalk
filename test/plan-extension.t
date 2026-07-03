@@ -1,5 +1,5 @@
   $ sandwalk init --slug extension-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"extension-test","phase":"initialized","schema_version":21}}
+  {"ok":true,"result":{"slug":"extension-test","phase":"initialized","schema_version":22}}
 
 Extensions are rejected until the initial plan is sealed.
 
@@ -62,4 +62,4 @@ Released schema 18 upgrades through the extension migration.
   $ ./inspect_workspace.exe --create-v18 legacy/database/sandwalk.sqlite3 legacy
   $ sandwalk gc --slug legacy --directory-prefix . --raw --plan >/dev/null
   $ ./inspect_workspace.exe legacy/database/sandwalk.sqlite3 | sed -n '2p'
-  21
+  22

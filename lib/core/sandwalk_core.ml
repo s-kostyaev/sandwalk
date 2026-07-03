@@ -868,6 +868,27 @@ module Step_state = struct
   ;;
 end
 
+module Candidate_kind = struct
+  type t =
+    | Hit
+    | Snapshot
+    | Excerpt
+  [@@deriving equal, sexp]
+
+  let to_string = function
+    | Hit -> "hit"
+    | Snapshot -> "snapshot"
+    | Excerpt -> "excerpt"
+  ;;
+
+  let of_string = function
+    | "hit" -> Some Hit
+    | "snapshot" -> Some Snapshot
+    | "excerpt" -> Some Excerpt
+    | _ -> None
+  ;;
+end
+
 module Claim_decision = struct
   module Error = struct
     type t =
@@ -956,6 +977,22 @@ let%test_unit "claim references require a canonical 128-bit suffix" =
   ]
   |> List.iter ~f:(fun value ->
     assert (Option.is_none (Claim_id.of_string value)))
+;;
+
+let%expect_test "candidate kinds have stable protocol names" =
+  [ Candidate_kind.Hit; Snapshot; Excerpt ]
+  |> List.iter ~f:(fun kind ->
+    let encoded = Candidate_kind.to_string kind in
+    printf
+      "%s %b\n"
+      encoded
+      (Candidate_kind.of_string encoded
+       |> Option.value_map ~default:false ~f:(Candidate_kind.equal kind)));
+  [%expect
+    {|
+    hit true
+    snapshot true
+    excerpt true |}]
 ;;
 
 module Transition_error = struct

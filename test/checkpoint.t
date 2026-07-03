@@ -1,5 +1,5 @@
   $ sandwalk init --slug checkpoint-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"checkpoint-test","phase":"initialized","schema_version":21}}
+  {"ok":true,"result":{"slug":"checkpoint-test","phase":"initialized","schema_version":22}}
 
   $ sandwalk plan add-step --slug checkpoint-test --directory-prefix workspaces \
   >   --key source-review --title "Review sources"
@@ -73,6 +73,6 @@ Create a released-schema v5 fixture and checkpoint through migration v6.
 
   $ ./inspect_workspace.exe legacy-v5/v5-test/database/sandwalk.sqlite3
   v5-test|researching
-  21
+  22
   wal
   ok

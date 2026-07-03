@@ -156,8 +156,8 @@ let explanation = function
       , "Resume the existing work with its claim identifier." )
   | "FINDING_HAS_NO_EVIDENCE" ->
     Some
-      ( "A finding must cite at least one exact excerpt before it can be sealed."
-      , "Attach an excerpt with `sandwalk finding attach`, then seal the finding." )
+      ( "A finding must cite at least one exact excerpt with a claim-bearing relation; context alone cannot support a finding."
+      , "Attach an excerpt as `supports`, `contradicts`, or `qualifies`, then seal the finding." )
   | "FINDING_NOT_SEALED" ->
     Some
       ( "Only sealed finding revisions can receive an independent review."
@@ -385,6 +385,8 @@ let status_error = function
   | Invalid_step_state _
   | Claim_not_found
   | Claim_not_active
+  | Candidate_not_found _
+  | Candidate_not_owned_by_claim _
   | Search_wrong_phase _
   | Search_requires_claim
   | Hit_id_collision
@@ -413,6 +415,9 @@ let status_error = function
   | Step_has_no_findings _
   | Step_has_unreviewed_findings _
   | Step_has_rejected_findings _
+  | Finding_repair_wrong_phase _
+  | Finding_repair_requires_completed_step _
+  | Finding_repair_has_completed_dependents _
   | Draft_wrong_phase _
   | Draft_gate_failed
   | Report_wrong_phase _
@@ -474,10 +479,11 @@ let research_recommendation ~slug ~directory_prefix = function
     ; details =
         [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
         ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
+        ; "query", `String query
         ]
     ; alternatives_possible = true
     }
-  | Fetch { claim_id; step_key; hit_id } ->
+  | Fetch { claim_id; step_key; hit_id; title; url; snippet } ->
     { action = "fetch"
     ; reason =
         "The selected active step has an unfetched search result and no snapshot."
@@ -494,6 +500,9 @@ let research_recommendation ~slug ~directory_prefix = function
         [ "step", `String (Sandwalk_core.Plan_step.Key.to_string step_key)
         ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
         ; "hit", `String (Sandwalk_core.Hit_id.to_string hit_id)
+        ; "hit_title", `String title
+        ; "hit_url", `String url
+        ; "hit_snippet", `String snippet
         ]
     ; alternatives_possible = true
     }
@@ -847,10 +856,42 @@ let packet_workspace ~slug ~directory_prefix =
     ]
 ;;
 
+let packet_step_context = function
+  | None -> `Null
+  | Some context ->
+    `Assoc
+      [ ( "research_objective"
+        , `String (Sandwalk_store.Step_context.objective context) )
+      ; ( "step"
+        , `String
+            (Sandwalk_store.Step_context.step_key context
+             |> Sandwalk_core.Plan_step.Key.to_string) )
+      ; "step_title", `String (Sandwalk_store.Step_context.step_title context)
+      ]
+;;
+
+let default_search_query context recommendation =
+  let fallback =
+    match recommendation_detail recommendation "query" with
+    | Some (`String query) -> query
+    | _ -> recommendation.reason
+  in
+  match context with
+  | None -> fallback
+  | Some context ->
+    let query =
+      String.strip (Sandwalk_store.Step_context.step_title context)
+      ^ " — "
+      ^ String.strip (Sandwalk_store.Step_context.objective context)
+    in
+    String.prefix query (Int.min 512 (String.length query))
+;;
+
 let generic_work_packet
       ~slug
       ~directory_prefix
       ~phase
+      ~step_context
       recommendation
   =
   let arguments =
@@ -864,6 +905,7 @@ let generic_work_packet
     ; "workflow_action", `String recommendation.action
     ; "workspace", packet_workspace ~slug ~directory_prefix
     ; "phase", `String (Sandwalk_core.Phase.to_string phase)
+    ; "context", packet_step_context step_context
     ; "instructions", `String recommendation.reason
     ; "fixed", `Assoc [ "arguments", `List (List.map arguments ~f:(fun value -> `String value)) ]
     ; "editable", `Assoc []
@@ -877,6 +919,7 @@ let work_packet
       ~phase
       ~report_blocks
       ~finding_review_context
+      ~step_context
       recommendation
   =
   let base action instructions fixed editable =
@@ -886,25 +929,61 @@ let work_packet
       ; "workflow_action", `String recommendation.action
       ; "workspace", packet_workspace ~slug ~directory_prefix
       ; "phase", `String (Sandwalk_core.Phase.to_string phase)
+      ; "context", packet_step_context step_context
       ; "instructions", `String instructions
       ; "fixed", `Assoc fixed
       ; "editable", `Assoc editable
       ]
   in
+  let candidate_decisions =
+    `List
+      [ `String "accept"; `String "reject"; `String "restart-search" ]
+  in
+  let replacement_query =
+    default_search_query step_context recommendation
+  in
   match recommendation.action with
+  | "search" ->
+    base
+      "search"
+      "Refine editable.query into a concise search query that preserves the research subject and current step goal. Apply runs Sandwalk search."
+      [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
+      ]
+      [ "query", `String (default_search_query step_context recommendation) ]
+  | "fetch" ->
+    base
+      "fetch"
+      "Inspect the candidate title, URL, and snippet. Accept it, reject it and try the next candidate, or restart-search when the query itself is wrong. Rejections require a concise reason."
+      [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
+      ; "hit", `String (recommendation_detail_string_exn recommendation "hit")
+      ; "title", `String (recommendation_detail_string_exn recommendation "hit_title")
+      ; "url", `String (recommendation_detail_string_exn recommendation "hit_url")
+      ; "snippet", `String (recommendation_detail_string_exn recommendation "hit_snippet")
+      ; "allowed_decisions", candidate_decisions
+      ]
+      [ "decision", `String ""
+      ; "rejection_reason", `String ""
+      ; "replacement_query", `String replacement_query
+      ]
   | "create-excerpt" ->
     base
       "create-excerpt"
-      "Read fixed.document_path. Set editable.line_start and editable.line_end to one exact, semantically relevant inclusive range. Do not edit fixed fields or immutable artifacts."
+      "Read fixed.document_path against context. Accept it, reject it and try another candidate, or restart-search when retrieval/query quality is wrong. For accept, choose one exact relevant inclusive line range."
       [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
       ; "snapshot", `String (recommendation_detail_string_exn recommendation "snapshot")
       ; "document_path", `String (recommendation_detail_string_exn recommendation "document_path")
+      ; "allowed_decisions", candidate_decisions
       ]
-      [ "line_start", `Null; "line_end", `Null ]
+      [ "decision", `String ""
+      ; "line_start", `Null
+      ; "line_end", `Null
+      ; "rejection_reason", `String ""
+      ; "replacement_query", `String replacement_query
+      ]
   | "create-finding" ->
     base
       "create-finding"
-      "Read fixed.candidate_excerpt_path. Fill a narrow statement supported by that exact excerpt, choose a lowercase-hyphenated key, and choose the excerpt relation. Apply creates, attaches, and seals the finding."
+      "Read fixed.candidate_excerpt_path against context. Accept it, reject it and inspect another candidate, or restart-search when the source set is wrong. For accept, fill a narrow supported statement, key, and relation."
       [ "step", `String (recommendation_detail_string_exn recommendation "step")
       ; "claim", `String (recommendation_detail_string_exn recommendation "claim")
       ; ( "candidate_excerpt"
@@ -920,15 +999,19 @@ let work_packet
             (List.map
                [ "supports"; "contradicts"; "qualifies"; "context" ]
                ~f:(fun value -> `String value)) )
+      ; "allowed_decisions", candidate_decisions
       ]
-      [ "key", `String "finding"
+      [ "decision", `String ""
+      ; "key", `String "finding"
       ; "statement", `String ""
       ; "relation", `String ""
+      ; "rejection_reason", `String ""
+      ; "replacement_query", `String replacement_query
       ]
   | "attach-evidence" ->
     base
       "attach-evidence"
-      "Read fixed.candidate_excerpt_path and set editable.relation from fixed.allowed_relations. Apply attaches the exact excerpt and seals the finding."
+      "Read fixed.candidate_excerpt_path against the finding and context. Accept it, reject it and inspect another candidate, or restart-search when the source set is wrong. For accept, choose a relation."
       [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
       ; "finding", `String (recommendation_detail_string_exn recommendation "finding")
       ; ( "candidate_excerpt"
@@ -944,8 +1027,13 @@ let work_packet
             (List.map
                [ "supports"; "contradicts"; "qualifies"; "context" ]
                ~f:(fun value -> `String value)) )
+      ; "allowed_decisions", candidate_decisions
       ]
-      [ "relation", `String "" ]
+      [ "decision", `String ""
+      ; "relation", `String ""
+      ; "rejection_reason", `String ""
+      ; "replacement_query", `String replacement_query
+      ]
   | "review-finding" ->
     let finding_review_context =
       Option.value_exn finding_review_context
@@ -961,7 +1049,7 @@ let work_packet
     in
     base
       "review-finding"
-      "Review fixed.statement against every fixed.evidence artifact. Fill every editable review field. Do not add wrapper fields."
+      "Review every material assertion in fixed.statement against fixed.evidence and the current research context. Do not infer missing dates, status, or provenance. Use partially-supported or unsupported when any material assertion lacks exact support. Fill every review field without wrappers."
       [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
       ; "finding", `String (recommendation_detail_string_exn recommendation "finding")
       ; ( "statement"
@@ -1036,7 +1124,12 @@ let work_packet
       ]
       [ "reviews", `List reviews ]
   | _ ->
-    generic_work_packet ~slug ~directory_prefix ~phase recommendation
+    generic_work_packet
+      ~slug
+      ~directory_prefix
+      ~phase
+      ~step_context
+      recommendation
 ;;
 
 let json_member_assoc name = function
@@ -5748,7 +5841,9 @@ let finding_error = function
     "EXCERPT_STALE", sprintf "Excerpt %S no longer matches its snapshot." reference
   | Finding_has_no_evidence reference ->
     "FINDING_HAS_NO_EVIDENCE",
-    sprintf "Finding %S must have evidence before sealing." reference
+    sprintf
+      "Finding %S must have non-context evidence before sealing."
+      reference
   | Finding_not_sealed reference ->
     "FINDING_NOT_SEALED", sprintf "Finding %S must be sealed before review." reference
   | Finding_review_conflict reference ->
@@ -5767,6 +5862,30 @@ let complete_step_error = function
     "STEP_HAS_REJECTED_FINDINGS",
     sprintf "Step %S has unsupported or contradicted findings." step
   | error -> claim_error error
+;;
+
+let candidate_error = function
+  | Sandwalk_store.Error.Candidate_not_found reference ->
+    "CANDIDATE_NOT_FOUND", sprintf "Candidate %S does not exist." reference
+  | Candidate_not_owned_by_claim reference ->
+    "CANDIDATE_STEP_MISMATCH",
+    sprintf "Candidate %S belongs to another plan step." reference
+  | error -> claim_error error
+;;
+
+let repair_finding_error = function
+  | Sandwalk_store.Error.Finding_repair_wrong_phase phase ->
+    "FINDING_REPAIR_NOT_ALLOWED",
+    phase_error_message "Finding repair" phase
+  | Finding_repair_requires_completed_step step ->
+    "FINDING_REPAIR_STEP_ACTIVE",
+    sprintf "Step %S must be completed before repair." step
+  | Finding_repair_has_completed_dependents reference ->
+    "FINDING_REPAIR_DEPENDENT_COMPLETE",
+    sprintf
+      "Finding %S cannot be repaired after a dependent step completed."
+      reference
+  | error -> finding_error error
 ;;
 
 let draft_error = function
@@ -6744,11 +6863,233 @@ let finding_review_command =
                          Deferred.unit))))))
 ;;
 
+let finding_repair_command =
+  Async.Command.async
+    ~summary:"Reopen a completed finding for evidence repair."
+    (let%map_open.Command finding_text =
+       flag "--finding" (required string) ~doc:"STEP/KEY Finding reference"
+     and reason_path =
+       flag "--reason-file" (required string) ~doc:"PATH Bounded repair reason"
+     and slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     in
+     fun () ->
+       let finding =
+         match String.lsplit2 finding_text ~on:'/' with
+         | Some (step, key) ->
+           (match
+              Sandwalk_core.Plan_step.Key.of_string step,
+              Sandwalk_core.Finding_key.of_string key
+            with
+            | Ok step, Some key -> Some (step, key)
+            | _ -> None)
+         | None -> None
+       in
+       match Sandwalk_core.Slug.of_string slug_text, finding with
+       | Error error, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, None ->
+         print_failure_and_exit
+           ~code:"INVALID_FINDING"
+           ~message:"Finding reference must be STEP/KEY."
+       | Ok slug, Some (step_key, finding_key) ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let%bind input =
+           Sandwalk_runtime.File_input.read
+             ~path:reason_path
+             ~maximum_bytes:65_536
+         in
+         (match input with
+          | Error _ ->
+            print_failure_and_exit
+              ~code:"FINDING_REPAIR_FILE_ERROR"
+              ~message:"Could not read bounded non-empty repair reason."
+          | Ok input
+            when String.is_empty
+                   (String.strip (Sandwalk_runtime.File_input.content input)) ->
+            print_failure_and_exit
+              ~code:"FINDING_REPAIR_FILE_ERROR"
+              ~message:"Could not read bounded non-empty repair reason."
+          | Ok input ->
+            let started_at = Time_float_unix.now () in
+            let%bind invocation_id =
+              In_thread.run (fun () ->
+                Sandwalk_runtime.invocation_id ~now:started_at)
+            in
+            let arguments =
+              `Assoc
+                [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                ; "directory_prefix", `String directory_prefix
+                ; "finding", `String finding_text
+                ; ( "reason_file"
+                  , `Assoc
+                      [ "path", `String reason_path
+                      ; "size", `Int (Sandwalk_runtime.File_input.size input)
+                      ; ( "md5"
+                        , `String (Sandwalk_runtime.File_input.md5 input) )
+                      ] )
+                ]
+            in
+            let append_event
+                  ~kind
+                  ~timestamp
+                  ?(state_changes = [])
+                  ?duration_ms
+                  ?outcome
+                  ?error_code
+                  ()
+              =
+              Sandwalk_runtime.Audit.append
+                ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                (Sandwalk_protocol.Audit_event.create
+                   ~invocation_id
+                   ~timestamp
+                   ~kind
+                   ~command:"finding repair"
+                   ~arguments
+                   ~phase:None
+                   ~step:(Sandwalk_core.Plan_step.Key.to_string step_key)
+                   ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                   ~state_changes
+                   ~consumed_references:[ finding_text ]
+                   ?duration_ms
+                   ?outcome
+                   ?error_code
+                   ())
+            in
+            let%bind started =
+              append_event
+                ~kind:`Started
+                ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                ()
+            in
+            (match started with
+             | Error _ ->
+               print_failure_and_exit
+                 ~code:"AUDIT_LOG_ERROR"
+                 ~message:"Could not append workspace audit log."
+             | Ok () ->
+               let%bind repaired =
+                 In_thread.run (fun () ->
+                   Sandwalk_store.repair_finding
+                     ~database_path:
+                       (Sandwalk_runtime.Workspace.database_path workspace)
+                     ~expected_slug:slug
+                     ~step_key
+                     ~finding_key
+                     ~reason_text:(Sandwalk_runtime.File_input.content input)
+                     ~reason_path
+                     ~reason_md5:(Sandwalk_runtime.File_input.md5 input)
+                     ~reason_size:(Sandwalk_runtime.File_input.size input)
+                     ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                     ())
+               in
+               let finished_at = Time_float_unix.now () in
+               let duration_ms =
+                 Time_float.diff finished_at started_at
+                 |> Time_float.Span.to_ms
+                 |> Float.iround_nearest_exn
+               in
+               (match repaired with
+                | Error error ->
+                  let code, message = repair_finding_error error in
+                  let%bind _ =
+                    append_event
+                      ~kind:`Failed
+                      ~timestamp:
+                        (Sandwalk_runtime.timestamp_utc finished_at)
+                      ~duration_ms
+                      ~outcome:"failure"
+                      ~error_code:code
+                      ()
+                  in
+                  print_failure_and_exit ~code ~message
+                | Ok repaired ->
+                  let revision =
+                    Sandwalk_store.Repair_finding_result.revision repaired
+                  in
+                  let%bind logged =
+                    append_event
+                      ~kind:`Finished
+                      ~timestamp:
+                        (Sandwalk_runtime.timestamp_utc finished_at)
+                      ~state_changes:
+                        [ `Assoc
+                            [ "entity", `String ("finding." ^ finding_text)
+                            ; "from", `String "reviewed"
+                            ; "to", `String "draft"
+                            ]
+                        ; `Assoc
+                            [ ( "entity"
+                              , `String
+                                  ("step."
+                                   ^ Sandwalk_core.Plan_step.Key.to_string
+                                       step_key) )
+                            ; "from", `String "completed"
+                            ; "to", `String "suspended"
+                            ]
+                        ]
+                      ~duration_ms
+                      ~outcome:"success"
+                      ()
+                  in
+                  (match logged with
+                   | Error _ ->
+                     print_failure_and_exit
+                       ~code:"AUDIT_LOG_ERROR"
+                       ~message:"Could not append workspace audit log."
+                   | Ok () ->
+                     let result =
+                       `Assoc
+                         [ "finding", `String finding_text
+                         ; "revision", `Int revision
+                         ; ( "suspended_claims"
+                           , `Int
+                               (Sandwalk_store.Repair_finding_result
+                                .suspended_claims
+                                  repaired) )
+                         ; ( "rejected_excerpts"
+                           , `Int
+                               (Sandwalk_store.Repair_finding_result
+                                .rejected_excerpts
+                                  repaired) )
+                         ]
+                     in
+                     let next =
+                       Sandwalk_protocol.Shell_command.of_words
+                         [ "sandwalk"
+                         ; "continue"
+                         ; "--slug"
+                         ; Sandwalk_core.Slug.to_string slug
+                         ; "--directory-prefix"
+                         ; directory_prefix
+                         ]
+                     in
+                     Sandwalk_protocol.Envelope.success
+                       ~result
+                       ~next
+                       ()
+                     |> Sandwalk_protocol.Envelope.render
+                     |> print_endline;
+                     Deferred.unit)))))
+;;
+
 let finding_command =
   Async.Command.group
     ~summary:"Create and manage evidence-backed findings."
     [ "attach", finding_attach_command
     ; "create", finding_create_command
+    ; "repair", finding_repair_command
     ; "review", finding_review_command
     ; "seal", finding_seal_command
     ]
@@ -8433,7 +8774,26 @@ let continue_command =
                         ~code
                         ~message
                     | Ok report_blocks ->
-                      let%bind finding_review_context =
+                      let%bind step_context =
+                        match recommendation_detail recommendation "step" with
+                        | Some (`String step_key) ->
+                          In_thread.run (fun () ->
+                            Sandwalk_store.read_step_context
+                              ~database_path
+                              ~step_key
+                              ()
+                            |> Result.map ~f:Option.some)
+                        | _ -> Deferred.return (Ok None)
+                      in
+                      (match step_context with
+                       | Error error ->
+                         let code, message = status_error error in
+                         fail_with_audit
+                           ~phase:(Some phase_text)
+                           ~code
+                           ~message
+                       | Ok step_context ->
+                         let%bind finding_review_context =
                         if String.equal recommendation.action "review-finding"
                         then
                           In_thread.run (fun () ->
@@ -8463,6 +8823,7 @@ let continue_command =
                              ~phase
                              ~report_blocks
                              ~finding_review_context
+                             ~step_context
                              recommendation
                            |> seal_work_packet
                          in
@@ -8565,7 +8926,7 @@ let continue_command =
                                     ())
                                |> Sandwalk_protocol.Envelope.render
                                |> print_endline;
-                               Deferred.unit)))))))))
+                               Deferred.unit))))))))))
 ;;
 
 let apply_command =
@@ -8630,86 +8991,176 @@ let apply_command =
             let input_path =
               Sandwalk_runtime.Workspace.work_input_path workspace
             in
+            let reject_or_accept
+                  ~editable
+                  ~kind
+                  ~reference
+                  ~claim
+                  ~accept_commands
+              =
+              match json_string_member "decision" editable with
+              | "accept" -> `Commands accept_commands, None
+              | ("reject" | "restart-search") as decision ->
+                let reason =
+                  json_string_member "rejection_reason" editable
+                  |> String.strip
+                in
+                if String.is_empty reason
+                then failwith "A rejection reason is required";
+                let reason_path = input_path ^ "-rejection.md" in
+                let replacement_query =
+                  if String.equal decision "restart-search"
+                  then (
+                    let query =
+                      json_string_member "replacement_query" editable
+                      |> String.strip
+                    in
+                    if String.is_empty query
+                    then failwith "A replacement search query is required";
+                    Some query)
+                  else None
+                in
+                ( `Reject (kind, reference, claim, replacement_query)
+                , Some (reason_path, reason) )
+              | _ -> failwith "Decision must be accept or reject"
+            in
             let prepared =
               Or_error.try_with (fun () ->
                 match action with
                 | "run-command" ->
                   let arguments = json_string_list_member "arguments" fixed in
                   `Commands [ arguments ], None
-                | "create-excerpt" ->
-                  let first = json_int_member "line_start" editable in
-                  let last = json_int_member "line_end" editable in
-                  if first < 1 || last < first
-                  then failwith "Invalid inclusive excerpt line range";
+                | "search" ->
+                  let query = json_string_member "query" editable |> String.strip in
+                  if String.is_empty query
+                  then failwith "Search query must not be empty";
                   let command =
                     workspace_arguments
-                      [ "excerpt"
-                      ; "create"
+                      [ "search"
                       ; "--claim"
                       ; json_string_member "claim" fixed
-                      ; "--snapshot"
-                      ; json_string_member "snapshot" fixed
-                      ; "--lines"
-                      ; sprintf "%d:%d" first last
+                      ; "--query"
+                      ; query
                       ]
                   in
                   `Commands [ command ], None
-                | "create-finding" ->
-                  let relation = json_string_member "relation" editable in
-                  if Option.is_none (Sandwalk_core.Finding_relation.of_string relation)
-                  then failwith "Invalid evidence relation";
-                  let statement = json_string_member "statement" editable in
-                  if String.is_empty (String.strip statement)
-                  then failwith "Finding statement must not be empty";
-                  let key = json_string_member "key" editable in
-                  let step = json_string_member "step" fixed in
+                | "fetch" ->
                   let claim = json_string_member "claim" fixed in
-                  let finding = step ^ "/" ^ key in
-                  let excerpt = json_string_member "candidate_excerpt" fixed in
-                  let statement_path = input_path ^ ".md" in
-                  ( `Commands
+                  let hit = json_string_member "hit" fixed in
+                  reject_or_accept
+                    ~editable
+                    ~kind:"hit"
+                    ~reference:hit
+                    ~claim
+                    ~accept_commands:
+                      [ workspace_arguments [ "fetch"; "--claim"; claim; hit ] ]
+                | "create-excerpt" ->
+                  let claim = json_string_member "claim" fixed in
+                  let snapshot = json_string_member "snapshot" fixed in
+                  let accept_commands =
+                    match json_string_member "decision" editable with
+                    | "accept" ->
+                      let first = json_int_member "line_start" editable in
+                      let last = json_int_member "line_end" editable in
+                      if first < 1 || last < first
+                      then failwith "Invalid inclusive excerpt line range";
                       [ workspace_arguments
-                          [ "finding"
+                          [ "excerpt"
                           ; "create"
-                          ; "--step"
-                          ; step
                           ; "--claim"
                           ; claim
-                          ; "--key"
-                          ; key
-                          ; "--claim-file"
-                          ; statement_path
-                          ]
-                      ; workspace_arguments
-                          [ "finding"
-                          ; "attach"
-                          ; "--claim"
-                          ; claim
-                          ; "--finding"
-                          ; finding
-                          ; "--excerpt"
-                          ; excerpt
-                          ; "--relation"
-                          ; relation
-                          ]
-                      ; workspace_arguments
-                          [ "finding"
-                          ; "seal"
-                          ; "--claim"
-                          ; claim
-                          ; "--finding"
-                          ; finding
+                          ; "--snapshot"
+                          ; snapshot
+                          ; "--lines"
+                          ; sprintf "%d:%d" first last
                           ]
                       ]
-                  , Some (statement_path, statement) )
+                    | _ -> []
+                  in
+                  reject_or_accept
+                    ~editable
+                    ~kind:"snapshot"
+                    ~reference:snapshot
+                    ~claim
+                    ~accept_commands
+                | "create-finding" ->
+                  let claim = json_string_member "claim" fixed in
+                  let excerpt = json_string_member "candidate_excerpt" fixed in
+                  (match json_string_member "decision" editable with
+                   | "reject" | "restart-search" ->
+                     reject_or_accept
+                       ~editable
+                       ~kind:"excerpt"
+                       ~reference:excerpt
+                       ~claim
+                       ~accept_commands:[]
+                   | _ ->
+                     let relation = json_string_member "relation" editable in
+                     if
+                       Option.is_none
+                         (Sandwalk_core.Finding_relation.of_string relation)
+                     then failwith "Invalid evidence relation";
+                     let statement = json_string_member "statement" editable in
+                     if String.is_empty (String.strip statement)
+                     then failwith "Finding statement must not be empty";
+                     let key = json_string_member "key" editable in
+                     let step = json_string_member "step" fixed in
+                     let finding = step ^ "/" ^ key in
+                     let statement_path = input_path ^ ".md" in
+                     ignore
+                       (reject_or_accept
+                          ~editable
+                          ~kind:"excerpt"
+                          ~reference:excerpt
+                          ~claim
+                          ~accept_commands:[]);
+                     ( `Commands
+                         [ workspace_arguments
+                             [ "finding"
+                             ; "create"
+                             ; "--step"
+                             ; step
+                             ; "--claim"
+                             ; claim
+                             ; "--key"
+                             ; key
+                             ; "--claim-file"
+                             ; statement_path
+                             ]
+                         ; workspace_arguments
+                             [ "finding"
+                             ; "attach"
+                             ; "--claim"
+                             ; claim
+                             ; "--finding"
+                             ; finding
+                             ; "--excerpt"
+                             ; excerpt
+                             ; "--relation"
+                             ; relation
+                             ]
+                         ; workspace_arguments
+                             [ "finding"
+                             ; "seal"
+                             ; "--claim"
+                             ; claim
+                             ; "--finding"
+                             ; finding
+                             ]
+                         ]
+                     , Some (statement_path, statement) ))
                 | "attach-evidence" ->
-                  let relation = json_string_member "relation" editable in
-                  if Option.is_none (Sandwalk_core.Finding_relation.of_string relation)
-                  then failwith "Invalid evidence relation";
                   let claim = json_string_member "claim" fixed in
                   let finding = json_string_member "finding" fixed in
                   let excerpt = json_string_member "candidate_excerpt" fixed in
-                  ( `Commands
+                  let accept_commands =
+                    match json_string_member "decision" editable with
+                    | "accept" ->
+                      let relation = json_string_member "relation" editable in
+                      if
+                        Option.is_none
+                          (Sandwalk_core.Finding_relation.of_string relation)
+                      then failwith "Invalid evidence relation";
                       [ workspace_arguments
                           [ "finding"
                           ; "attach"
@@ -8731,7 +9182,14 @@ let apply_command =
                           ; finding
                           ]
                       ]
-                  , None )
+                    | _ -> []
+                  in
+                  reject_or_accept
+                    ~editable
+                    ~kind:"excerpt"
+                    ~reference:excerpt
+                    ~claim
+                    ~accept_commands
                 | "review-finding" ->
                   let review = json_member_assoc "review" editable in
                   let review_path = input_path ^ ".json" in
@@ -8790,7 +9248,7 @@ let apply_command =
                  ~code:"INVALID_WORK_PACKET"
                  ~message:
                    "Fill every editable field with a valid value and retry apply."
-             | Ok (`Commands commands, input) ->
+             | Ok (operation, input) ->
                let started_at = Time_float_unix.now () in
                let%bind invocation_id =
                  In_thread.run (fun () ->
@@ -8876,14 +9334,14 @@ let apply_command =
                        ~code:"WORKSPACE_IO_ERROR"
                        ~message:"Could not materialize work-packet input."
                    | Ok () ->
-                     let rec run = function
+                     let rec run_commands = function
                        | [] -> Deferred.return (Ok ())
                        | command :: rest ->
                          let%bind output = run_self_command command in
                          (match
                             Core_unix.Exit_or_signal.or_error output.exit_status
                           with
-                          | Ok () -> run rest
+                          | Ok () -> run_commands rest
                           | Error _ ->
                             if not (String.is_empty output.stdout)
                             then print_string output.stdout;
@@ -8891,7 +9349,77 @@ let apply_command =
                             then eprintf "%s" output.stderr;
                             Deferred.return (Error ()))
                      in
-                     let%bind applied = run commands in
+                     let%bind applied =
+                       match operation with
+                       | `Commands commands -> run_commands commands
+                       | `Reject
+                           ( kind_text
+                           , reference
+                           , claim_text
+                           , replacement_query ) ->
+                         let rejection =
+                           Or_error.try_with (fun () ->
+                             let kind =
+                               Sandwalk_core.Candidate_kind.of_string kind_text
+                               |> Option.value_exn
+                             in
+                             let claim_id =
+                               Sandwalk_core.Claim_id.of_string claim_text
+                               |> Option.value_exn
+                             in
+                             let reason_path, reason_text =
+                               Option.value_exn input
+                             in
+                             kind, claim_id, reason_path, reason_text)
+                         in
+                         (match rejection with
+                          | Error _ -> Deferred.return (Error ())
+                          | Ok (kind, claim_id, reason_path, reason_text) ->
+                            let%bind rejected =
+                              In_thread.run (fun () ->
+                                Sandwalk_store.reject_candidate
+                                  ~database_path:
+                                    (Sandwalk_runtime.Workspace.database_path
+                                       workspace)
+                                  ~expected_slug:slug
+                                  ~claim_id
+                                  ~kind
+                                  ~reference
+                                  ~reason_text
+                                  ~reason_path
+                                  ~reason_md5:
+                                    (Md5.digest_string reason_text
+                                     |> Md5.to_hex)
+                                  ~reason_size:(String.length reason_text)
+                                  ~now:
+                                    (Sandwalk_runtime.timestamp_utc
+                                       started_at)
+                                  ())
+                            in
+                            (match rejected with
+                             | Ok _ ->
+                               (match replacement_query with
+                                | None -> Deferred.return (Ok ())
+                                | Some query ->
+                                  run_commands
+                                    [ workspace_arguments
+                                        [ "search"
+                                        ; "--claim"
+                                        ; claim_text
+                                        ; "--query"
+                                        ; query
+                                        ]
+                                    ])
+                             | Error error ->
+                               let code, message = candidate_error error in
+                               Sandwalk_protocol.Envelope.failure
+                                 ~code
+                                 ~message
+                                 ()
+                               |> Sandwalk_protocol.Envelope.render
+                               |> print_endline;
+                               Deferred.return (Error ())))
+                     in
                      (match applied with
                       | Error () ->
                         let%bind _ =

@@ -17,7 +17,7 @@
   >   --slug finding-test --directory-prefix workspace \
   >   --claim claim_00000000000000000000000000000001 \
   >   --finding fixture-step/small-claim
-  {"ok":false,"error":{"code":"FINDING_HAS_NO_EVIDENCE","message":"Finding \"fixture-step/small-claim\" must have evidence before sealing."},"next":"'sandwalk' 'next' '--slug' 'finding-test' '--directory-prefix' 'workspace'"}
+  {"ok":false,"error":{"code":"FINDING_HAS_NO_EVIDENCE","message":"Finding \"fixture-step/small-claim\" must have non-context evidence before sealing."},"next":"'sandwalk' 'next' '--slug' 'finding-test' '--directory-prefix' 'workspace'"}
   [1]
 
   $ sandwalk step complete \
@@ -28,7 +28,7 @@
 
   $ ./inspect_workspace.exe workspace/finding-test/database/sandwalk.sqlite3
   finding-test|researching
-  21
+  22
   wal
   ok
 

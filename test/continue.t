@@ -19,7 +19,9 @@ command.
     "protocol": "sandwalk.work.v1",
     "action": "create-finding",
       "candidate_excerpt": "excerpt_00000000000000000000000000000001",
-    "editable": { "key": "finding", "statement": "", "relation": "" },
+      "key": "finding",
+      "statement": "",
+      "relation": "",
 
 Incomplete semantic fields fail before any mutation.
 
@@ -43,6 +45,7 @@ the finding without requiring the agent to reproduce identifiers or CLI flags.
 
   $ sed -e 's/"statement": ""/"statement": "Fixture claim."/' \
   >   -e 's/"relation": ""/"relation": "supports"/' \
+  >   -e 's/"decision": ""/"decision": "accept"/' \
   >   workspace/continue-test/artifacts/work/current.json > filled.json
   $ mv filled.json workspace/continue-test/artifacts/work/current.json
 
@@ -99,4 +102,4 @@ Mechanical gates use the same packet/apply loop.
   {"ok":true,"result":{"applied":"run-command","packet":"workspace/continue-test/artifacts/work/current.json"},"next":"'sandwalk' 'continue' '--slug' 'continue-test' '--directory-prefix' 'workspace'"}
 
   $ sandwalk status --slug continue-test --directory-prefix workspace
-  {"ok":true,"result":{"slug":"continue-test","phase":"evidence-review","schema_version":21}}
+  {"ok":true,"result":{"slug":"continue-test","phase":"evidence-review","schema_version":22}}

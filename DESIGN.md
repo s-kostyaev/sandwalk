@@ -254,6 +254,21 @@ atomically marks the step and claim completed. Completing the last required
 step performs the checked `researching → evidence-review` transition; optional
 unfinished steps do not block that transition.
 
+A bad semantic review discovered before drafting can be repaired explicitly:
+
+```console
+sandwalk finding repair --slug <slug> --finding <step>/<finding> \
+  --reason-file <path>
+```
+
+Repair is allowed only for a completed step while the workspace is still
+`researching` or `evidence-review`, and is rejected if a dependent step already
+completed. It suspends all active claims, reopens the target step as
+`suspended`, copies the finding statement into a new draft revision without
+evidence, and durably rejects the previous revision's excerpts for that step.
+The ordinary `continue` loop then reclaims the earliest dependency-ready step
+and gathers fresh evidence. The reason and revision boundary are append-only.
+
 Sandwalk always creates a mechanical resume pack from durable state and logs.
 An explicit checkpoint adds the agent's current interpretation, hypotheses, and
 next intended action.
@@ -287,7 +302,9 @@ replaces `artifacts/work/current.json` with a bounded
 `sandwalk.work.v1` packet. The packet separates immutable mechanical context
 under `fixed` from the semantic fields the agent may fill under `editable`.
 It includes exact artifact paths, allowed enum values, and complete nested
-review protocols where applicable.
+review protocols where applicable. Research packets also carry the canonical
+research objective and current step title so semantic choices are never made
+from an opaque claim identifier.
 
 The agent reads the referenced artifacts, edits only `editable`, and invokes
 the single returned command:
@@ -301,11 +318,13 @@ workspace identity. An integrity hash covers every field except `editable`, so
 changing fixed context invalidates the packet before a child command runs.
 `apply` validates editable values, materializes bounded input files under
 `artifacts/work/`, and invokes the ordinary invariant-checking commands with
-the fixed identifiers and flags. A successful apply emits only one `continue`
-command. Multi-command applications, such as create/attach/seal, are
-deliberately crash-recoverable rather than transactionally combined: each
-child mutation is durable and a subsequent `continue` derives the legal action
-from the resulting intermediate state.
+the fixed identifiers and flags. Candidate rejection is the one direct store
+mutation because it is itself the packet decision and is covered by the
+`apply` audit event. A successful apply emits only one `continue` command.
+Multi-command applications, such as create/attach/seal, are deliberately
+crash-recoverable rather than transactionally combined: each child mutation is
+durable and a subsequent `continue` derives the legal action from the
+resulting intermediate state.
 
 The selected packet is one deterministic valid path, not a declaration that
 no alternative exists. Stable selection reduces agent choice load. If source
@@ -313,6 +332,15 @@ inspection shows that the selected semantic path is unsuitable, the agent may
 perform another legal mutation using the detailed command reference, then
 return to `continue`; it must never alter `fixed` to smuggle in a different
 identity.
+
+Search packets expose an editable query initialized from the current step title
+and bounded research objective. Fetch, excerpt, and evidence packets require an
+explicit `accept` or `reject` decision. A rejection includes a bounded reason
+and durably classifies the selected `hit`, `snapshot`, or `excerpt` as unusable
+for that step. Later guidance excludes rejected candidates and deterministically
+selects the next legal hit, snapshot, excerpt, or search action. Agents must
+reject bot challenges, access-denied pages, irrelevant results, empty semantic
+content, and excerpts that do not address the current step.
 
 ## Search and fetch adapters
 
@@ -441,6 +469,10 @@ Each attached excerpt has one relation:
 - `contradicts`
 - `qualifies`
 - `context`
+
+At least one current excerpt must use a claim-bearing relation (`supports`,
+`contradicts`, or `qualifies`) before a finding can be sealed. `context`
+evidence may supplement a bundle but cannot satisfy the seal gate by itself.
 
 ```console
 sandwalk finding create --slug <slug> --step <step> \
