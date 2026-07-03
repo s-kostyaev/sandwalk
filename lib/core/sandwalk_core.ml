@@ -846,7 +846,6 @@ module Step_state = struct
     | Pending
     | Claimed
     | Suspended
-    | Expired
     | Blocked
     | Completed
   [@@deriving equal, sexp]
@@ -855,7 +854,6 @@ module Step_state = struct
     | Pending -> "pending"
     | Claimed -> "claimed"
     | Suspended -> "suspended"
-    | Expired -> "expired"
     | Blocked -> "blocked"
     | Completed -> "completed"
   ;;
@@ -864,7 +862,6 @@ module Step_state = struct
     | "pending" -> Some Pending
     | "claimed" -> Some Claimed
     | "suspended" -> Some Suspended
-    | "expired" -> Some Expired
     | "blocked" -> Some Blocked
     | "completed" -> Some Completed
     | _ -> None
@@ -880,17 +877,13 @@ module Claim_decision = struct
   end
 
   type t =
-    { previous_state : Step_state.t
-    ; expired_active_claim : bool
-    }
+    { previous_state : Step_state.t }
   [@@deriving sexp_of]
 
-  let decide ~state ~lease_expired =
+  let decide ~state =
     match state with
-    | Step_state.Pending | Suspended | Expired | Blocked ->
-      Ok { previous_state = state; expired_active_claim = false }
-    | Claimed when lease_expired ->
-      Ok { previous_state = Expired; expired_active_claim = true }
+    | Step_state.Pending | Suspended | Blocked ->
+      Ok { previous_state = state }
     | Claimed -> Error Error.Active_claim
     | Completed -> Error Error.Step_completed
   ;;
@@ -936,21 +929,21 @@ module Checkpoint = struct
   let next t = t.next
 end
 
-let%expect_test "claim decisions enforce active leases and terminal steps" =
-  let check state lease_expired =
-    Claim_decision.decide ~state ~lease_expired
+let%expect_test "claim decisions enforce exclusive capabilities and terminal steps" =
+  let check state =
+    Claim_decision.decide ~state
     |> [%sexp_of: (Claim_decision.t, Claim_decision.Error.t) Result.t]
     |> print_s
   in
-  check Step_state.Pending false;
-  check Claimed false;
-  check Claimed true;
-  check Completed true;
+  check Step_state.Pending;
+  check Claimed;
+  check Suspended;
+  check Completed;
   [%expect
     {|
-    (Ok ((previous_state Pending) (expired_active_claim false)))
+    (Ok ((previous_state Pending)))
     (Error Active_claim)
-    (Ok ((previous_state Expired) (expired_active_claim true)))
+    (Ok ((previous_state Suspended)))
     (Error Step_completed) |}]
 ;;
 
@@ -1015,7 +1008,7 @@ module Resume_pack = struct
     in
     let step_scope_lines =
       match active_claims, latest_checkpoint with
-      | (step_key, claim_id, _, _) :: _, _ ->
+      | (step_key, claim_id, _) :: _, _ ->
         let title =
           List.find_map plan_steps ~f:(fun (key, title, _, _) ->
             if
@@ -1081,13 +1074,12 @@ module Resume_pack = struct
       match List.take active_claims 10 with
       | [] -> [ "- None." ]
       | claims ->
-        List.map claims ~f:(fun (step_key, claim_id, attempt, expires_at) ->
+        List.map claims ~f:(fun (step_key, claim_id, attempt) ->
           sprintf
-            "- Step %S: %S, attempt %d, expires %S"
+            "- Step %S: %S, attempt %d"
             (Plan_step.Key.to_string step_key)
             (Claim_id.to_string claim_id)
-            attempt
-            expires_at)
+            attempt)
     in
     let latest_checkpoint_lines =
       match latest_checkpoint with

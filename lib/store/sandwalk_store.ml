@@ -22,14 +22,13 @@ module Error = struct
     | Plan_seal_wrong_phase of Sandwalk_core.Phase.t
     | Plan_step_not_found of string
     | Step_claim_wrong_phase of Sandwalk_core.Phase.t
-    | Step_already_claimed of int64
+    | Step_already_claimed
     | Step_completed of string
     | Step_dependencies_incomplete of string
     | Claim_id_collision
     | Invalid_step_state of string
     | Claim_not_found
     | Claim_not_active
-    | Claim_expired of string
     | Search_wrong_phase of Sandwalk_core.Phase.t
     | Search_requires_claim
     | Hit_id_collision
@@ -98,12 +97,10 @@ module Record_snapshot_result = struct
   type t =
     { previous_schema_version : int
     ; step_key : Sandwalk_core.Plan_step.Key.t option
-    ; lease_expires_unix_seconds : int64 option
     }
 
   let previous_schema_version t = t.previous_schema_version
   let step_key t = t.step_key
-  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Snapshot_for_excerpt = struct
@@ -125,13 +122,11 @@ module Promote_snapshot_result = struct
     { previous_schema_version : int
     ; step_key : Sandwalk_core.Plan_step.Key.t
     ; promoted : bool
-    ; lease_expires_unix_seconds : int64
     }
 
   let previous_schema_version t = t.previous_schema_version
   let step_key t = t.step_key
   let promoted t = t.promoted
-  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Record_excerpt_result = struct
@@ -139,13 +134,11 @@ module Record_excerpt_result = struct
     { excerpt_id : Sandwalk_core.Excerpt_id.t
     ; created : bool
     ; step_key : Sandwalk_core.Plan_step.Key.t option
-    ; lease_expires_unix_seconds : int64 option
     }
 
   let excerpt_id t = t.excerpt_id
   let created t = t.created
   let step_key t = t.step_key
-  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Create_finding_result = struct
@@ -153,13 +146,11 @@ module Create_finding_result = struct
     { step_key : Sandwalk_core.Plan_step.Key.t
     ; finding_key : Sandwalk_core.Finding_key.t
     ; revision : int
-    ; lease_expires_unix_seconds : int64
     }
 
   let step_key t = t.step_key
   let finding_key t = t.finding_key
   let revision t = t.revision
-  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Attach_evidence_result = struct
@@ -167,13 +158,11 @@ module Attach_evidence_result = struct
     { revision : int
     ; attached : bool
     ; revised : bool
-    ; lease_expires_unix_seconds : int64
     }
 
   let revision t = t.revision
   let attached t = t.attached
   let revised t = t.revised
-  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Seal_finding_result = struct
@@ -181,25 +170,21 @@ module Seal_finding_result = struct
     { revision : int
     ; already_sealed : bool
     ; state : string
-    ; lease_expires_unix_seconds : int64
     }
 
   let revision t = t.revision
   let already_sealed t = t.already_sealed
   let state t = t.state
-  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Review_finding_result = struct
   type t =
     { revision : int
     ; reviewed : bool
-    ; lease_expires_unix_seconds : int64
     }
 
   let revision t = t.revision
   let reviewed t = t.reviewed
-  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Complete_step_result = struct
@@ -317,13 +302,11 @@ module Record_search_result = struct
     { previous_schema_version : int
     ; hits : Stored_hit.t list
     ; step_key : Sandwalk_core.Plan_step.Key.t option
-    ; lease_expires_unix_seconds : int64 option
     }
 
   let previous_schema_version t = t.previous_schema_version
   let hits t = t.hits
   let step_key t = t.step_key
-  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Save_checkpoint_result = struct
@@ -331,13 +314,11 @@ module Save_checkpoint_result = struct
     { previous_schema_version : int
     ; step_key : Sandwalk_core.Plan_step.Key.t
     ; checkpoint_number : int
-    ; lease_expires_unix_seconds : int64
     }
 
   let previous_schema_version t = t.previous_schema_version
   let step_key t = t.step_key
   let checkpoint_number t = t.checkpoint_number
-  let lease_expires_unix_seconds t = t.lease_expires_unix_seconds
 end
 
 module Latest_checkpoint = struct
@@ -361,7 +342,6 @@ module Claim_step_result = struct
     ; step_key : Sandwalk_core.Plan_step.Key.t
     ; attempt : int
     ; previous_state : Sandwalk_core.Step_state.t
-    ; expired_active_claim : bool
     }
 
   let previous_schema_version t = t.previous_schema_version
@@ -369,7 +349,6 @@ module Claim_step_result = struct
   let step_key t = t.step_key
   let attempt t = t.attempt
   let previous_state t = t.previous_state
-  let expired_active_claim t = t.expired_active_claim
 end
 
 module Active_claim = struct
@@ -377,13 +356,11 @@ module Active_claim = struct
     { claim_id : Sandwalk_core.Claim_id.t
     ; step_key : Sandwalk_core.Plan_step.Key.t
     ; attempt : int
-    ; lease_expires_at : string
     }
 
   let claim_id t = t.claim_id
   let step_key t = t.step_key
   let attempt t = t.attempt
-  let lease_expires_at t = t.lease_expires_at
 end
 
 module Stored_plan_step = struct
@@ -560,7 +537,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 20
+let current_schema_version = 21
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -1068,6 +1045,18 @@ PRAGMA user_version = 20;
 |}
 ;;
 
+let migration_v21 =
+  {|
+UPDATE step_executions
+SET state = 'suspended'
+WHERE state = 'expired';
+UPDATE claims
+SET end_reason = 'suspended'
+WHERE end_reason = 'expired';
+PRAGMA user_version = 21;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -1227,10 +1216,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:19 ~now)
       else Ok ()
     in
-    if from_version < 20
+    let%bind () =
+      if from_version < 20
+      then (
+        let%bind () = execute database migration_v20 in
+        insert_migration database ~version:20 ~now)
+      else Ok ()
+    in
+    if from_version < 21
     then (
-      let%bind () = execute database migration_v20 in
-      insert_migration database ~version:20 ~now)
+      let%bind () = execute database migration_v21 in
+      insert_migration database ~version:21 ~now)
     else Ok ())
 ;;
 
@@ -1607,12 +1603,28 @@ WHERE e.state IN ('pending', 'suspended', 'expired', 'blocked')
 ORDER BY p.position
 LIMIT 1
 |}
-              else
+              else if schema_version < 21
+              then
                 {|
 SELECT p.step_key
 FROM plan_steps p
 JOIN step_executions e ON e.step_key = p.step_key
 WHERE e.state IN ('pending', 'suspended', 'expired', 'blocked')
+  AND NOT EXISTS (
+    SELECT 1
+    FROM plan_dependencies d
+    JOIN step_executions de ON de.step_key = d.dependency_key
+    WHERE d.step_key = p.step_key AND de.state <> 'completed'
+  )
+ORDER BY p.position
+LIMIT 1
+|}
+              else
+                {|
+SELECT p.step_key
+FROM plan_steps p
+JOIN step_executions e ON e.step_key = p.step_key
+WHERE e.state IN ('pending', 'suspended', 'blocked')
   AND NOT EXISTS (
     SELECT 1
     FROM plan_dependencies d
@@ -2782,7 +2794,7 @@ let query_step_execution database ~step_key =
   with_statement
     database
     {|
-SELECT state, active_claim_id, lease_expires_unix_seconds, attempt
+SELECT state, active_claim_id, attempt
 FROM step_executions
 WHERE step_key = ?1
 |}
@@ -2802,19 +2814,14 @@ WHERE step_key = ?1
           then None
           else Some (Sqlite3.column_text statement 1)
         in
-        let lease_expires =
-          if Sqlite3.column_is_null statement 2
-          then None
-          else Some (Sqlite3.column_int64 statement 2)
-        in
-        state, active_claim_id, lease_expires, Sqlite3.column_int statement 3
+        state, active_claim_id, Sqlite3.column_int statement 2
       | Sqlite3.Rc.DONE -> Error (Error.Plan_step_not_found key)
       | return_code ->
         check database return_code
         |> Result.map
              ~f:
                (Fn.const
-                  (Sandwalk_core.Step_state.Pending, None, None, 0)))
+                  (Sandwalk_core.Step_state.Pending, None, 0)))
 ;;
 
 let claim_id_exists database claim_id =
@@ -2836,31 +2843,9 @@ let claim_id_exists database claim_id =
       | return_code -> check database return_code |> Result.map ~f:(Fn.const false))
 ;;
 
-let expire_claim database ~claim_id ~now =
-  with_statement
-    database
-    {|
-UPDATE claims
-SET ended_at = ?1, end_reason = 'expired'
-WHERE claim_id = ?2 AND ended_at IS NULL
-|}
-    ~f:(fun statement ->
-      let open Result.Let_syntax in
-      let%bind () = bind_text database statement 1 now in
-      let%bind () = bind_text database statement 2 claim_id in
-      step_done database statement)
-;;
-
-let insert_claim
-      database
-      ~claim_id
-      ~step_key
-      ~attempt
-      ~now
-      ~lease_expires_at
-      ~lease_expires_unix_seconds
-      ~lease_duration_seconds
-  =
+(* Schema 5-20 lease columns remain inert for migration compatibility.  Schema
+   21 never reads them or uses time to decide claim validity. *)
+let insert_claim database ~claim_id ~step_key ~attempt ~now =
   with_statement
     database
     {|
@@ -2868,7 +2853,7 @@ INSERT INTO claims (
   claim_id, step_key, attempt, issued_at, lease_expires_at,
   lease_expires_unix_seconds, lease_duration_seconds
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+VALUES (?1, ?2, ?3, ?4, 'unbounded', 9223372036854775807, 86400)
 |}
     ~f:(fun statement ->
       let open Result.Let_syntax in
@@ -2888,34 +2873,19 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
       in
       let%bind () = check database (Sqlite3.bind_int statement 3 attempt) in
       let%bind () = bind_text database statement 4 now in
-      let%bind () = bind_text database statement 5 lease_expires_at in
-      let%bind () =
-        check
-          database
-          (Sqlite3.bind_int64 statement 6 lease_expires_unix_seconds)
-      in
-      let%bind () =
-        check database (Sqlite3.bind_int statement 7 lease_duration_seconds)
-      in
       step_done database statement)
 ;;
 
-let activate_claim
-      database
-      ~claim_id
-      ~step_key
-      ~attempt
-      ~lease_expires_unix_seconds
-  =
+let activate_claim database ~claim_id ~step_key ~attempt =
   with_statement
     database
     {|
 UPDATE step_executions
 SET state = 'claimed',
     active_claim_id = ?1,
-    lease_expires_unix_seconds = ?2,
-    attempt = ?3
-WHERE step_key = ?4
+    lease_expires_unix_seconds = 9223372036854775807,
+    attempt = ?2
+WHERE step_key = ?3
 |}
     ~f:(fun statement ->
       let open Result.Let_syntax in
@@ -2926,17 +2896,12 @@ WHERE step_key = ?4
           1
           (Sandwalk_core.Claim_id.to_string claim_id)
       in
-      let%bind () =
-        check
-          database
-          (Sqlite3.bind_int64 statement 2 lease_expires_unix_seconds)
-      in
-      let%bind () = check database (Sqlite3.bind_int statement 3 attempt) in
+      let%bind () = check database (Sqlite3.bind_int statement 2 attempt) in
       let%bind () =
         bind_text
           database
           statement
-          4
+          3
           (Sandwalk_core.Plan_step.Key.to_string step_key)
       in
       step_done database statement)
@@ -2949,10 +2914,6 @@ let claim_step
       ~step_key
       ~claim_id
       ~now
-      ~now_unix_seconds
-      ~lease_expires_at
-      ~lease_expires_unix_seconds
-      ~lease_duration_seconds
       ()
   =
   try
@@ -2992,20 +2953,14 @@ let claim_step
               then Ok ()
               else Error (Error.Step_claim_wrong_phase phase)
             in
-            let%bind state, active_claim_id, active_expiry, previous_attempt =
+            let%bind state, _active_claim_id, previous_attempt =
               query_step_execution database ~step_key
             in
-            let lease_expired =
-              Option.value_map
-                active_expiry
-                ~default:false
-                ~f:(fun expiry -> Int64.(expiry <= now_unix_seconds))
-            in
             let%bind decision =
-              Sandwalk_core.Claim_decision.decide ~state ~lease_expired
+              Sandwalk_core.Claim_decision.decide ~state
               |> Result.map_error ~f:(function
                 | Sandwalk_core.Claim_decision.Error.Active_claim ->
-                  Error.Step_already_claimed (Option.value_exn active_expiry)
+                  Error.Step_already_claimed
                 | Sandwalk_core.Claim_decision.Error.Step_completed ->
                   Error.Step_completed
                     (Sandwalk_core.Plan_step.Key.to_string step_key))
@@ -3038,34 +2993,12 @@ WHERE d.step_key = ?1 AND e.state <> 'completed'
             let%bind () =
               if collision then Error Error.Claim_id_collision else Ok ()
             in
-            let%bind () =
-              if decision.expired_active_claim
-              then
-                expire_claim
-                  database
-                  ~claim_id:(Option.value_exn active_claim_id)
-                  ~now
-              else Ok ()
-            in
             let attempt = previous_attempt + 1 in
             let%bind () =
-              insert_claim
-                database
-                ~claim_id
-                ~step_key
-                ~attempt
-                ~now
-                ~lease_expires_at
-                ~lease_expires_unix_seconds
-                ~lease_duration_seconds
+              insert_claim database ~claim_id ~step_key ~attempt ~now
             in
             let%bind () =
-              activate_claim
-                database
-                ~claim_id
-                ~step_key
-                ~attempt
-                ~lease_expires_unix_seconds
+              activate_claim database ~claim_id ~step_key ~attempt
             in
             Ok
               { Claim_step_result.previous_schema_version
@@ -3073,7 +3006,6 @@ WHERE d.step_key = ?1 AND e.state <> 'completed'
               ; step_key
               ; attempt
               ; previous_state = decision.previous_state
-              ; expired_active_claim = decision.expired_active_claim
               }
           in
           (match outcome with
@@ -3099,7 +3031,7 @@ let query_active_claims database =
       (Sqlite3.exec
          database
          {|
-SELECT c.claim_id, c.step_key, c.attempt, c.lease_expires_at
+SELECT c.claim_id, c.step_key, c.attempt
 FROM step_executions e
 JOIN claims c ON c.claim_id = e.active_claim_id
 WHERE e.state = 'claimed'
@@ -3107,7 +3039,7 @@ ORDER BY c.step_key
 |}
          ~cb:(fun row _headers ->
            match row with
-           | [| Some claim_id; Some step_key; Some attempt; Some lease_expires_at |] ->
+           | [| Some claim_id; Some step_key; Some attempt |] ->
              let claim_id =
                Sandwalk_core.Claim_id.of_string claim_id |> Option.value_exn
              in
@@ -3120,7 +3052,6 @@ ORDER BY c.step_key
                { Active_claim.claim_id = claim_id
                ; step_key
                ; attempt = Int.of_string attempt
-               ; lease_expires_at
                }
                :: !claims
            | _ -> failwith "Invalid persisted active claim row"))
@@ -3252,8 +3183,7 @@ let query_claim_for_checkpoint database claim_id =
   with_statement
     database
     {|
-SELECT c.step_key, e.state, e.active_claim_id,
-       e.lease_expires_unix_seconds, c.lease_duration_seconds
+SELECT c.step_key, e.state, e.active_claim_id
 FROM claims c
 JOIN step_executions e ON e.step_key = c.step_key
 WHERE c.claim_id = ?1
@@ -3285,43 +3215,30 @@ WHERE c.claim_id = ?1
           then None
           else Some (Sqlite3.column_text statement 2)
         in
-        let lease_expires =
-          if Sqlite3.column_is_null statement 3
-          then None
-          else Some (Sqlite3.column_int64 statement 3)
-        in
-        let lease_duration =
-          if Sqlite3.column_is_null statement 4
-          then 900
-          else Sqlite3.column_int statement 4
-        in
-        step_key, state, active_claim_id, lease_expires, lease_duration
+        step_key, state, active_claim_id
       | Sqlite3.Rc.DONE -> Error Error.Claim_not_found
       | return_code ->
         check database return_code
         |> Result.map ~f:(fun () -> assert false))
 ;;
 
-let expire_step_execution database ~step_key =
-  with_statement
-    database
-    {|
-UPDATE step_executions
-SET state = 'expired',
-    active_claim_id = NULL,
-    lease_expires_unix_seconds = NULL
-WHERE step_key = ?1
-|}
-    ~f:(fun statement ->
-      let open Result.Let_syntax in
-      let%bind () =
-        bind_text
-          database
-          statement
-          1
-          (Sandwalk_core.Plan_step.Key.to_string step_key)
-      in
-      step_done database statement)
+let active_claim_step database claim_id =
+  let open Result.Let_syntax in
+  let%bind step_key, state, active_claim_id =
+    query_claim_for_checkpoint database claim_id
+  in
+  let claim_text = Sandwalk_core.Claim_id.to_string claim_id in
+  let%map () =
+    if
+      Sandwalk_core.Step_state.equal state Sandwalk_core.Step_state.Claimed
+      && Option.value_map
+           active_claim_id
+           ~default:false
+           ~f:(String.equal claim_text)
+    then Ok ()
+    else Error Error.Claim_not_active
+  in
+  step_key
 ;;
 
 let next_checkpoint_number database ~step_key =
@@ -3406,62 +3323,6 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
       step_done database statement)
 ;;
 
-let renew_claim database ~claim_id ~step_key ~lease_expires_unix_seconds =
-  let open Result.Let_syntax in
-  let%bind () =
-    with_statement
-      database
-      {|
-UPDATE claims
-SET lease_expires_unix_seconds = ?1,
-    lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?1, 'unixepoch')
-WHERE claim_id = ?2
-|}
-      ~f:(fun statement ->
-        let%bind () =
-          check
-            database
-            (Sqlite3.bind_int64 statement 1 lease_expires_unix_seconds)
-        in
-        let%bind () =
-          bind_text
-            database
-            statement
-            2
-            (Sandwalk_core.Claim_id.to_string claim_id)
-        in
-        step_done database statement)
-  in
-  with_statement
-    database
-    {|
-UPDATE step_executions
-SET lease_expires_unix_seconds = ?1
-WHERE step_key = ?2 AND active_claim_id = ?3
-|}
-    ~f:(fun statement ->
-      let%bind () =
-        check
-          database
-          (Sqlite3.bind_int64 statement 1 lease_expires_unix_seconds)
-      in
-      let%bind () =
-        bind_text
-          database
-          statement
-          2
-          (Sandwalk_core.Plan_step.Key.to_string step_key)
-      in
-      let%bind () =
-        bind_text
-          database
-          statement
-          3
-          (Sandwalk_core.Claim_id.to_string claim_id)
-      in
-      step_done database statement)
-;;
-
 let save_checkpoint
       ?(busy_timeout_ms = 5_000)
       ~database_path
@@ -3475,7 +3336,6 @@ let save_checkpoint
       ~next_md5
       ~next_size
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -3502,7 +3362,7 @@ let save_checkpoint
                   (Error.Workspace_slug_mismatch
                      { expected; actual = slug_text })
             in
-            let%bind step_key, state, active_claim_id, lease_expires, duration =
+            let%bind step_key, state, active_claim_id =
               query_claim_for_checkpoint database claim_id
             in
             let claim_text = Sandwalk_core.Claim_id.to_string claim_id in
@@ -3518,61 +3378,36 @@ let save_checkpoint
               then Ok ()
               else Error Error.Claim_not_active
             in
-            let lease_expires = Option.value_exn lease_expires in
-            if Int64.(lease_expires <= now_unix_seconds)
-            then (
-              let%bind () = expire_claim database ~claim_id:claim_text ~now in
-              let%map () = expire_step_execution database ~step_key in
-              `Expired step_key)
-            else (
-              let%bind checkpoint_number =
-                next_checkpoint_number database ~step_key
-              in
-              let%bind () =
-                insert_checkpoint
-                  database
-                  ~step_key
-                  ~claim_id
-                  ~checkpoint_number
-                  ~checkpoint
-                  ~summary_path
-                  ~summary_md5
-                  ~summary_size
-                  ~next_path
-                  ~next_md5
-                  ~next_size
-                  ~now
-              in
-              let lease_expires_unix_seconds =
-                Int64.(now_unix_seconds + of_int duration)
-              in
-              let%map () =
-                renew_claim
-                  database
-                  ~claim_id
-                  ~step_key
-                  ~lease_expires_unix_seconds
-              in
-              `Saved
-                { Save_checkpoint_result.previous_schema_version
-                ; step_key
-                ; checkpoint_number
-                ; lease_expires_unix_seconds
-                })
+            let%bind checkpoint_number =
+              next_checkpoint_number database ~step_key
+            in
+            let%map () =
+              insert_checkpoint
+                database
+                ~step_key
+                ~claim_id
+                ~checkpoint_number
+                ~checkpoint
+                ~summary_path
+                ~summary_md5
+                ~summary_size
+                ~next_path
+                ~next_md5
+                ~next_size
+                ~now
+            in
+            { Save_checkpoint_result.previous_schema_version
+            ; step_key
+            ; checkpoint_number
+            }
           in
           (match outcome with
-           | Ok (`Saved result) ->
+           | Ok result ->
              let%map () = execute database "COMMIT" in
-             Ok result
-           | Ok (`Expired step_key) ->
-             let%map () = execute database "COMMIT" in
-             Error
-               (Error.Claim_expired
-                  (Sandwalk_core.Plan_step.Key.to_string step_key))
+             result
            | Error error ->
              ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
-             Ok (Error error))
-          |> Result.join
+             Error error)
         with
         | exn -> Error (Error.Database_error (Exn.to_string exn)))
       ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
@@ -3719,7 +3554,6 @@ let record_search
       ~adapter
       ~hits
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -3751,40 +3585,13 @@ let record_search
               |> Result.of_option
                    ~error:(Error.Invalid_persisted_phase phase_text)
             in
-            let%bind step_key, lease_expires_unix_seconds =
+            let%bind step_key =
               match phase, claim_id with
-              | Sandwalk_core.Phase.Reconnaissance, None -> Ok (None, None)
+              | Sandwalk_core.Phase.Reconnaissance, None -> Ok None
               | Sandwalk_core.Phase.Researching, None ->
                 Error Error.Search_requires_claim
               | Sandwalk_core.Phase.Researching, Some claim_id ->
-                let%bind step_key, state, active_claim_id, expiry, duration =
-                  query_claim_for_checkpoint database claim_id
-                in
-                let claim_text = Sandwalk_core.Claim_id.to_string claim_id in
-                let%bind () =
-                  if
-                    Sandwalk_core.Step_state.equal
-                      state
-                      Sandwalk_core.Step_state.Claimed
-                    && Option.value_map
-                         active_claim_id
-                         ~default:false
-                         ~f:(String.equal claim_text)
-                  then Ok ()
-                  else Error Error.Claim_not_active
-                in
-                let expiry = Option.value_exn expiry in
-                let%bind () =
-                  if Int64.(expiry <= now_unix_seconds)
-                  then
-                    Error
-                      (Error.Claim_expired
-                         (Sandwalk_core.Plan_step.Key.to_string step_key))
-                  else Ok ()
-                in
-                Ok
-                  ( Some step_key
-                  , Some Int64.(now_unix_seconds + of_int duration) )
+                active_claim_step database claim_id |> Result.map ~f:Option.some
               | Sandwalk_core.Phase.Reconnaissance, Some _ ->
                 Error Error.Claim_not_active
               | _ -> Error (Error.Search_wrong_phase phase)
@@ -3809,21 +3616,10 @@ let record_search
                 insert_search_hit database ~query_id ~position:(index + 1) hit)
               |> Result.all
             in
-            let%bind () =
-              match claim_id, step_key, lease_expires_unix_seconds with
-              | Some claim_id, Some step_key, Some expiry ->
-                renew_claim
-                  database
-                  ~claim_id
-                  ~step_key
-                  ~lease_expires_unix_seconds:expiry
-              | _ -> Ok ()
-            in
             Ok
               { Record_search_result.previous_schema_version
               ; hits = stored_hits
               ; step_key
-              ; lease_expires_unix_seconds
               }
           in
           (match outcome with
@@ -3999,7 +3795,6 @@ let record_snapshot
       ~markdown_sha256
       ~manifest_json
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -4031,40 +3826,13 @@ let record_snapshot
               |> Result.of_option
                    ~error:(Error.Invalid_persisted_phase phase_text)
             in
-            let%bind step_key, lease_expires_unix_seconds =
+            let%bind step_key =
               match phase, claim_id with
-              | Sandwalk_core.Phase.Reconnaissance, None -> Ok (None, None)
+              | Sandwalk_core.Phase.Reconnaissance, None -> Ok None
               | Sandwalk_core.Phase.Researching, None ->
                 Error Error.Fetch_requires_claim
               | Sandwalk_core.Phase.Researching, Some claim_id ->
-                let%bind step_key, state, active_claim_id, expiry, duration =
-                  query_claim_for_checkpoint database claim_id
-                in
-                let claim_text = Sandwalk_core.Claim_id.to_string claim_id in
-                let%bind () =
-                  if
-                    Sandwalk_core.Step_state.equal
-                      state
-                      Sandwalk_core.Step_state.Claimed
-                    && Option.value_map
-                         active_claim_id
-                         ~default:false
-                         ~f:(String.equal claim_text)
-                  then Ok ()
-                  else Error Error.Claim_not_active
-                in
-                let expiry = Option.value_exn expiry in
-                let%bind () =
-                  if Int64.(expiry <= now_unix_seconds)
-                  then
-                    Error
-                      (Error.Claim_expired
-                         (Sandwalk_core.Plan_step.Key.to_string step_key))
-                  else Ok ()
-                in
-                Ok
-                  ( Some step_key
-                  , Some Int64.(now_unix_seconds + of_int duration) )
+                active_claim_step database claim_id |> Result.map ~f:Option.some
               | Sandwalk_core.Phase.Reconnaissance, Some _ ->
                 Error Error.Claim_not_active
               | _ -> Error (Error.Fetch_wrong_phase phase)
@@ -4101,20 +3869,9 @@ let record_snapshot
                 ~manifest_json
                 ~now
             in
-            let%bind () =
-              match claim_id, step_key, lease_expires_unix_seconds with
-              | Some claim_id, Some step_key, Some expiry ->
-                renew_claim
-                  database
-                  ~claim_id
-                  ~step_key
-                  ~lease_expires_unix_seconds:expiry
-              | _ -> Ok ()
-            in
             Ok
               { Record_snapshot_result.previous_schema_version
               ; step_key
-              ; lease_expires_unix_seconds
               }
           in
           (match outcome with
@@ -4138,7 +3895,6 @@ let promote_snapshot
       ~claim_id
       ~snapshot_id
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -4175,31 +3931,8 @@ let promote_snapshot
               then Ok ()
               else Error (Error.Snapshot_promotion_wrong_phase phase)
             in
-            let%bind step_key, state, active_claim_id, expiry, duration =
-              query_claim_for_checkpoint database claim_id
-            in
+            let%bind step_key = active_claim_step database claim_id in
             let claim_text = Sandwalk_core.Claim_id.to_string claim_id in
-            let%bind () =
-              if
-                Sandwalk_core.Step_state.equal
-                  state
-                  Sandwalk_core.Step_state.Claimed
-                && Option.value_map
-                     active_claim_id
-                     ~default:false
-                     ~f:(String.equal claim_text)
-              then Ok ()
-              else Error Error.Claim_not_active
-            in
-            let expiry = Option.value_exn expiry in
-            let%bind () =
-              if Int64.(expiry <= now_unix_seconds)
-              then
-                Error
-                  (Error.Claim_expired
-                     (Sandwalk_core.Plan_step.Key.to_string step_key))
-              else Ok ()
-            in
             let reference = Sandwalk_core.Snapshot_id.to_string snapshot_id in
             let parse_step statement column =
               match Sqlite3.column statement column with
@@ -4268,21 +4001,10 @@ INSERT INTO snapshot_promotions (
                     let%map () = step_done database statement in
                     true)
             in
-            let lease_expires_unix_seconds =
-              Int64.(now_unix_seconds + of_int duration)
-            in
-            let%bind () =
-              renew_claim
-                database
-                ~claim_id
-                ~step_key
-                ~lease_expires_unix_seconds
-            in
             Ok
               { Promote_snapshot_result.previous_schema_version
               ; step_key
               ; promoted
-              ; lease_expires_unix_seconds
               }
           in
           (match outcome with
@@ -4518,7 +4240,6 @@ let record_excerpt
       ~excerpt_md5
       ~excerpt_size
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -4550,40 +4271,13 @@ let record_excerpt
               |> Result.of_option
                    ~error:(Error.Invalid_persisted_phase phase_text)
             in
-            let%bind step_key, lease_expires_unix_seconds =
+            let%bind step_key =
               match phase, claim_id with
-              | Sandwalk_core.Phase.Reconnaissance, None -> Ok (None, None)
+              | Sandwalk_core.Phase.Reconnaissance, None -> Ok None
               | Sandwalk_core.Phase.Researching, None ->
                 Error Error.Excerpt_requires_claim
               | Sandwalk_core.Phase.Researching, Some claim_id ->
-                let%bind step_key, state, active_claim_id, expiry, duration =
-                  query_claim_for_checkpoint database claim_id
-                in
-                let claim_text = Sandwalk_core.Claim_id.to_string claim_id in
-                let%bind () =
-                  if
-                    Sandwalk_core.Step_state.equal
-                      state
-                      Sandwalk_core.Step_state.Claimed
-                    && Option.value_map
-                         active_claim_id
-                         ~default:false
-                         ~f:(String.equal claim_text)
-                  then Ok ()
-                  else Error Error.Claim_not_active
-                in
-                let expiry = Option.value_exn expiry in
-                let%bind () =
-                  if Int64.(expiry <= now_unix_seconds)
-                  then
-                    Error
-                      (Error.Claim_expired
-                         (Sandwalk_core.Plan_step.Key.to_string step_key))
-                  else Ok ()
-                in
-                Ok
-                  ( Some step_key
-                  , Some Int64.(now_unix_seconds + of_int duration) )
+                active_claim_step database claim_id |> Result.map ~f:Option.some
               | Sandwalk_core.Phase.Reconnaissance, Some _ ->
                 Error Error.Claim_not_active
               | _ -> Error (Error.Excerpt_wrong_phase phase)
@@ -4672,21 +4366,10 @@ WHERE s.snapshot_ref = ?1
                 in
                 excerpt_id, true
             in
-            let%bind () =
-              match claim_id, step_key, lease_expires_unix_seconds with
-              | Some claim_id, Some step_key, Some expiry ->
-                renew_claim
-                  database
-                  ~claim_id
-                  ~step_key
-                  ~lease_expires_unix_seconds:expiry
-              | _ -> Ok ()
-            in
             Ok
               { Record_excerpt_result.excerpt_id = stored_id
               ; created
               ; step_key
-              ; lease_expires_unix_seconds
               }
           in
           (match outcome with
@@ -4714,7 +4397,6 @@ let create_finding
       ~claim_md5
       ~claim_size
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -4751,31 +4433,7 @@ let create_finding
               then Ok ()
               else Error (Error.Finding_wrong_phase phase)
             in
-            let%bind claimed_step, state, active_claim_id, expiry, duration =
-              query_claim_for_checkpoint database claim_id
-            in
-            let claim_reference = Sandwalk_core.Claim_id.to_string claim_id in
-            let%bind () =
-              if
-                Sandwalk_core.Step_state.equal
-                  state
-                  Sandwalk_core.Step_state.Claimed
-                && Option.value_map
-                     active_claim_id
-                     ~default:false
-                     ~f:(String.equal claim_reference)
-              then Ok ()
-              else Error Error.Claim_not_active
-            in
-            let expiry = Option.value_exn expiry in
-            let%bind () =
-              if Int64.(expiry <= now_unix_seconds)
-              then
-                Error
-                  (Error.Claim_expired
-                     (Sandwalk_core.Plan_step.Key.to_string claimed_step))
-              else Ok ()
-            in
+            let%bind claimed_step = active_claim_step database claim_id in
             let%bind () =
               if
                 String.equal
@@ -4839,21 +4497,10 @@ INSERT INTO finding_revisions (
                   let%bind () = bind_text database statement 6 now in
                   step_done database statement)
             in
-            let lease_expires_unix_seconds =
-              Int64.(now_unix_seconds + of_int duration)
-            in
-            let%bind () =
-              renew_claim
-                database
-                ~claim_id
-                ~step_key
-                ~lease_expires_unix_seconds
-            in
             Ok
               { Create_finding_result.step_key
               ; finding_key
               ; revision = 1
-              ; lease_expires_unix_seconds
               }
           in
           (match outcome with
@@ -4880,7 +4527,6 @@ let attach_evidence
       ~excerpt_id
       ~relation
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -4915,31 +4561,7 @@ let attach_evidence
               then Ok ()
               else Error (Error.Finding_wrong_phase phase)
             in
-            let%bind claimed_step, state, active_claim_id, expiry, duration =
-              query_claim_for_checkpoint database claim_id
-            in
-            let claim_reference = Sandwalk_core.Claim_id.to_string claim_id in
-            let%bind () =
-              if
-                Sandwalk_core.Step_state.equal
-                  state
-                  Sandwalk_core.Step_state.Claimed
-                && Option.value_map
-                     active_claim_id
-                     ~default:false
-                     ~f:(String.equal claim_reference)
-              then Ok ()
-              else Error Error.Claim_not_active
-            in
-            let expiry = Option.value_exn expiry in
-            let%bind () =
-              if Int64.(expiry <= now_unix_seconds)
-              then
-                Error
-                  (Error.Claim_expired
-                     (Sandwalk_core.Plan_step.Key.to_string claimed_step))
-              else Ok ()
-            in
+            let%bind claimed_step = active_claim_step database claim_id in
             let step = Sandwalk_core.Plan_step.Key.to_string step_key in
             let%bind () =
               if
@@ -5170,21 +4792,10 @@ INSERT INTO finding_evidence (
                     let%bind () = bind_text database statement 6 now in
                     step_done database statement)
             in
-            let lease_expires_unix_seconds =
-              Int64.(now_unix_seconds + of_int duration)
-            in
-            let%bind () =
-              renew_claim
-                database
-                ~claim_id
-                ~step_key
-                ~lease_expires_unix_seconds
-            in
             Ok
               { Attach_evidence_result.revision = target_revision
               ; attached = not already_attached
               ; revised
-              ; lease_expires_unix_seconds
               }
           in
           (match outcome with
@@ -5209,7 +4820,6 @@ let seal_finding
       ~step_key
       ~finding_key
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -5244,31 +4854,7 @@ let seal_finding
               then Ok ()
               else Error (Error.Finding_wrong_phase phase)
             in
-            let%bind claimed_step, state, active_claim_id, expiry, duration =
-              query_claim_for_checkpoint database claim_id
-            in
-            let claim_reference = Sandwalk_core.Claim_id.to_string claim_id in
-            let%bind () =
-              if
-                Sandwalk_core.Step_state.equal
-                  state
-                  Sandwalk_core.Step_state.Claimed
-                && Option.value_map
-                     active_claim_id
-                     ~default:false
-                     ~f:(String.equal claim_reference)
-              then Ok ()
-              else Error Error.Claim_not_active
-            in
-            let expiry = Option.value_exn expiry in
-            let%bind () =
-              if Int64.(expiry <= now_unix_seconds)
-              then
-                Error
-                  (Error.Claim_expired
-                     (Sandwalk_core.Plan_step.Key.to_string claimed_step))
-              else Ok ()
-            in
+            let%bind claimed_step = active_claim_step database claim_id in
             let step = Sandwalk_core.Plan_step.Key.to_string step_key in
             let%bind () =
               if
@@ -5361,21 +4947,10 @@ WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
                     let%bind () = bind_text database statement 4 now in
                     step_done database statement))
             in
-            let lease_expires_unix_seconds =
-              Int64.(now_unix_seconds + of_int duration)
-            in
-            let%bind () =
-              renew_claim
-                database
-                ~claim_id
-                ~step_key
-                ~lease_expires_unix_seconds
-            in
             Ok
               { Seal_finding_result.revision
               ; already_sealed
               ; state = if already_sealed then finding_state else "sealed"
-              ; lease_expires_unix_seconds
               }
           in
           (match outcome with
@@ -5407,7 +4982,6 @@ let review_finding
       ~review_json
       ~review_md5
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -5442,31 +5016,7 @@ let review_finding
               then Ok ()
               else Error (Error.Finding_wrong_phase phase)
             in
-            let%bind claimed_step, state, active_claim_id, expiry, duration =
-              query_claim_for_checkpoint database claim_id
-            in
-            let claim_reference = Sandwalk_core.Claim_id.to_string claim_id in
-            let%bind () =
-              if
-                Sandwalk_core.Step_state.equal
-                  state
-                  Sandwalk_core.Step_state.Claimed
-                && Option.value_map
-                     active_claim_id
-                     ~default:false
-                     ~f:(String.equal claim_reference)
-              then Ok ()
-              else Error Error.Claim_not_active
-            in
-            let expiry = Option.value_exn expiry in
-            let%bind () =
-              if Int64.(expiry <= now_unix_seconds)
-              then
-                Error
-                  (Error.Claim_expired
-                     (Sandwalk_core.Plan_step.Key.to_string claimed_step))
-              else Ok ()
-            in
+            let%bind claimed_step = active_claim_step database claim_id in
             let step = Sandwalk_core.Plan_step.Key.to_string step_key in
             let%bind () =
               if
@@ -5582,20 +5132,9 @@ WHERE step_key = ?1 AND finding_key = ?2
                     step_done database statement)
               else Ok ()
             in
-            let lease_expires_unix_seconds =
-              Int64.(now_unix_seconds + of_int duration)
-            in
-            let%bind () =
-              renew_claim
-                database
-                ~claim_id
-                ~step_key
-                ~lease_expires_unix_seconds
-            in
             Ok
               { Review_finding_result.revision
               ; reviewed
-              ; lease_expires_unix_seconds
               }
           in
           (match outcome with
@@ -5618,7 +5157,6 @@ let complete_step
       ~expected_slug
       ~claim_id
       ~now
-      ~now_unix_seconds
       ()
   =
   try
@@ -5653,29 +5191,9 @@ let complete_step
               then Ok ()
               else Error (Error.Step_claim_wrong_phase phase)
             in
-            let%bind step_key, state, active_claim_id, expiry, _duration =
-              query_claim_for_checkpoint database claim_id
-            in
+            let%bind step_key = active_claim_step database claim_id in
             let claim_reference = Sandwalk_core.Claim_id.to_string claim_id in
-            let%bind () =
-              if
-                Sandwalk_core.Step_state.equal
-                  state
-                  Sandwalk_core.Step_state.Claimed
-                && Option.value_map
-                     active_claim_id
-                     ~default:false
-                     ~f:(String.equal claim_reference)
-              then Ok ()
-              else Error Error.Claim_not_active
-            in
-            let expiry = Option.value_exn expiry in
             let step = Sandwalk_core.Plan_step.Key.to_string step_key in
-            let%bind () =
-              if Int64.(expiry <= now_unix_seconds)
-              then Error (Error.Claim_expired step)
-              else Ok ()
-            in
             let%bind total, reviewed, rejected =
               with_statement
                 database

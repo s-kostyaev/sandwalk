@@ -294,7 +294,6 @@ module Step_state : sig
     | Pending
     | Claimed
     | Suspended
-    | Expired
     | Blocked
     | Completed
   [@@deriving equal, sexp]
@@ -312,14 +311,11 @@ module Claim_decision : sig
   end
 
   type t =
-    { previous_state : Step_state.t
-    ; expired_active_claim : bool
-    }
+    { previous_state : Step_state.t }
   [@@deriving sexp_of]
 
   val decide
     :  state:Step_state.t
-    -> lease_expired:bool
     -> (t, Error.t) Result.t
 end
 
@@ -369,7 +365,7 @@ module Resume_pack : sig
     -> schema_version:int
     -> plan_steps:(Plan_step.Key.t * string * bool * int) list
     -> durable_entities:(string * string * string option * string) list
-    -> active_claims:(Plan_step.Key.t * Claim_id.t * int * string) list
+    -> active_claims:(Plan_step.Key.t * Claim_id.t * int) list
     -> latest_checkpoint:(Plan_step.Key.t * string * string * string) option
     -> recent_commands:(string * string * string option) list
     -> unmatched_commands:string list

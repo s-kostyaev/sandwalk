@@ -1,5 +1,5 @@
   $ sandwalk init --slug dag-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"dag-test","phase":"initialized","schema_version":20}}
+  {"ok":true,"result":{"slug":"dag-test","phase":"initialized","schema_version":21}}
   $ printf 'Determine a small, well-sourced answer.\n' > objective.md
 
   $ sandwalk plan set-objective \
@@ -57,5 +57,5 @@ Cycles and self-dependencies are rejected transactionally.
 
   $ sandwalk step claim \
   >   --slug dag-test --directory-prefix workspaces --step collect | \
-  >   sed -E 's/claim_[0-9a-f]{32}/claim_ID/g; s/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:.]+Z/TIMESTAMP/g'
-  {"ok":true,"result":{"claim":"claim_ID","step":"collect","attempt":1,"lease_expires_at":"TIMESTAMP"}}
+  >   sed -E 's/claim_[0-9a-f]{32}/claim_ID/g'
+  {"ok":true,"result":{"claim":"claim_ID","step":"collect","attempt":1}}

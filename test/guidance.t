@@ -12,7 +12,7 @@
   {"ok":true,"result":{"code":"SEARCH_ADAPTER_FAILED","explanation":"The search adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify `sandwalk-search-ddgr` and `ddgr` are on PATH, the temporary directory exists, and DuckDuckGo is allowed by the network sandbox."}}
 
   $ sandwalk init --slug guidance-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":20}}
+  {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":21}}
 
   $ sandwalk next --slug guidance-test --directory-prefix "work spaces"
   {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}

@@ -33,7 +33,7 @@ atomically records one new step and its reason without changing existing steps.
 ## Research one step
 
 ```console
-sandwalk step claim --slug <slug> --step <step> [--lease-seconds 900]
+sandwalk step claim --slug <slug> --step <step>
 sandwalk snapshot promote --slug <slug> --claim <claim_id> <snapshot_id>
 sandwalk search --slug <slug> --claim <claim_id> --query <query> [--limit 10]
 sandwalk fetch --slug <slug> --claim <claim_id> <hit_id>
@@ -70,6 +70,9 @@ sandwalk step checkpoint --slug <slug> --claim <claim_id> \
   --summary-file <summary.md> --next-file <next.md>
 sandwalk resume --slug <slug>
 ```
+
+Claims do not expire. On interruption or context loss, recover the existing
+active claim from `sandwalk resume`; do not claim the same step again.
 
 ## Review a finding
 

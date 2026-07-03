@@ -1,5 +1,5 @@
   $ sandwalk init --slug promotion-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"promotion-test","phase":"initialized","schema_version":20}}
+  {"ok":true,"result":{"slug":"promotion-test","phase":"initialized","schema_version":21}}
   $ printf 'Find one reusable source.' > goal.md
   $ sandwalk recon start --slug promotion-test --directory-prefix workspaces \
   >   --goal-file goal.md >/dev/null
@@ -33,8 +33,8 @@ A promotion associates the snapshot without changing its immutable artifact.
   $ before=$(shasum -a 256 workspaces/promotion-test/artifacts/snapshots/"$snapshot"/document.md)
   $ sandwalk snapshot promote --slug promotion-test \
   >   --directory-prefix workspaces --claim "$evidence_claim" "$snapshot" | \
-  >   sed -E 's/snap_[0-9a-f]{32}/snap_ID/g; s/"lease_expires_at":"[^"]+"/"lease_expires_at":"TIMESTAMP"/'
-  {"ok":true,"result":{"snapshot":"snap_ID","step":"evidence","promoted":true,"lease_expires_at":"TIMESTAMP"}}
+  >   sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
+  {"ok":true,"result":{"snapshot":"snap_ID","step":"evidence","promoted":true}}
   $ after=$(shasum -a 256 workspaces/promotion-test/artifacts/snapshots/"$snapshot"/document.md)
   $ test "$before" = "$after"
 
@@ -42,8 +42,8 @@ The same step may retry idempotently, while another step cannot take ownership.
 
   $ sandwalk snapshot promote --slug promotion-test \
   >   --directory-prefix workspaces --claim "$evidence_claim" "$snapshot" | \
-  >   sed -E 's/snap_[0-9a-f]{32}/snap_ID/g; s/"lease_expires_at":"[^"]+"/"lease_expires_at":"TIMESTAMP"/'
-  {"ok":true,"result":{"snapshot":"snap_ID","step":"evidence","promoted":false,"lease_expires_at":"TIMESTAMP"}}
+  >   sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
+  {"ok":true,"result":{"snapshot":"snap_ID","step":"evidence","promoted":false}}
 
   $ sandwalk snapshot promote --slug promotion-test \
   >   --directory-prefix workspaces --claim "$alternative_claim" "$snapshot" | \
@@ -76,4 +76,4 @@ Released schema 19 upgrades through the promotion migration.
   $ ./inspect_workspace.exe --create-v19 legacy/database/sandwalk.sqlite3 legacy
   $ sandwalk gc --slug legacy --directory-prefix . --raw --plan >/dev/null
   $ ./inspect_workspace.exe legacy/database/sandwalk.sqlite3 | sed -n '2p'
-  20
+  21

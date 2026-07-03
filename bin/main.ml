@@ -59,7 +59,7 @@ let compact_hint code =
     workspace_hint [ "plan"; "validate" ]
   | "STEP_DEPENDENCIES_INCOMPLETE" ->
     workspace_hint [ "next" ]
-  | "CLAIM_EXPIRED" | "STEP_ALREADY_CLAIMED" ->
+  | "STEP_ALREADY_CLAIMED" ->
     workspace_hint [ "resume" ]
   | "GC_PLAN_STALE" -> workspace_hint [ "gc"; "--raw"; "--plan" ]
   | _ -> None
@@ -115,12 +115,8 @@ let explanation = function
       , "Complete the prerequisite steps before claiming this step." )
   | "STEP_ALREADY_CLAIMED" ->
     Some
-      ( "The step has a live lease owned by another claim."
-      , "Resume the existing work or wait for its lease to expire." )
-  | "CLAIM_EXPIRED" ->
-    Some
-      ( "The claim lease expired before this operation was recorded."
-      , "Claim the step again and continue under the new claim identifier." )
+      ( "The step already has an active exclusive claim."
+      , "Resume the existing work with its claim identifier." )
   | "FINDING_HAS_NO_EVIDENCE" ->
     Some
       ( "A finding must cite at least one exact excerpt before it can be sealed."
@@ -345,14 +341,13 @@ let status_error = function
   | Plan_seal_wrong_phase _
   | Plan_step_not_found _
   | Step_claim_wrong_phase _
-  | Step_already_claimed _
+  | Step_already_claimed
   | Step_completed _
   | Step_dependencies_incomplete _
   | Claim_id_collision
   | Invalid_step_state _
   | Claim_not_found
   | Claim_not_active
-  | Claim_expired _
   | Search_wrong_phase _
   | Search_requires_claim
   | Hit_id_collision
@@ -777,9 +772,7 @@ let resume_command =
                          (List.map active_claims ~f:(fun active ->
                             ( Sandwalk_store.Active_claim.step_key active
                             , Sandwalk_store.Active_claim.claim_id active
-                            , Sandwalk_store.Active_claim.attempt active
-                            , Sandwalk_store.Active_claim.lease_expires_at
-                                active )))
+                            , Sandwalk_store.Active_claim.attempt active )))
                        ~latest_checkpoint:
                          (Option.map latest_checkpoint ~f:(fun checkpoint ->
                             ( Sandwalk_store.Latest_checkpoint.step_key checkpoint
@@ -3045,7 +3038,7 @@ let claim_error = function
     "PLAN_STEP_NOT_FOUND", sprintf "Plan step %S does not exist." key
   | Step_claim_wrong_phase _ ->
     "STEP_CLAIM_NOT_ALLOWED", "Steps can only be claimed while researching."
-  | Step_already_claimed _ ->
+  | Step_already_claimed ->
     "STEP_ALREADY_CLAIMED", "Plan step already has an active claim."
   | Step_completed key ->
     "STEP_COMPLETED", sprintf "Plan step %S is already completed." key
@@ -3056,13 +3049,12 @@ let claim_error = function
     "CLAIM_ID_COLLISION", "Could not allocate a unique claim identifier."
   | Claim_not_found -> "CLAIM_NOT_FOUND", "Claim does not exist."
   | Claim_not_active -> "CLAIM_NOT_ACTIVE", "Claim is no longer active."
-  | Claim_expired _ -> "CLAIM_EXPIRED", "Claim lease has expired."
   | error -> status_error error
 ;;
 
 let step_claim_command =
   Async.Command.async
-    ~summary:"Acquire a temporary lease for one plan step."
+    ~summary:"Acquire an exclusive capability for one plan step."
     (let%map_open.Command slug_text =
        flag "--slug" (required string) ~doc:"SLUG Workspace slug"
      and directory_prefix =
@@ -3072,11 +3064,6 @@ let step_claim_command =
          ~doc:"PATH Parent directory for Sandwalk workspaces"
      and step_text =
        flag "--step" (required string) ~doc:"KEY Plan step key"
-     and lease_seconds =
-       flag
-         "--lease-seconds"
-         (optional_with_default 900 int)
-         ~doc:"SECONDS Lease duration from 30 to 86400 seconds"
      in
      fun () ->
        match
@@ -3092,12 +3079,6 @@ let step_claim_command =
            ~code:"INVALID_PLAN_STEP_KEY"
            ~message:(Sandwalk_core.Plan_step.Key.Error.message error)
        | Ok slug, Ok step_key ->
-         if lease_seconds < 30 || lease_seconds > 86_400
-         then
-           print_failure_and_exit
-             ~code:"INVALID_LEASE"
-             ~message:"Lease duration must be between 30 and 86400 seconds."
-         else (
            let directory_prefix =
              Sandwalk_runtime.resolve_directory_prefix
                ~command_line:directory_prefix
@@ -3112,7 +3093,6 @@ let step_claim_command =
                ; ( "step"
                  , `String
                      (Sandwalk_core.Plan_step.Key.to_string step_key) )
-               ; "lease_seconds", `Int lease_seconds
                ]
            in
            let%bind database_exists =
@@ -3126,23 +3106,6 @@ let step_claim_command =
                ~message:"Workspace does not exist."
            else (
              let started_at = Time_float_unix.now () in
-             let lease_expires =
-               Time_float.add
-                 started_at
-                 (Time_float.Span.of_sec (Float.of_int lease_seconds))
-             in
-             let now_unix_seconds =
-               Time_float.to_span_since_epoch started_at
-               |> Time_float.Span.to_sec
-               |> Float.iround_down_exn
-               |> Int64.of_int
-             in
-             let lease_expires_unix_seconds =
-               Int64.(now_unix_seconds + of_int lease_seconds)
-             in
-             let lease_expires_at =
-               Sandwalk_runtime.timestamp_utc lease_expires
-             in
              let%bind invocation_id =
                In_thread.run (fun () ->
                  Sandwalk_runtime.invocation_id ~now:started_at)
@@ -3230,10 +3193,6 @@ let step_claim_command =
                        ~step_key
                        ~claim_id
                        ~now:(Sandwalk_runtime.timestamp_utc started_at)
-                       ~now_unix_seconds
-                       ~lease_expires_at
-                       ~lease_expires_unix_seconds
-                       ~lease_duration_seconds:lease_seconds
                        ())
                  in
                  match result with
@@ -3323,18 +3282,17 @@ let step_claim_command =
                            , `Int
                                (Sandwalk_store.Claim_step_result.attempt
                                   claimed) )
-                         ; "lease_expires_at", `String lease_expires_at
                          ]
                      in
                      Sandwalk_protocol.Envelope.success ~result ()
                      |> Sandwalk_protocol.Envelope.render
                      |> print_endline;
-                     Deferred.unit)))))
+                     Deferred.unit))))
 ;;
 
 let step_checkpoint_command =
   Async.Command.async
-    ~summary:"Record a semantic checkpoint and renew its claim lease."
+    ~summary:"Record a semantic checkpoint for an active claim."
     (let%map_open.Command slug_text =
        flag "--slug" (required string) ~doc:"SLUG Workspace slug"
      and directory_prefix =
@@ -3424,12 +3382,6 @@ let step_checkpoint_command =
                     ]
                 in
                 let started_at = Time_float_unix.now () in
-                let now_unix_seconds =
-                  Time_float.to_span_since_epoch started_at
-                  |> Time_float.Span.to_sec
-                  |> Float.iround_down_exn
-                  |> Int64.of_int
-                in
                 let%bind invocation_id =
                   In_thread.run (fun () ->
                     Sandwalk_runtime.invocation_id ~now:started_at)
@@ -3528,41 +3480,15 @@ let step_checkpoint_command =
                          ~next_md5:(Sandwalk_runtime.File_input.md5 next_input)
                          ~next_size:(Sandwalk_runtime.File_input.size next_input)
                          ~now:(Sandwalk_runtime.timestamp_utc started_at)
-                         ~now_unix_seconds
                          ())
                    in
                    (match saved with
                     | Error error ->
                       let code, message = claim_error error in
-                      (match error with
-                       | Sandwalk_store.Error.Claim_expired step ->
-                         fail_with_audit
-                           ~step
-                           ~state_changes:
-                             [ `Assoc
-                                 [ "entity", `String ("step." ^ step ^ ".state")
-                                 ; "from", `String "claimed"
-                                 ; "to", `String "expired"
-                                 ]
-                             ]
-                           ~code
-                           ~message
-                           ()
-                       | _ -> fail_with_audit ~code ~message ())
+                      fail_with_audit ~code ~message ()
                     | Ok saved ->
                       let step_key =
                         Sandwalk_store.Save_checkpoint_result.step_key saved
-                      in
-                      let lease_expires_unix_seconds =
-                        Sandwalk_store.Save_checkpoint_result
-                        .lease_expires_unix_seconds
-                          saved
-                      in
-                      let lease_expires_at =
-                        Time_float.of_span_since_epoch
-                          (Time_float.Span.of_sec
-                             (Int64.to_float lease_expires_unix_seconds))
-                        |> Sandwalk_runtime.timestamp_utc
                       in
                       let checkpoint_number =
                         Sandwalk_store.Save_checkpoint_result.checkpoint_number
@@ -3577,11 +3503,6 @@ let step_checkpoint_command =
                                    ^ ".checkpoint") )
                             ; "from", `Null
                             ; "to", `Int checkpoint_number
-                            ]
-                        ; `Assoc
-                            [ "entity", `String "claim.lease"
-                            ; "from", `Null
-                            ; "to", `String lease_expires_at
                             ]
                         ]
                       in
@@ -3616,7 +3537,6 @@ let step_checkpoint_command =
                                    (Sandwalk_core.Plan_step.Key.to_string
                                       step_key) )
                              ; "checkpoint", `Int checkpoint_number
-                             ; "lease_expires_at", `String lease_expires_at
                              ]
                          in
                          Sandwalk_protocol.Envelope.success ~result ()
@@ -3975,12 +3895,6 @@ let fetch_command =
                                        "Could not publish immutable snapshot."
                                  | Ok () ->
                                    let persisted_at = Time_float_unix.now () in
-                                   let now_unix_seconds =
-                                     Time_float.to_span_since_epoch persisted_at
-                                     |> Time_float.Span.to_sec
-                                     |> Float.iround_down_exn
-                                     |> Int64.of_int
-                                   in
                                    let%bind persisted =
                                      In_thread.run (fun () ->
                                        Sandwalk_store.record_snapshot
@@ -4007,7 +3921,6 @@ let fetch_command =
                                          ~now:
                                            (Sandwalk_runtime.timestamp_utc
                                               persisted_at)
-                                         ~now_unix_seconds
                                          ())
                                    in
                                    (match persisted with
@@ -4134,12 +4047,6 @@ let snapshot_promote_command =
              ~message:"Workspace does not exist."
          else (
            let started_at = Time_float_unix.now () in
-           let now_unix_seconds =
-             Time_float.to_span_since_epoch started_at
-             |> Time_float.Span.to_sec
-             |> Float.iround_down_exn
-             |> Int64.of_int
-           in
            let%bind invocation_id =
              In_thread.run (fun () ->
                Sandwalk_runtime.invocation_id ~now:started_at)
@@ -4223,34 +4130,17 @@ let snapshot_promote_command =
                    ~claim_id
                    ~snapshot_id
                    ~now:(Sandwalk_runtime.timestamp_utc started_at)
-                   ~now_unix_seconds
                    ())
              in
              (match promoted with
               | Error error ->
                 let code, message = snapshot_promotion_error error in
-                let step =
-                  match error with
-                  | Sandwalk_store.Error.Claim_expired step -> Some step
-                  | _ -> None
-                in
-                fail_with_audit ?step ~code ~message ()
+                fail_with_audit ~code ~message ()
               | Ok promoted ->
                 let step_key =
                   Sandwalk_store.Promote_snapshot_result.step_key promoted
                 in
                 let step = Sandwalk_core.Plan_step.Key.to_string step_key in
-                let lease_expires_unix_seconds =
-                  Sandwalk_store.Promote_snapshot_result
-                  .lease_expires_unix_seconds
-                    promoted
-                in
-                let lease_expires_at =
-                  Time_float.of_span_since_epoch
-                    (Time_float.Span.of_sec
-                       (Int64.to_float lease_expires_unix_seconds))
-                  |> Sandwalk_runtime.timestamp_utc
-                in
                 let did_promote =
                   Sandwalk_store.Promote_snapshot_result.promoted promoted
                 in
@@ -4264,12 +4154,6 @@ let snapshot_promote_command =
                          ]
                      ]
                    else [])
-                  @ [ `Assoc
-                        [ "entity", `String ("step." ^ step ^ ".lease")
-                        ; "from", `Null
-                        ; "to", `String lease_expires_at
-                        ]
-                    ]
                 in
                 let finished_at = Time_float_unix.now () in
                 let duration_ms =
@@ -4299,7 +4183,6 @@ let snapshot_promote_command =
                        [ "snapshot", `String snapshot_text
                        ; "step", `String step
                        ; "promoted", `Bool did_promote
-                       ; "lease_expires_at", `String lease_expires_at
                        ]
                    in
                    Sandwalk_protocol.Envelope.success ~result ()
@@ -4623,12 +4506,6 @@ let excerpt_create_command =
                                  ~message:"Could not publish excerpt artifact."
                              | Ok () ->
                                let persisted_at = Time_float_unix.now () in
-                               let now_unix_seconds =
-                                 Time_float.to_span_since_epoch persisted_at
-                                 |> Time_float.Span.to_sec
-                                 |> Float.iround_down_exn
-                                 |> Int64.of_int
-                               in
                                let%bind persisted =
                                  In_thread.run (fun () ->
                                    Sandwalk_store.record_excerpt
@@ -4662,7 +4539,6 @@ let excerpt_create_command =
                                      ~now:
                                        (Sandwalk_runtime.timestamp_utc
                                           persisted_at)
-                                     ~now_unix_seconds
                                      ())
                                in
                                (match persisted with
@@ -4996,12 +4872,6 @@ let search_command =
                               , Sandwalk_protocol.Search_adapter.snippet result ))
                           in
                           let persisted_at = Time_float_unix.now () in
-                          let now_unix_seconds =
-                            Time_float.to_span_since_epoch persisted_at
-                            |> Time_float.Span.to_sec
-                            |> Float.iround_down_exn
-                            |> Int64.of_int
-                          in
                           let%bind persisted =
                             In_thread.run (fun () ->
                               Sandwalk_store.record_search
@@ -5015,7 +4885,6 @@ let search_command =
                                 ~hits
                                 ~now:
                                   (Sandwalk_runtime.timestamp_utc persisted_at)
-                                ~now_unix_seconds
                                 ())
                           in
                           (match persisted with
@@ -5289,12 +5158,6 @@ let finding_create_command =
                   ~message:"Finding statement exceeds 65,536 bytes."
               | Ok finding_claim ->
                 let started_at = Time_float_unix.now () in
-                let now_unix_seconds =
-                  Time_float.to_span_since_epoch started_at
-                  |> Time_float.Span.to_sec
-                  |> Float.iround_down_exn
-                  |> Int64.of_int
-                in
                 let%bind invocation_id =
                   In_thread.run (fun () ->
                     Sandwalk_runtime.invocation_id ~now:started_at)
@@ -5378,7 +5241,6 @@ let finding_create_command =
                          ~claim_md5:(Sandwalk_runtime.File_input.md5 input)
                          ~claim_size:(Sandwalk_runtime.File_input.size input)
                          ~now:(Sandwalk_runtime.timestamp_utc started_at)
-                         ~now_unix_seconds
                          ())
                    in
                    let finished_at = Time_float_unix.now () in
@@ -5526,12 +5388,6 @@ let finding_attach_command =
              ~message:"Workspace does not exist."
          else (
            let started_at = Time_float_unix.now () in
-           let now_unix_seconds =
-             Time_float.to_span_since_epoch started_at
-             |> Time_float.Span.to_sec
-             |> Float.iround_down_exn
-             |> Int64.of_int
-           in
            let%bind invocation_id =
              In_thread.run (fun () ->
                Sandwalk_runtime.invocation_id ~now:started_at)
@@ -5600,7 +5456,6 @@ let finding_attach_command =
                     ~excerpt_id
                     ~relation
                     ~now:(Sandwalk_runtime.timestamp_utc started_at)
-                    ~now_unix_seconds
                     ())
               in
               let finished_at = Time_float_unix.now () in
@@ -5736,12 +5591,6 @@ let finding_seal_command =
              ~message:"Workspace does not exist."
          else (
            let started_at = Time_float_unix.now () in
-           let now_unix_seconds =
-             Time_float.to_span_since_epoch started_at
-             |> Time_float.Span.to_sec
-             |> Float.iround_down_exn
-             |> Int64.of_int
-           in
            let%bind invocation_id =
              In_thread.run (fun () ->
                Sandwalk_runtime.invocation_id ~now:started_at)
@@ -5805,7 +5654,6 @@ let finding_seal_command =
                     ~step_key
                     ~finding_key
                     ~now:(Sandwalk_runtime.timestamp_utc started_at)
-                    ~now_unix_seconds
                     ())
               in
               let finished_at = Time_float_unix.now () in
@@ -5970,12 +5818,6 @@ let finding_review_command =
                   ~message:"Finding review JSON is invalid or unsupported."
               | Ok review ->
                 let started_at = Time_float_unix.now () in
-                let now_unix_seconds =
-                  Time_float.to_span_since_epoch started_at
-                  |> Time_float.Span.to_sec
-                  |> Float.iround_down_exn
-                  |> Int64.of_int
-                in
                 let%bind invocation_id =
                   In_thread.run (fun () ->
                     Sandwalk_runtime.invocation_id ~now:started_at)
@@ -6069,7 +5911,6 @@ let finding_review_command =
                            (Sandwalk_runtime.File_input.content input)
                          ~review_md5:(Sandwalk_runtime.File_input.md5 input)
                          ~now:(Sandwalk_runtime.timestamp_utc started_at)
-                         ~now_unix_seconds
                          ())
                    in
                    let finished_at = Time_float_unix.now () in
@@ -6202,12 +6043,6 @@ let step_complete_command =
              ~message:"Workspace does not exist."
          else (
            let started_at = Time_float_unix.now () in
-           let now_unix_seconds =
-             Time_float.to_span_since_epoch started_at
-             |> Time_float.Span.to_sec
-             |> Float.iround_down_exn
-             |> Int64.of_int
-           in
            let%bind invocation_id =
              In_thread.run (fun () ->
                Sandwalk_runtime.invocation_id ~now:started_at)
@@ -6271,7 +6106,6 @@ let step_complete_command =
                     ~expected_slug:slug
                     ~claim_id
                     ~now:(Sandwalk_runtime.timestamp_utc started_at)
-                    ~now_unix_seconds
                     ())
               in
               let finished_at = Time_float_unix.now () in

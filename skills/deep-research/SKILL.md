@@ -80,4 +80,6 @@ edit the SQLite database, projections, snapshots, excerpts, or audit log.
   `[cite:step-key/finding-key]`; Sandwalk renders final citations.
 - If a command fails, use `sandwalk explain CODE`, repair the stated invariant,
   and retry.
-- Keep at most one live claim per worker and checkpoint before handing work off.
+- Keep at most one active claim per worker. Claims do not expire; recover the
+  existing claim with `resume` after interruption, and checkpoint before handing
+  work off.

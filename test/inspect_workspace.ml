@@ -815,6 +815,34 @@ PRAGMA user_version = 19;
 |})
 ;;
 
+let create_v20 database slug =
+  create_v19 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE snapshot_promotions (
+  snapshot_ref TEXT PRIMARY KEY REFERENCES snapshots(snapshot_ref),
+  step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+  promoted_at TEXT NOT NULL
+);
+UPDATE step_executions
+SET state = 'expired',
+    active_claim_id = NULL,
+    lease_expires_unix_seconds = NULL
+WHERE step_key = 'fixture-step';
+UPDATE claims
+SET ended_at = '2026-01-01 00:15:00Z',
+    end_reason = 'expired'
+WHERE claim_id = 'claim_00000000000000000000000000000001';
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (20, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 20;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -1011,6 +1039,7 @@ let () =
     | [| _; "--create-v17"; path; slug |] -> `Create (17, slug), path
     | [| _; "--create-v18"; path; slug |] -> `Create (18, slug), path
     | [| _; "--create-v19"; path; slug |] -> `Create (19, slug), path
+    | [| _; "--create-v20"; path; slug |] -> `Create (20, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
@@ -1025,7 +1054,8 @@ let () =
     | [| _; "--inspect-recon"; path |] -> `Inspect_recon, path
     | [| _; "--inspect-extensions"; path |] -> `Inspect_extensions, path
     | [| _; "--inspect-promotions"; path |] -> `Inspect_promotions, path
-    | [| _; "--expire-claim"; path; step |] -> `Expire_claim step, path
+    | [| _; "--set-legacy-deadline"; path; step |] ->
+      `Set_legacy_deadline step, path
     | [| _; path |] -> `Inspect, path
     | _ -> failwith "usage: inspect_workspace [--create-v1] DATABASE [SLUG]"
   in
@@ -1053,6 +1083,7 @@ let () =
       | `Create (17, slug) -> create_v17 database slug
       | `Create (18, slug) -> create_v18 database slug
       | `Create (19, slug) -> create_v19 database slug
+      | `Create (20, slug) -> create_v20 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
@@ -1069,7 +1100,7 @@ let () =
       | `Inspect_recon -> inspect_recon database
       | `Inspect_extensions -> inspect_extensions database
       | `Inspect_promotions -> inspect_promotions database
-      | `Expire_claim step ->
+      | `Set_legacy_deadline step ->
         let statement =
           Sqlite3.prepare
             database

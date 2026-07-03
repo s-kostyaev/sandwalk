@@ -46,7 +46,7 @@ Public opaque references exist only when possession proves provenance:
 - `hit_...`: a result returned by a search adapter.
 - `snap_...`: an immutable retrieved and normalized document snapshot.
 - `excerpt_...`: an exact, validated fragment of one snapshot.
-- `claim_...`: a temporary lease for an agent working on one plan step.
+- `claim_...`: an exclusive capability for an agent working on one plan step.
 
 Plan steps and findings use human-readable keys. Logical sources, evidence
 bundles, reviews, queue rows, and event identifiers remain internal.
@@ -142,21 +142,20 @@ sandwalk snapshot promote --slug <slug> --claim <claim> <snapshot>
 Snapshots discovered during reconnaissance are ordinary immutable snapshots.
 They are tagged with their purpose and may later be promoted to a research plan
 step without being fetched again. Promotion creates a separate, append-only
-ownership association and renews the active claim; it does not rewrite snapshot
-content or provenance. Repeating promotion to the same step is idempotent, and
-promotion to a different step is rejected. Reconnaissance observations are not
-findings and cannot pass report validation by themselves.
+ownership association; it does not rewrite snapshot content or provenance.
+Repeating promotion to the same step is idempotent, and promotion to a different
+step is rejected. Reconnaissance observations are not findings and cannot pass
+report validation by themselves.
 
-Searches in `researching` require the active step claim and renew its lease only
-after the bounded adapter response and minted hit references commit. Adapter
-execution occurs before the short persistence transaction.
+Searches in `researching` require the active step claim. Adapter execution
+occurs before the short persistence transaction.
 
 Fetches in `researching` likewise require the active claim for the step that
 owns the hit. The adapter runs outside SQLite, writes into
 `artifacts/temporary/`, and must publish a valid manifest and non-empty
 Markdown document. Sandwalk then atomically renames that directory to its
-immutable `snap_...` path before recording snapshot provenance and renewing the
-claim in one short transaction.
+immutable `snap_...` path before recording snapshot provenance in one short
+transaction.
 
 ## Plan
 
@@ -197,26 +196,33 @@ advances, validates, and seals the append-only plan revision in one transaction,
 so a new step is never claimable from an intermediate revision. Extension
 history is included in `plan list` and the human-readable plan projection.
 
-## Claims, leases, and recovery
+## Claims and recovery
 
-A plan step is the durable unit of work. A claim is a temporary capability to
-execute it. There is no public work identifier or permanent worker identifier.
+A plan step is the durable unit of work. A claim is an exclusive, durable
+capability to execute it. There is no public work identifier or permanent
+worker identifier.
 
 ```console
-sandwalk step claim --slug <slug> --step <key> [--lease-seconds <seconds>]
+sandwalk step claim --slug <slug> --step <key>
 ```
 
-The default lease is 900 seconds. Explicit leases range from 30 seconds to 24
-hours. Claim identifiers contain the `claim_` prefix and 128 bits of random
-entropy. Clocks and identifier generation are supplied at the runtime boundary.
+Claim identifiers contain the `claim_` prefix and 128 bits of random entropy.
+A claim remains active until its step completes or an explicit state transition
+suspends it. Wall-clock time never changes claim validity or any domain state.
+Timestamps are provenance metadata only.
+
+Schemas 5–20 stored lease deadlines and an `expired` state. Migration 21 maps
+legacy `expired` executions to `suspended`. The old lease columns remain inert
+for migration compatibility and must never be read to make a domain decision.
 
 ```text
-pending → claimed → suspended | expired | blocked → claimed → completed
+pending | suspended | blocked → claimed → completed
 ```
 
 Every mutating research command associated with a step accepts its claim.
-Successful commands renew the lease. Long adapter operations may heartbeat.
-Late commands from an expired or revoked claim are rejected.
+Commands from a claim that is not the step's current active capability are
+rejected. Interrupted agents recover the same claim identifier from `resume`;
+they do not need to acquire a replacement because time elapsed.
 
 Agents record semantic checkpoints at meaningful milestones:
 
@@ -227,8 +233,8 @@ sandwalk step complete --slug <slug> --claim <claim>
 ```
 
 Checkpoint files are non-empty and individually limited to 64 KiB. Saving a
-checkpoint requires the active, unexpired claim and renews its original lease
-duration from the checkpoint time.
+checkpoint requires the active claim and records semantic recovery state. It
+does not alter claim validity.
 
 Completing a step requires at least one current finding, current semantic
 reviews for every finding, and no `unsupported` or `contradicted` verdicts. It
@@ -372,8 +378,7 @@ Line ranges are one-based, inclusive, and retain the source newline after the
 last selected line when one exists. Byte ranges are zero-based with an
 exclusive end. Exact-text matching permits overlapping occurrences and
 `--occurrence` is one-based. Excerpt text is limited to 65,536 bytes. In
-`researching`, creation requires the active claim that owns the snapshot and
-renews that claim only after the excerpt row commits.
+`researching`, creation requires the active claim that owns the snapshot.
 
 ## Findings and evidence
 
@@ -409,9 +414,9 @@ not Sandwalk, judges semantic support, source quality, conflicts, and necessary
 qualifications.
 
 Finding statements are non-empty files of at most 65,536 bytes. Every finding
-mutation in `researching` also requires `--claim <claim>` for the active lease
-that owns the named plan step; `--claim-file` is the statement content, not the
-lease capability. Successful mutations renew that lease transactionally.
+mutation in `researching` also requires `--claim <claim>` for the active
+capability that owns the named plan step; `--claim-file` is the statement
+content, not the claim capability.
 
 Finding reviews are bounded JSON using protocol
 `sandwalk.finding-review.v1`. They record one agent-authored verdict
@@ -601,8 +606,10 @@ sandwalk_cli        public commands
 ```
 
 `sandwalk_core` must not depend on Async, SQLite, clocks, randomness, or the
-filesystem. Time and identifier generation are explicit inputs. Domain errors
-are typed variants and become compact messages only at the CLI boundary.
+filesystem. Identifier generation is injected at the runtime boundary.
+Timestamps may be injected for provenance and audit records, but time must never
+affect domain decisions, validity, or state transitions. Domain errors are typed
+variants and become compact messages only at the CLI boundary.
 
 SQLite operations are serialized and must not block the Async scheduler.
 Sandwalk does not mix Async with Lwt or Eio.
@@ -614,7 +621,7 @@ Sandwalk does not mix Async with Lwt or Eio.
 - Migration tests upgrade fixtures from every released schema.
 - Adapter contract tests use deterministic fake executables.
 - Integration tests run parallel claims against one WAL database.
-- Crash tests verify unmatched events, lease expiry, and resume packs.
+- Crash tests verify unmatched events, persistent claims, and resume packs.
 - Finalization tests prove stable citation numbering from identical state.
 - Skill forward tests use fresh agent sessions and raw task artifacts.
 
@@ -634,4 +641,4 @@ step checkpoint
 ```
 
 It establishes workspace layout, migrations, FSM enforcement, audit logging,
-compact responses, leases, and recovery before adapter work begins.
+compact responses, exclusive claims, and recovery before adapter work begins.

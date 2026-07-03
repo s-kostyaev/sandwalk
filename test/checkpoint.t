@@ -1,5 +1,5 @@
   $ sandwalk init --slug checkpoint-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"checkpoint-test","phase":"initialized","schema_version":20}}
+  {"ok":true,"result":{"slug":"checkpoint-test","phase":"initialized","schema_version":21}}
 
   $ sandwalk plan add-step --slug checkpoint-test --directory-prefix workspaces \
   >   --key source-review --title "Review sources"
@@ -9,15 +9,14 @@
   $ sandwalk plan seal --slug checkpoint-test --directory-prefix workspaces >/dev/null
 
   $ claim=$(sandwalk step claim --slug checkpoint-test --directory-prefix workspaces \
-  >   --step source-review --lease-seconds 60 | sed -E 's/.*"claim":"([^"]+)".*/\1/')
+  >   --step source-review | sed -E 's/.*"claim":"([^"]+)".*/\1/')
 
   $ printf 'Reviewed two primary sources.\n' > summary.md
   $ printf 'Extract exact excerpts next.\n' > next.md
 
   $ sandwalk step checkpoint --slug checkpoint-test --directory-prefix workspaces \
-  >   --claim "$claim" --summary-file summary.md --next-file next.md | \
-  >   sed -E 's/"lease_expires_at":"[^"]+"/"lease_expires_at":"TIMESTAMP"/'
-  {"ok":true,"result":{"step":"source-review","checkpoint":1,"lease_expires_at":"TIMESTAMP"}}
+  >   --claim "$claim" --summary-file summary.md --next-file next.md
+  {"ok":true,"result":{"step":"source-review","checkpoint":1}}
 
   $ ./inspect_workspace.exe --inspect-checkpoints workspaces/checkpoint-test/database/sandwalk.sqlite3
   source-review|1|Reviewed two primary sources.
@@ -42,16 +41,16 @@
   - None.
   
 
-  $ ./inspect_workspace.exe --expire-claim workspaces/checkpoint-test/database/sandwalk.sqlite3 source-review
+  $ ./inspect_workspace.exe --set-legacy-deadline \
+  >   workspaces/checkpoint-test/database/sandwalk.sqlite3 source-review
 
   $ sandwalk step checkpoint --slug checkpoint-test --directory-prefix workspaces \
   >   --claim "$claim" --summary-file summary.md --next-file next.md
-  {"ok":false,"error":{"code":"CLAIM_EXPIRED","message":"Claim lease has expired."},"next":"'sandwalk' 'resume' '--slug' 'checkpoint-test' '--directory-prefix' 'workspaces'"}
-  [1]
+  {"ok":true,"result":{"step":"source-review","checkpoint":2}}
 
   $ ./inspect_workspace.exe --inspect-claims workspaces/checkpoint-test/database/sandwalk.sqlite3
-  source-review|expired|1|NULL|0
-  source-review|1|expired
+  source-review|claimed|1|38|1
+  source-review|1|NULL
 
   $ sandwalk step checkpoint --slug checkpoint-test --directory-prefix workspaces \
   >   --claim claim_ffffffffffffffffffffffffffffffff \
@@ -69,12 +68,11 @@ Create a released-schema v5 fixture and checkpoint through migration v6.
 
   $ sandwalk step checkpoint --slug v5-test --directory-prefix legacy-v5 \
   >   --claim claim_00000000000000000000000000000001 \
-  >   --summary-file legacy-summary.md --next-file legacy-next.md | \
-  >   sed -E 's/"lease_expires_at":"[^"]+"/"lease_expires_at":"TIMESTAMP"/'
-  {"ok":true,"result":{"step":"fixture-step","checkpoint":1,"lease_expires_at":"TIMESTAMP"}}
+  >   --summary-file legacy-summary.md --next-file legacy-next.md
+  {"ok":true,"result":{"step":"fixture-step","checkpoint":1}}
 
   $ ./inspect_workspace.exe legacy-v5/v5-test/database/sandwalk.sqlite3
   v5-test|researching
-  20
+  21
   wal
   ok

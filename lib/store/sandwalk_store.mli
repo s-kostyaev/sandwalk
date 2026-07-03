@@ -22,14 +22,13 @@ module Error : sig
     | Plan_seal_wrong_phase of Sandwalk_core.Phase.t
     | Plan_step_not_found of string
     | Step_claim_wrong_phase of Sandwalk_core.Phase.t
-    | Step_already_claimed of int64
+    | Step_already_claimed
     | Step_completed of string
     | Step_dependencies_incomplete of string
     | Claim_id_collision
     | Invalid_step_state of string
     | Claim_not_found
     | Claim_not_active
-    | Claim_expired of string
     | Search_wrong_phase of Sandwalk_core.Phase.t
     | Search_requires_claim
     | Hit_id_collision
@@ -96,7 +95,6 @@ module Record_snapshot_result : sig
 
   val previous_schema_version : t -> int
   val step_key : t -> Sandwalk_core.Plan_step.Key.t option
-  val lease_expires_unix_seconds : t -> int64 option
 end
 
 module Snapshot_for_excerpt : sig
@@ -114,7 +112,6 @@ module Promote_snapshot_result : sig
   val previous_schema_version : t -> int
   val step_key : t -> Sandwalk_core.Plan_step.Key.t
   val promoted : t -> bool
-  val lease_expires_unix_seconds : t -> int64
 end
 
 module Record_excerpt_result : sig
@@ -123,7 +120,6 @@ module Record_excerpt_result : sig
   val excerpt_id : t -> Sandwalk_core.Excerpt_id.t
   val created : t -> bool
   val step_key : t -> Sandwalk_core.Plan_step.Key.t option
-  val lease_expires_unix_seconds : t -> int64 option
 end
 
 module Create_finding_result : sig
@@ -132,7 +128,6 @@ module Create_finding_result : sig
   val step_key : t -> Sandwalk_core.Plan_step.Key.t
   val finding_key : t -> Sandwalk_core.Finding_key.t
   val revision : t -> int
-  val lease_expires_unix_seconds : t -> int64
 end
 
 module Attach_evidence_result : sig
@@ -141,7 +136,6 @@ module Attach_evidence_result : sig
   val revision : t -> int
   val attached : t -> bool
   val revised : t -> bool
-  val lease_expires_unix_seconds : t -> int64
 end
 
 module Seal_finding_result : sig
@@ -150,7 +144,6 @@ module Seal_finding_result : sig
   val revision : t -> int
   val already_sealed : t -> bool
   val state : t -> string
-  val lease_expires_unix_seconds : t -> int64
 end
 
 module Review_finding_result : sig
@@ -158,7 +151,6 @@ module Review_finding_result : sig
 
   val revision : t -> int
   val reviewed : t -> bool
-  val lease_expires_unix_seconds : t -> int64
 end
 
 module Complete_step_result : sig
@@ -236,7 +228,6 @@ module Record_search_result : sig
   val previous_schema_version : t -> int
   val hits : t -> Stored_hit.t list
   val step_key : t -> Sandwalk_core.Plan_step.Key.t option
-  val lease_expires_unix_seconds : t -> int64 option
 end
 
 module Save_checkpoint_result : sig
@@ -245,7 +236,6 @@ module Save_checkpoint_result : sig
   val previous_schema_version : t -> int
   val step_key : t -> Sandwalk_core.Plan_step.Key.t
   val checkpoint_number : t -> int
-  val lease_expires_unix_seconds : t -> int64
 end
 
 module Latest_checkpoint : sig
@@ -265,7 +255,6 @@ module Claim_step_result : sig
   val step_key : t -> Sandwalk_core.Plan_step.Key.t
   val attempt : t -> int
   val previous_state : t -> Sandwalk_core.Step_state.t
-  val expired_active_claim : t -> bool
 end
 
 module Active_claim : sig
@@ -274,7 +263,6 @@ module Active_claim : sig
   val claim_id : t -> Sandwalk_core.Claim_id.t
   val step_key : t -> Sandwalk_core.Plan_step.Key.t
   val attempt : t -> int
-  val lease_expires_at : t -> string
 end
 
 module Stored_plan_step : sig
@@ -526,10 +514,6 @@ val claim_step
   -> step_key:Sandwalk_core.Plan_step.Key.t
   -> claim_id:Sandwalk_core.Claim_id.t
   -> now:string
-  -> now_unix_seconds:int64
-  -> lease_expires_at:string
-  -> lease_expires_unix_seconds:int64
-  -> lease_duration_seconds:int
   -> unit
   -> (Claim_step_result.t, Error.t) Result.t
 
@@ -558,7 +542,6 @@ val save_checkpoint
   -> next_md5:string
   -> next_size:int
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Save_checkpoint_result.t, Error.t) Result.t
 
@@ -577,7 +560,6 @@ val record_search
   -> adapter:string
   -> hits:(Sandwalk_core.Hit_id.t * string * string * string) list
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Record_search_result.t, Error.t) Result.t
 
@@ -602,7 +584,6 @@ val record_snapshot
   -> markdown_sha256:string
   -> manifest_json:string
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Record_snapshot_result.t, Error.t) Result.t
 
@@ -613,7 +594,6 @@ val promote_snapshot
   -> claim_id:Sandwalk_core.Claim_id.t
   -> snapshot_id:Sandwalk_core.Snapshot_id.t
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Promote_snapshot_result.t, Error.t) Result.t
 
@@ -641,7 +621,6 @@ val record_excerpt
   -> excerpt_md5:string
   -> excerpt_size:int
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Record_excerpt_result.t, Error.t) Result.t
 
@@ -656,7 +635,6 @@ val create_finding
   -> claim_md5:string
   -> claim_size:int
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Create_finding_result.t, Error.t) Result.t
 
@@ -670,7 +648,6 @@ val attach_evidence
   -> excerpt_id:Sandwalk_core.Excerpt_id.t
   -> relation:Sandwalk_core.Finding_relation.t
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Attach_evidence_result.t, Error.t) Result.t
 
@@ -682,7 +659,6 @@ val seal_finding
   -> step_key:Sandwalk_core.Plan_step.Key.t
   -> finding_key:Sandwalk_core.Finding_key.t
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Seal_finding_result.t, Error.t) Result.t
 
@@ -701,7 +677,6 @@ val review_finding
   -> review_json:string
   -> review_md5:string
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Review_finding_result.t, Error.t) Result.t
 
@@ -711,7 +686,6 @@ val complete_step
   -> expected_slug:Sandwalk_core.Slug.t
   -> claim_id:Sandwalk_core.Claim_id.t
   -> now:string
-  -> now_unix_seconds:int64
   -> unit
   -> (Complete_step_result.t, Error.t) Result.t
 
