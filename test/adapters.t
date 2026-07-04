@@ -79,7 +79,40 @@ Local discovery emits bounded file locators without consulting ~/.ugrep.
   > EOF
   {"protocol":"sandwalk.search-results.v1","adapter":{"name":"ugrep+","protocol_version":1,"search_profile":"fixed-string-recursive-sorted-v1"},"results":[{"url":"file://ROOT/local%20documents/Architecture%20Notes.pdf","title":"Architecture Notes.pdf","snippet":"Typed adapter architecture Adapter protocol details"}]}
 
-Xberg fetch retains hierarchical Markdown and the structured source model.
+Docling fetch uses the pinned non-LLM hierarchy profile and retains quality
+metrics alongside the structured source model.
+
+  $ mkdir docling-output
+  $ DOCLING_TEST_LOG="$PWD/docling.log" PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/docling-fetch <<EOF
+  > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/local%20documents/Architecture%20Notes.pdf","source_root":"$PWD/local documents","output_directory":"docling-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"docling-output/manifest.json"}
+
+  $ cat docling-output/document.md
+  # Architecture Notes
+  
+  ## Adapter protocol
+  
+  Typed adapter architecture.
+
+  $ jq -r '[.artifacts.structure, .artifacts.quality, .adapter.extraction_profile, .queryability_check.ok] | @tsv' \
+  >   docling-output/manifest.json
+  document.json	quality.json	standard-native-hierarchy-bookmark-095-v2	true
+
+  $ jq -r '[.heading_count, .top_level_bookmarks.coverage, (.warnings | length)] | @tsv' \
+  >   docling-output/quality.json
+  2	1.0	0
+
+The temporary extension-preserving input and explicit profile are removed.
+
+  $ sed "s#$PWD#ROOT#g" docling.log
+  docling-output/input-Architecture Notes.pdf|docling-output/docling-profile.json
+
+  $ test ! -e "docling-output/input-Architecture Notes.pdf"
+  $ test ! -e docling-output/docling-profile.json
+
+Xberg remains an explicit fast adapter and retains its structured source model.
 
   $ mkdir local-output
   $ PATH="$PWD/fakes:$PATH" ../adapters/xberg-fetch <<EOF
@@ -98,11 +131,13 @@ Xberg fetch retains hierarchical Markdown and the structured source model.
   >   local-output/manifest.json
   document.json	markdown-hierarchy-tesseract-v1	true
 
-  $ jq -r '.results[0].document.nodes[] | [.content.node_type, (.content.level // 0)] | @tsv' \
+  $ jq -r '.result.document.nodes[] | [.content.node_type, (.content.level // 0)] | @tsv' \
   >   local-output/document.json
   title	0
   heading	2
   paragraph	0
+
+  $ test ! -e "local-output/input-Architecture Notes.pdf"
 
 Flattening recognized subheadings fails before snapshot publication.
 

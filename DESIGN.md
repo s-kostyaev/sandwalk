@@ -407,25 +407,47 @@ extraction profile as `server-markdown-direct-v1` or
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.
 
-The bundled local-document fetch connector is `sandwalk-fetch-xberg`. `fetch`
-selects it by default for a `file://` hit. The request repeats the source root
-recorded with the search. The adapter canonicalizes both paths, rejects
-non-regular files and symlink/path traversal outside that root, and copies the
-source into its controlled output directory before extraction so normalization
-and hashing observe one input.
+The bundled default local-document fetch connector is
+`sandwalk-fetch-docling`. `fetch` selects it for a `file://` hit. The request
+repeats the source root recorded with the search. The adapter canonicalizes both
+paths, rejects non-regular files and symlink/path traversal outside that root,
+and copies the source into its controlled output directory before extraction so
+normalization and hashing observe one input. Local adapters receive a
+15-minute process timeout because first-use model acquisition and CPU-only OCR
+may exceed the web adapter's two-minute bound.
 
-Xberg runs with an explicit configuration rather than auto-discovered
-`xberg.toml`, local Tesseract OCR, Markdown output, PDF hierarchy and bounding
-boxes, and document-structure extraction. Its profile must not enable VLM or
-remote enrichment. The snapshot retains `original`, hierarchical
-`document.md`, and Xberg's `document.json`. If Xberg reports title or heading
+The Docling connector runs a pinned `docling==2.110.0` standard pipeline through
+`uv`. It explicitly disables remote services and code, formula, picture,
+description, and chart enrichments. OCR and accurate table reconstruction
+remain enabled. PDF parsed pages are retained while Docling's native heading
+hierarchy pass uses bookmarks, numbering, and font style with a strict `0.95`
+bookmark threshold. The stricter threshold avoids the implementation's `0.92`
+substring-match shortcut while tolerating small OCR differences. The first
+recognized heading becomes the Markdown H1; naturally unstructured input gets
+one filename H1.
+
+The snapshot retains `original`, hierarchical `document.md`, Docling's lossless
+`document.json`, and `quality.json`. Quality metrics include heading levels and
+density, maximum heading length, undecoded formula count, and top-level PDF
+bookmark coverage. When Docling entirely misses a top-level bookmark, the
+adapter restores that authoritative heading immediately before the first
+matched descendant bookmark, or before the next matched top-level bookmark as a
+fallback, and records the restoration in `quality.json`. It never synthesizes
+lower-level headings. The adapter rejects missing headings, implausibly long
+headings, pathological heading density, and less than half of a non-trivial
+top-level bookmark outline matching normalized headings. Remaining partial
+bookmark coverage and undecoded formulas are explicit warnings.
+`mq document.md '.tree'` is the final queryability gate.
+
+`sandwalk-fetch-xberg` remains a bundled explicit fast adapter for simple PDFs
+and other local formats. It runs with an explicit configuration rather than an
+auto-discovered `xberg.toml`, local Tesseract OCR, Markdown output, PDF
+hierarchy and bounding boxes, and document-structure extraction. Its profile
+must not enable VLM or remote enrichment. If Xberg reports title or heading
 nodes but emits no ATX Markdown headings, or reports level-two-or-deeper nodes
 without corresponding Markdown subheadings, the adapter rejects the result
-instead of publishing a flattened document. For naturally unstructured input,
-the adapter adds one filename heading. `mq document.md '.tree'` remains the
-final queryability gate. A future Docling connector can implement the same
-fetch protocol and artifact contract; choosing a normalizer is an adapter
-decision, not a core-state distinction.
+instead of publishing a flattened document. Choosing a normalizer remains an
+adapter decision, not a core-state distinction.
 
 Sandwalk records:
 

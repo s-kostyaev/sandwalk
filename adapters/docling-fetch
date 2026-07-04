@@ -13,7 +13,7 @@ output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
 }
 
 printf '%s' "$url" | grep -Eq '^file://' || {
-  printf '%s\n' 'xberg fetch requires a file locator' >&2
+  printf '%s\n' 'docling fetch requires a file locator' >&2
   exit 64
 }
 
@@ -48,9 +48,15 @@ original="$output_directory/original"
 extraction_input="$output_directory/input-$source_basename"
 document="$output_directory/document.md"
 structure="$output_directory/document.json"
-config="$output_directory/xberg-config.json"
+quality="$output_directory/quality.json"
+config="$output_directory/docling-profile.json"
 manifest="$output_directory/manifest.json"
 manifest_temporary="$output_directory/manifest.json.tmp"
+
+cleanup() {
+  rm -f "$extraction_input" "$manifest_temporary" "$config"
+}
+trap cleanup EXIT HUP INT TERM
 rm -f "$manifest" "$manifest_temporary"
 
 # Copy first so extraction and hashes observe one immutable input even if the
@@ -63,108 +69,39 @@ cp -P "$canonical_source" "$original"
 ln "$original" "$extraction_input"
 
 printf '%s\n' \
-  '{"output_format":"markdown","include_document_structure":true,"pdf_options":{"hierarchy":{"enabled":true,"include_bbox":true}}}' \
+  '{"protocol":"sandwalk.docling-profile.v1","pipeline":"standard","enable_remote_services":false,"ocr":true,"table_mode":"accurate","generate_parsed_pages":true,"heading_hierarchy":{"enabled":true,"use_bookmarks":true,"use_numbering":true,"use_style":true,"bookmark_match_threshold":0.95,"max_level":6},"enrichments":{"code":false,"formula":false,"picture_classification":false,"picture_description":false,"chart":false}}' \
   >"$config"
 
-NO_COLOR=1 xberg --log-level error extract "$extraction_input" \
-  --config "$config" \
-  --content-format markdown \
-  --format json \
-  --ocr true \
-  --ocr-backend tesseract \
-  >"$structure"
-rm -f "$extraction_input"
-
-jq -ej '
-  def extraction_result:
-    if (.result | type) == "object" then
-      .result
-    elif (.results | type) == "array" and (.results | length) == 1 then
-      .results[0]
-    else
-      empty
-    end;
-  extraction_result
-  | select(.document.nodes | type == "array" and length > 0)
-  | .content
-  | select(type == "string" and length > 0)
-' "$structure" >"$document"
-
-heading_nodes=$(
-  jq -r '
-    def extraction_result:
-      if (.result | type) == "object" then
-        .result
-      elif (.results | type) == "array" and (.results | length) == 1 then
-        .results[0]
-      else
-        empty
-      end;
-    [
-      extraction_result.document.nodes[]?
-      | select(
-          .content.node_type == "title"
-          or .content.node_type == "heading"
-        )
-    ]
-    | length
-  ' "$structure"
-)
-has_structured_subheading=$(
-  jq -r '
-    def extraction_result:
-      if (.result | type) == "object" then
-        .result
-      elif (.results | type) == "array" and (.results | length) == 1 then
-        .results[0]
-      else
-        empty
-      end;
-    any(
-      extraction_result.document.nodes[]?;
-      .content.node_type == "heading"
-      and ((.content.level // 1) > 1)
-    )
-  ' "$structure"
-)
-
-if [ "$heading_nodes" -eq 0 ]; then
-  temporary="$document.tmp"
-  {
-    printf '# %s\n\n' "$source_basename"
-    cat "$document"
-  } >"$temporary"
-  mv "$temporary" "$document"
-elif ! grep -Eq '^#{1,6}[[:space:]]' "$document"; then
-  printf '%s\n' 'xberg reported headings but flattened the Markdown output' >&2
-  exit 65
-fi
-
-if [ "$has_structured_subheading" = "true" ] &&
-  ! grep -Eq '^#{2,6}[[:space:]]' "$document"; then
-  printf '%s\n' 'xberg flattened Markdown subheadings' >&2
-  exit 65
-fi
+sandwalk-docling-normalize \
+  --source "$extraction_input" \
+  --document "$document" \
+  --structure "$structure" \
+  --quality "$quality" \
+  --config "$config"
 
 [ -s "$document" ] || {
-  printf '%s\n' 'xberg produced an empty Markdown document' >&2
+  printf '%s\n' 'docling produced an empty Markdown document' >&2
   exit 65
 }
-
+jq -e 'type == "object"' "$structure" >/dev/null
+jq -e '
+  .protocol == "sandwalk.docling-quality.v1"
+  and (.heading_count | type == "number" and . > 0)
+  and (.top_level_bookmarks.coverage | type == "number")
+' "$quality" >/dev/null
 mq "$document" '.tree' >/dev/null
 
 input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
 markdown_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
 structure_sha256=$(shasum -a 256 "$structure" | awk '{print $1}')
+quality_sha256=$(shasum -a 256 "$quality" | awk '{print $1}')
 configuration_sha256=$(shasum -a 256 "$config" | awk '{print $1}')
-xberg_version=$(xberg version | sed -n '1{s/"/\\"/g;p;}')
+docling_version=$(sandwalk-docling-normalize --version | sed -n '1{s/"/\\"/g;p;}')
 mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
-
-rm -f "$config"
 
 jq -n \
   --arg protocol "sandwalk.fetch-manifest.v1" \
-  --arg adapter "xberg" \
+  --arg adapter "docling" \
   --arg requested_url "$url" \
   --arg final_url "$url" \
   --arg source_root "$canonical_root" \
@@ -172,16 +109,17 @@ jq -n \
   --arg input_sha256 "$input_sha256" \
   --arg markdown_sha256 "$markdown_sha256" \
   --arg structure_sha256 "$structure_sha256" \
+  --arg quality_sha256 "$quality_sha256" \
   --arg configuration_sha256 "$configuration_sha256" \
-  --arg xberg_version "$xberg_version" \
+  --arg docling_version "$docling_version" \
   --arg mq_version "$mq_version" \
   '{
     protocol: $protocol,
     adapter: {
       name: $adapter,
       protocol_version: 1,
-      implementation_version: $xberg_version,
-      extraction_profile: "markdown-hierarchy-tesseract-v1",
+      implementation_version: $docling_version,
+      extraction_profile: "standard-native-hierarchy-bookmark-095-v2",
       mq_version: $mq_version
     },
     requested_url: $requested_url,
@@ -194,11 +132,13 @@ jq -n \
       input_sha256: $input_sha256,
       normalized_markdown_sha256: $markdown_sha256,
       structure_sha256: $structure_sha256,
+      quality_sha256: $quality_sha256,
       sanitized_configuration_sha256: $configuration_sha256
     },
     artifacts: {
       document: "document.md",
       structure: "document.json",
+      quality: "quality.json",
       original: "original"
     },
     queryability_check: {

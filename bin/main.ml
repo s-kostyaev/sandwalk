@@ -4627,7 +4627,7 @@ let fetch_command =
                     adapter
                     ~default:
                       (if String.is_prefix url ~prefix:"file://"
-                       then "sandwalk-fetch-xberg"
+                       then "sandwalk-fetch-docling"
                        else "sandwalk-fetch-curl-pandoc")
                 in
                 let%bind status =
@@ -4765,7 +4765,11 @@ let fetch_command =
                         Sandwalk_runtime.Adapter.run_json
                           ~executable:adapter
                           ~request
-                          ~timeout:(Time_float.Span.of_sec 120.)
+                          ~timeout:
+                            (Time_float.Span.of_sec
+                               (if String.is_prefix url ~prefix:"file://"
+                                then 900.
+                                else 120.))
                           ~maximum_output_bytes:65_536
                       in
                       (match adapter_output with

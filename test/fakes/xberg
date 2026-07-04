@@ -24,8 +24,7 @@ fi
 
 jq -n --arg content "$markdown" '
   {
-    results: [
-      {
+    result: {
         content: $content,
         document: {
           nodes: [
@@ -63,6 +62,5 @@ jq -n --arg content "$markdown" '
           ]
         }
       }
-    ]
   }
 '

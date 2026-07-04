@@ -4,5 +4,7 @@
   (ddgr-search as sandwalk-search-ddgr)
   (ugrep-search as sandwalk-search-ugrep)
   (curl-pandoc-fetch as sandwalk-fetch-curl-pandoc)
+  (docling-fetch as sandwalk-fetch-docling)
+  (docling-normalize as sandwalk-docling-normalize)
   (xberg-fetch as sandwalk-fetch-xberg)
   (pandoc-pdf-export as sandwalk-export-pandoc-pdf)))

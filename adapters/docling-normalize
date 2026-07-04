@@ -1,0 +1,380 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "docling==2.110.0",
+# ]
+# ///
+"""Normalize one local document with Sandwalk's pinned Docling profile."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import unicodedata
+from collections import Counter
+from difflib import SequenceMatcher
+from importlib.metadata import version
+from pathlib import Path
+from typing import Any
+
+
+PROFILE_PROTOCOL = "sandwalk.docling-profile.v1"
+QUALITY_PROTOCOL = "sandwalk.docling-quality.v1"
+ATX_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$")
+FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+LEADING_MARKER = re.compile(
+    r"^\s*(?:"
+    r"(?:part|title|book|chapter|article|section|clause|schedule|annex|appendix|rule)"
+    r"\b[\s.:]*[0-9ivxlcdm]*"
+    r"|§+\s*[0-9.]+"
+    r"|\(?[0-9]+(?:\.[0-9]+)*[).]?"
+    r"|\(?[A-Za-z]{1,3}[).]"
+    r")[\s.:)\-]*",
+    re.IGNORECASE,
+)
+LEADING_MARKDOWN = re.compile(
+    r"^\s*(?:(?:#{1,6}|[-+*]|\d+[.)])\s+)+",
+)
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", action="store_true")
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--document", type=Path)
+    parser.add_argument("--structure", type=Path)
+    parser.add_argument("--quality", type=Path)
+    parser.add_argument("--config", type=Path)
+    args = parser.parse_args()
+    if args.version:
+        return args
+    required = ("source", "document", "structure", "quality", "config")
+    missing = [name for name in required if getattr(args, name) is None]
+    if missing:
+        parser.error("missing required arguments: " + ", ".join(missing))
+    return args
+
+
+def load_profile(path: Path) -> dict[str, Any]:
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    expected = {
+        "protocol": PROFILE_PROTOCOL,
+        "pipeline": "standard",
+        "enable_remote_services": False,
+        "ocr": True,
+        "table_mode": "accurate",
+        "generate_parsed_pages": True,
+        "heading_hierarchy": {
+            "enabled": True,
+            "use_bookmarks": True,
+            "use_numbering": True,
+            "use_style": True,
+            "bookmark_match_threshold": 0.95,
+            "max_level": 6,
+        },
+        "enrichments": {
+            "code": False,
+            "formula": False,
+            "picture_classification": False,
+            "picture_description": False,
+            "chart": False,
+        },
+    }
+    if profile != expected:
+        raise ValueError("unsupported Docling extraction profile")
+    return profile
+
+
+def normalize_title(value: str) -> str:
+    value = LEADING_MARKDOWN.sub("", value)
+    value = LEADING_MARKER.sub("", value, count=1)
+    value = unicodedata.normalize("NFKC", value).casefold()
+    value = "".join(character if character.isalnum() else " " for character in value)
+    return " ".join(value.split())
+
+
+def heading_lines(markdown: str) -> list[tuple[int, str]]:
+    headings: list[tuple[int, str]] = []
+    fence: str | None = None
+    for line in markdown.splitlines():
+        match_fence = FENCE.match(line)
+        if match_fence:
+            marker = match_fence.group(1)[0]
+            fence = None if fence == marker else marker if fence is None else fence
+            continue
+        if fence is not None:
+            continue
+        match = ATX_HEADING.match(line)
+        if match:
+            headings.append((len(match.group(1)), match.group(2).strip()))
+    return headings
+
+
+def ensure_document_root(markdown: str, fallback_title: str) -> tuple[str, str]:
+    lines = markdown.splitlines()
+    fence: str | None = None
+    for index, line in enumerate(lines):
+        match_fence = FENCE.match(line)
+        if match_fence:
+            marker = match_fence.group(1)[0]
+            fence = None if fence == marker else marker if fence is None else fence
+            continue
+        if fence is not None:
+            continue
+        match = ATX_HEADING.match(line)
+        if match:
+            if len(match.group(1)) > 1:
+                lines[index] = "# " + match.group(2).strip()
+                return "\n".join(lines).rstrip() + "\n", "promoted-first-heading"
+            return markdown.rstrip() + "\n", "existing-h1"
+    body = markdown.strip()
+    rooted = f"# {fallback_title}\n"
+    if body:
+        rooted += f"\n{body}\n"
+    return rooted, "synthesized-filename-heading"
+
+
+def pdf_bookmarks(path: Path) -> list[tuple[int, str]]:
+    if path.suffix.casefold() != ".pdf":
+        return []
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(path)
+    try:
+        result: list[tuple[int, str]] = []
+        for bookmark in document.get_toc():
+            title = " ".join(bookmark.get_title().split())
+            if title:
+                result.append((bookmark.level, title[:512]))
+        return result
+    finally:
+        document.close()
+
+
+def markdown_line_titles(lines: list[str]) -> list[tuple[int, str, bool]]:
+    result: list[tuple[int, str, bool]] = []
+    fence: str | None = None
+    for index, line in enumerate(lines):
+        match_fence = FENCE.match(line)
+        if match_fence:
+            marker = match_fence.group(1)[0]
+            fence = None if fence == marker else marker if fence is None else fence
+            continue
+        if fence is not None or not line.strip():
+            continue
+        heading = ATX_HEADING.match(line)
+        title = heading.group(2) if heading else line
+        result.append((index, normalize_title(title), heading is not None))
+    return result
+
+
+def restore_top_level_bookmarks(
+    source: Path, markdown: str
+) -> tuple[str, list[str]]:
+    outline = pdf_bookmarks(source)
+    if not outline:
+        return markdown, []
+    lines = markdown.splitlines()
+    indexed_lines = markdown_line_titles(lines)
+    top_positions = [index for index, (level, _) in enumerate(outline) if level == 0]
+    heading_positions = {
+        normalized: line_index
+        for line_index, normalized, is_heading in indexed_lines
+        if is_heading and normalized
+    }
+    insertions: list[tuple[int, str]] = []
+    restored: list[str] = []
+
+    for position_index, outline_index in enumerate(top_positions):
+        title = outline[outline_index][1]
+        normalized_title = normalize_title(title)
+        if normalized_title in heading_positions:
+            continue
+        previous_line = 0
+        for prior_index in reversed(top_positions[:position_index]):
+            prior = normalize_title(outline[prior_index][1])
+            if prior in heading_positions:
+                previous_line = heading_positions[prior] + 1
+                break
+        next_line = len(lines)
+        for next_index in top_positions[position_index + 1 :]:
+            following = normalize_title(outline[next_index][1])
+            if following in heading_positions:
+                next_line = heading_positions[following]
+                break
+
+        next_outline_index = (
+            top_positions[position_index + 1]
+            if position_index + 1 < len(top_positions)
+            else len(outline)
+        )
+        descendants = [
+            normalize_title(child_title)
+            for child_level, child_title in outline[outline_index + 1 : next_outline_index]
+            if child_level > 0
+        ]
+        insertion_line: int | None = None
+        for line_index, normalized_line, _ in indexed_lines:
+            if not (previous_line <= line_index < next_line):
+                continue
+            if any(
+                descendant
+                and (
+                    normalized_line == descendant
+                    or normalized_line.startswith(descendant + " ")
+                )
+                for descendant in descendants
+            ):
+                insertion_line = line_index
+                break
+        if insertion_line is None and next_line < len(lines):
+            insertion_line = next_line
+        if insertion_line is not None:
+            insertions.append((insertion_line, f"## {title}"))
+            restored.append(title)
+
+    for line_index, heading in reversed(insertions):
+        lines[line_index:line_index] = [heading, ""]
+    if not insertions:
+        return markdown, restored
+    return "\n".join(lines).rstrip() + "\n", restored
+
+
+def bookmark_coverage(
+    bookmarks: list[str], headings: list[tuple[int, str]]
+) -> dict[str, Any]:
+    normalized_headings = [normalize_title(title) for _, title in headings]
+    matched = 0
+    unmatched: list[str] = []
+    for bookmark in bookmarks:
+        normalized = normalize_title(bookmark)
+        best = max(
+            (
+                SequenceMatcher(None, normalized, heading).ratio()
+                for heading in normalized_headings
+                if normalized and heading
+            ),
+            default=0.0,
+        )
+        if best >= 0.95:
+            matched += 1
+        else:
+            unmatched.append(bookmark)
+    total = len(bookmarks)
+    return {
+        "total": total,
+        "matched": matched,
+        "coverage": 1.0 if total == 0 else round(matched / total, 4),
+        "unmatched": unmatched[:32],
+    }
+
+
+def quality_report(
+    source: Path,
+    markdown: str,
+    root_strategy: str,
+    restored_top_level_bookmarks: list[str],
+) -> dict[str, Any]:
+    headings = heading_lines(markdown)
+    levels = Counter(level for level, _ in headings)
+    nonblank_lines = sum(1 for line in markdown.splitlines() if line.strip())
+    maximum_heading_characters = max((len(title) for _, title in headings), default=0)
+    bookmarks = bookmark_coverage(
+        [title for level, title in pdf_bookmarks(source) if level == 0],
+        headings,
+    )
+    warnings: list[str] = []
+    if restored_top_level_bookmarks:
+        warnings.append("top-level PDF bookmarks were restored into Markdown")
+    if bookmarks["total"] and bookmarks["coverage"] < 1.0:
+        warnings.append("not all top-level PDF bookmarks matched normalized headings")
+    if "<!-- formula-not-decoded -->" in markdown:
+        warnings.append("formula placeholders remain in normalized Markdown")
+
+    if not headings:
+        raise ValueError("Docling quality gate found no Markdown heading")
+    if maximum_heading_characters > 512:
+        raise ValueError("Docling quality gate found an implausibly long heading")
+    if len(headings) >= 20 and len(headings) / max(nonblank_lines, 1) > 0.35:
+        raise ValueError("Docling quality gate found excessive heading density")
+    if bookmarks["total"] >= 2 and bookmarks["coverage"] < 0.5:
+        raise ValueError("Docling quality gate found insufficient bookmark coverage")
+
+    return {
+        "protocol": QUALITY_PROTOCOL,
+        "profile": "standard-native-hierarchy-bookmark-095-v2",
+        "root_strategy": root_strategy,
+        "restored_top_level_bookmarks": restored_top_level_bookmarks,
+        "heading_count": len(headings),
+        "heading_levels": {str(level): levels[level] for level in sorted(levels)},
+        "maximum_heading_characters": maximum_heading_characters,
+        "nonblank_line_count": nonblank_lines,
+        "formula_placeholder_count": markdown.count("<!-- formula-not-decoded -->"),
+        "top_level_bookmarks": bookmarks,
+        "warnings": warnings,
+    }
+
+
+def convert(args: argparse.Namespace) -> None:
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    load_profile(args.config)
+    pdf_options = PdfPipelineOptions()
+    pdf_options.enable_remote_services = False
+    pdf_options.do_ocr = True
+    pdf_options.do_table_structure = True
+    pdf_options.generate_parsed_pages = True
+    hierarchy = pdf_options.heading_hierarchy_options
+    hierarchy.enabled = True
+    hierarchy.use_bookmarks = True
+    hierarchy.use_numbering = True
+    hierarchy.use_style = True
+    hierarchy.bookmark_match_threshold = 0.95
+    hierarchy.max_level = 6
+    pdf_options.do_code_enrichment = False
+    pdf_options.do_formula_enrichment = False
+    pdf_options.do_picture_classification = False
+    pdf_options.do_picture_description = False
+    pdf_options.do_chart_extraction = False
+
+    converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),
+        }
+    )
+    result = converter.convert(args.source, raises_on_error=True)
+    result.document.save_as_json(args.structure)
+    markdown = result.document.export_to_markdown(
+        image_placeholder="<!-- image -->",
+        escape_html=True,
+    )
+    markdown, root_strategy = ensure_document_root(markdown, args.source.stem)
+    markdown, restored = restore_top_level_bookmarks(args.source, markdown)
+    report = quality_report(args.source, markdown, root_strategy, restored)
+    args.document.write_text(markdown, encoding="utf-8")
+    args.quality.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def main() -> int:
+    args = parse_arguments()
+    if args.version:
+        print(f"docling {version('docling')}")
+        return 0
+    try:
+        convert(args)
+        return 0
+    except Exception as error:
+        print(f"docling normalization failed: {error}", file=sys.stderr)
+        return 65
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
