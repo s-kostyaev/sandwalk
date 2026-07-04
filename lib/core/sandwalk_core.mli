@@ -259,7 +259,7 @@ module Report : sig
     | Too_many_blocks of int
     | Block_too_large of int
     | No_citations
-    | Missing_citation of int
+    | Missing_citation of int * string
     | Invalid_citation of string
   [@@deriving sexp_of]
 

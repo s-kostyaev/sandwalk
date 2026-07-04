@@ -1,0 +1,177 @@
+#!/bin/sh
+set -eu
+
+file_md5() {
+  if command -v md5 >/dev/null 2>&1; then
+    md5 -q "$1"
+  else
+    md5sum "$1" | awk '{print $1}'
+  fi
+}
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+format=$(printf '%s' "$request" | jq -er '.format')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+report_path=$(
+  printf '%s' "$request" |
+    jq -er '.inputs | map(select(.role == "report")) | if length == 1 then .[0].path else error("missing report input") end'
+)
+sources_path=$(
+  printf '%s' "$request" |
+    jq -er '.inputs | map(select(.role == "bibliography")) | if length == 1 then .[0].path else error("missing bibliography input") end'
+)
+report_md5=$(
+  printf '%s' "$request" |
+    jq -er '.inputs | map(select(.role == "report")) | if length == 1 then .[0].md5 else error("missing report hash") end'
+)
+sources_md5=$(
+  printf '%s' "$request" |
+    jq -er '.inputs | map(select(.role == "bibliography")) | if length == 1 then .[0].md5 else error("missing bibliography hash") end'
+)
+
+[ "$protocol" = "sandwalk.export.v1" ] || {
+  printf '%s\n' 'unsupported export protocol' >&2
+  exit 64
+}
+
+[ "$format" = "pdf" ] || {
+  printf '%s\n' 'pandoc exporter supports only pdf' >&2
+  exit 64
+}
+
+[ -n "$output_directory" ] || {
+  printf '%s\n' 'export output directory must not be empty' >&2
+  exit 64
+}
+
+[ -s "$report_path" ] && [ -s "$sources_path" ] || {
+  printf '%s\n' 'export inputs must be non-empty files' >&2
+  exit 66
+}
+
+[ "$(file_md5 "$report_path")" = "$report_md5" ] &&
+  [ "$(file_md5 "$sources_path")" = "$sources_md5" ] || {
+  printf '%s\n' 'export input hash mismatch' >&2
+  exit 65
+}
+
+mkdir -p "$output_directory"
+artifact="$output_directory/report.pdf"
+manifest="$output_directory/manifest.json"
+manifest_temporary="$output_directory/manifest.json.tmp"
+link_filter="$output_directory/citation-links.lua"
+rm -f "$artifact" "$manifest" "$manifest_temporary" "$link_filter"
+
+cat >"$link_filter" <<'EOF'
+function Pandoc(document)
+  local source_list = nil
+  local saw_sources = false
+
+  for _, block in ipairs(document.blocks) do
+    if block.t == "Header" and block.identifier == "sources" then
+      saw_sources = true
+    elseif saw_sources and block.t == "OrderedList" then
+      source_list = block
+      break
+    end
+  end
+
+  if source_list == nil then
+    return document
+  end
+
+  local source_count = #source_list.content
+  for index, item in ipairs(source_list.content) do
+    local first = item[1]
+    if first ~= nil and (first.t == "Plain" or first.t == "Para") then
+      table.insert(
+        first.content,
+        1,
+        pandoc.Span({}, pandoc.Attr("source-" .. tostring(index)))
+      )
+    end
+  end
+
+  return document:walk({
+    Str = function(element)
+      local before, number, after =
+        element.text:match("^(.-)%[(%d+)%](.*)$")
+      local ordinal = tonumber(number)
+      if ordinal == nil or ordinal < 1 or ordinal > source_count then
+        return nil
+      end
+
+      local result = {}
+      if before ~= "" then
+        table.insert(result, pandoc.Str(before))
+      end
+      table.insert(
+        result,
+        pandoc.Link(
+          {pandoc.Str("[" .. number .. "]")},
+          "#source-" .. number
+        )
+      )
+      if after ~= "" then
+        table.insert(result, pandoc.Str(after))
+      end
+      return result
+    end
+  })
+end
+EOF
+
+pandoc \
+  --from=gfm \
+  --lua-filter="$link_filter" \
+  --variable=colorlinks:true \
+  --variable=linkcolor:blue \
+  --variable=urlcolor:blue \
+  "$report_path" \
+  "$sources_path" \
+  --output="$artifact"
+
+rm -f "$link_filter"
+
+[ -s "$artifact" ] && [ "$(LC_ALL=C head -c 5 "$artifact")" = "%PDF-" ] || {
+  printf '%s\n' 'pandoc did not produce a PDF artifact' >&2
+  exit 65
+}
+
+artifact_md5=$(file_md5 "$artifact")
+pandoc_version=$(pandoc --version | sed -n '1{s/"/\\"/g;p;}')
+
+jq -n \
+  --arg protocol "sandwalk.export-manifest.v1" \
+  --arg format "$format" \
+  --arg report_md5 "$report_md5" \
+  --arg sources_md5 "$sources_md5" \
+  --arg artifact_md5 "$artifact_md5" \
+  --arg pandoc_version "$pandoc_version" \
+  '{
+    protocol: $protocol,
+    format: $format,
+    adapter: {
+      name: "pandoc-pdf",
+      protocol_version: 1,
+      pandoc_version: $pandoc_version,
+      link_profile: "numbered-citations-and-external-urls-v1"
+    },
+    inputs: [
+      {role: "report", md5: $report_md5},
+      {role: "bibliography", md5: $sources_md5}
+    ],
+    artifact: {
+      path: "report.pdf",
+      media_type: "application/pdf",
+      md5: $artifact_md5
+    }
+  }' >"$manifest_temporary"
+
+mv "$manifest_temporary" "$manifest"
+
+jq -nc \
+  --arg protocol "sandwalk.export-result.v1" \
+  --arg manifest "$manifest" \
+  '{protocol: $protocol, manifest: $manifest}'

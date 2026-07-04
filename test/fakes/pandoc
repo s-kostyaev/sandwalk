@@ -9,7 +9,10 @@ fi
   exit 70
 }
 
+[ -z "${PANDOC_TEST_LOG:-}" ] || printf '%s\n' "$*" >"$PANDOC_TEST_LOG"
+
 output_format=
+output_path=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --to=*)
@@ -19,9 +22,24 @@ while [ "$#" -gt 0 ]; do
       shift
       output_format=${1:-}
       ;;
+    --output=*)
+      output_path=${1#--output=}
+      ;;
+    --output|-o)
+      shift
+      output_path=${1:-}
+      ;;
   esac
   shift
 done
+
+if [ -n "$output_path" ]; then
+  cat >"$output_path" <<'EOF'
+%PDF-1.7
+fake pandoc pdf
+EOF
+  exit 0
+fi
 
 [ "$output_format" = "gfm-raw_html" ] || {
   printf 'unexpected pandoc output format: %s\n' "$output_format" >&2

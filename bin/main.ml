@@ -174,6 +174,22 @@ let explanation = function
     Some
       ( "Drafting cannot start until all required research steps and finding reviews pass."
       , "Complete the remaining required evidence work, then retry draft preparation." )
+  | "INVALID_WORK_PACKET" ->
+    Some
+      ( "The current work packet is malformed, unsupported, applied from the wrong path, or has modified fixed context."
+      , "Run `sandwalk continue --slug <slug>` once, edit only `editable`, leave `integrity_md5` unchanged, and run the exact returned `apply` command." )
+  | "REPORT_BLOCK_UNCITED" ->
+    Some
+      ( "A non-heading report block contains no current typed citation token."
+      , "Use the block preview from the failing command. Blank lines delimit blocks; add `[cite:step-key/finding-key]` to that exact prose block." )
+  | "EXPORT_ADAPTER_FAILED" ->
+    Some
+      ( "The selected export adapter exited unsuccessfully, timed out, or returned invalid JSON."
+      , "Verify the adapter, Pandoc, and a supported Pandoc PDF engine are on PATH, then retry the export." )
+  | "EXPORT_INPUT_STALE" ->
+    Some
+      ( "The final Markdown report or bibliography no longer matches the hashes recorded at finalization."
+      , "Do not edit finalized projections. Restore the exact finalized `report.md` and `sources.md` before exporting." )
   | "REPORT_CITATION_INVALID" ->
     Some
       ( "The report contains a missing, stale, malformed, or unreviewed citation target."
@@ -429,6 +445,8 @@ let status_error = function
   | Report_block_stale _
   | Finalize_wrong_phase _
   | Finalize_gate_failed
+  | Export_wrong_phase _
+  | Export_not_finalized
   | Plan_objective_wrong_phase _
   | Plan_dependency_wrong_phase _
   | Plan_dependency_self
@@ -1080,7 +1098,7 @@ let work_packet
   | "submit-draft" ->
     base
       "submit-report"
-      "Read fixed.writer_pack_path. Fill editable.report_markdown using only current typed citation tokens from that writer pack."
+      "Read fixed.writer_pack_path. Fill editable.report_markdown using only current typed citation tokens from that writer pack. Blank lines delimit blocks; every non-heading block, including prose before a list, needs a citation."
       [ "writer_pack_path", `String (Sandwalk_runtime.Workspace.writer_pack_path workspace) ]
       [ "report_markdown", `String "" ]
   | "review-draft" ->
@@ -1160,20 +1178,78 @@ let json_string_list_member name json =
   | _ -> failwithf "Expected list field %s" name ()
 ;;
 
+type work_packet_validation_error =
+  | Unsupported_protocol
+  | Fixed_fields_modified
+
 let validate_work_protocol packet =
-  if String.equal (json_string_member "protocol" packet) "sandwalk.work.v1"
-  then (
-    let expected = json_string_member "integrity_md5" packet in
+  match
+    json_member_assoc "protocol" packet,
+    json_member_assoc "integrity_md5" packet
+  with
+  | `String "sandwalk.work.v1", `String expected ->
     let actual = work_packet_integrity packet in
     if String.equal expected actual
-    then ()
-    else failwith "Work-packet fixed fields were modified")
-  else failwith "Unsupported work packet protocol"
+    then Ok ()
+    else Error Fixed_fields_modified
+  | _ -> Error Unsupported_protocol
 ;;
 
 let work_packet_workspace packet =
   let workspace = json_member_assoc "workspace" packet in
   json_string_member "slug" workspace, json_string_member "directory_prefix" workspace
+;;
+
+type work_packet_parse_error =
+  | Malformed_packet
+  | Packet_validation_failed of work_packet_validation_error
+  | Invalid_workspace_or_path
+
+let parse_work_packet ~packet_path ~content =
+  match Or_error.try_with (fun () -> Yojson.Safe.from_string content) with
+  | Error _ -> Error Malformed_packet
+  | Ok packet ->
+    (match validate_work_protocol packet with
+     | Error error -> Error (Packet_validation_failed error)
+     | Ok () ->
+       (match
+          Or_error.try_with (fun () ->
+            let slug_text, directory_prefix =
+              work_packet_workspace packet
+            in
+            let slug =
+              match Sandwalk_core.Slug.of_string slug_text with
+              | Ok slug -> slug
+              | Error _ -> failwith "Invalid work-packet workspace slug"
+            in
+            let workspace =
+              Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+            in
+            if
+              not
+                (String.equal
+                   packet_path
+                   (Sandwalk_runtime.Workspace.work_packet_path workspace))
+            then failwith "Only the current workspace packet may be applied";
+            packet, slug, directory_prefix, workspace)
+        with
+        | Error _ -> Error Invalid_workspace_or_path
+        | Ok parsed -> Ok parsed))
+;;
+
+let work_packet_parse_error_message = function
+  | Malformed_packet ->
+    "Work packet is malformed. Run sandwalk continue again and apply the \
+     regenerated current.json."
+  | Packet_validation_failed Fixed_fields_modified ->
+    "Work-packet fixed fields or integrity_md5 changed. Run sandwalk continue \
+     again, edit only editable, and keep integrity_md5 unchanged."
+  | Packet_validation_failed Unsupported_protocol ->
+    "Work packet protocol is missing or unsupported. Run sandwalk continue \
+     again and apply the regenerated current.json."
+  | Invalid_workspace_or_path ->
+    "Work packet workspace or path is invalid. Apply only the exact current.json \
+     path returned by sandwalk continue."
 ;;
 
 let run_self_command arguments =
@@ -5923,12 +5999,33 @@ let finalize_error = function
   | error -> status_error error
 ;;
 
+let export_error = function
+  | Sandwalk_store.Error.Export_wrong_phase phase ->
+    "EXPORT_NOT_ALLOWED", phase_error_message "Export" phase
+  | Export_not_finalized ->
+    "EXPORT_NOT_FINALIZED", "Completed workspace has no finalization record."
+  | error -> status_error error
+;;
+
 let gc_error = function
   | Sandwalk_store.Error.Gc_active_claims ->
     "GC_ACTIVE_CLAIMS", "Raw cleanup is blocked while claims are active."
   | Gc_no_plan -> "GC_NO_PLAN", "No unapplied raw cleanup plan exists."
   | Gc_plan_stale -> "GC_PLAN_STALE", "Raw cleanup plan is stale or modified."
   | error -> status_error error
+;;
+
+let report_block_preview text =
+  let compact =
+    text
+    |> String.split_lines
+    |> List.map ~f:String.strip
+    |> String.concat ~sep:" "
+    |> String.strip
+  in
+  if String.length compact <= 160
+  then compact
+  else String.prefix compact 157 ^ "..."
 ;;
 
 let report_validation_error = function
@@ -5942,8 +6039,14 @@ let report_validation_error = function
     sprintf "Report block %d exceeds the 16 KiB bound." ordinal
   | No_citations ->
     "REPORT_HAS_NO_CITATIONS", "Report must cite at least one reviewed finding."
-  | Missing_citation ordinal ->
-    "REPORT_BLOCK_UNCITED", sprintf "Report block %d has no citation." ordinal
+  | Missing_citation (ordinal, text) ->
+    ( "REPORT_BLOCK_UNCITED"
+    , sprintf
+        "Report block %d has no citation. Block preview: %S Blank lines separate \
+         blocks; add a current [cite:step-key/finding-key] token to this prose \
+         block."
+        ordinal
+        (report_block_preview text) )
   | Invalid_citation reference ->
     "REPORT_CITATION_SYNTAX", sprintf "Invalid citation token near %S." reference
 ;;
@@ -8300,6 +8403,413 @@ let finalize_command =
                                Deferred.unit))))))))
 ;;
 
+let export_pdf_command =
+  Async.Command.async
+    ~summary:"Render finalized Markdown and bibliography as PDF."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and adapter =
+       flag
+         "--adapter"
+         (optional_with_default "sandwalk-export-pandoc-pdf" string)
+         ~doc:"PATH PDF export adapter executable"
+     in
+     fun () ->
+       match Sandwalk_core.Slug.of_string slug_text with
+       | Error error ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | Ok slug ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix
+             ~command_line:directory_prefix
+         in
+         let workspace =
+           Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
+         in
+         let database_path =
+           Sandwalk_runtime.Workspace.database_path workspace
+         in
+         let%bind database_exists = Async.Sys.file_exists_exn database_path in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let%bind state =
+             In_thread.run (fun () ->
+               Sandwalk_store.read_completed_export_state
+                 ~database_path
+                 ~expected_slug:slug
+                 ())
+           in
+           match state with
+           | Error error ->
+             let code, message = export_error error in
+             print_failure_and_exit ~code ~message
+           | Ok state ->
+             let started_at = Time_float_unix.now () in
+             let%bind invocation_id =
+               In_thread.run (fun () ->
+                 Sandwalk_runtime.invocation_id ~now:started_at)
+             in
+             let report_path =
+               Sandwalk_runtime.Workspace.report_path workspace
+             in
+             let sources_path =
+               Sandwalk_runtime.Workspace.sources_path workspace
+             in
+             let output_path =
+               Sandwalk_runtime.Workspace.report_pdf_path workspace
+             in
+             let expected_report_md5 =
+               Sandwalk_store.Completed_export_state.final_report_md5 state
+             in
+             let expected_sources_md5 =
+               Sandwalk_store.Completed_export_state.sources_md5 state
+             in
+             let arguments =
+               `Assoc
+                 [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                 ; "directory_prefix", `String directory_prefix
+                 ; "format", `String "pdf"
+                 ; "adapter", `String adapter
+                 ; ( "inputs"
+                   , `List
+                       [ `Assoc
+                           [ "role", `String "report"
+                           ; "path", `String report_path
+                           ; "md5", `String expected_report_md5
+                           ]
+                       ; `Assoc
+                           [ "role", `String "bibliography"
+                           ; "path", `String sources_path
+                           ; "md5", `String expected_sources_md5
+                           ]
+                       ] )
+                 ; "output", `String output_path
+                 ]
+             in
+             let append_event
+                   ~kind
+                   ~timestamp
+                   ~state_changes
+                   ?duration_ms
+                   ?outcome
+                   ?error_code
+                   ()
+               =
+               Sandwalk_runtime.Audit.append
+                 ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                 (Sandwalk_protocol.Audit_event.create
+                    ~invocation_id
+                    ~timestamp
+                    ~kind
+                    ~command:"export pdf"
+                    ~arguments
+                    ~phase:(Some "completed")
+                    ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                    ~state_changes
+                    ?duration_ms
+                    ?outcome
+                    ?error_code
+                    ())
+             in
+             let fail_with_audit ~code ~message =
+               let finished_at = Time_float_unix.now () in
+               let duration_ms =
+                 Time_float.diff finished_at started_at
+                 |> Time_float.Span.to_ms
+                 |> Float.iround_nearest_exn
+               in
+               let%bind logged =
+                 append_event
+                   ~kind:`Failed
+                   ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                   ~state_changes:[]
+                   ~duration_ms
+                   ~outcome:"failure"
+                   ~error_code:code
+                   ()
+               in
+               match logged with
+               | Error _ ->
+                 print_failure_and_exit
+                   ~code:"AUDIT_LOG_ERROR"
+                   ~message:"Could not append workspace audit log."
+               | Ok () -> print_failure_and_exit ~code ~message
+             in
+             let%bind started =
+               append_event
+                 ~kind:`Started
+                 ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                 ~state_changes:[]
+                 ()
+             in
+             (match started with
+              | Error _ ->
+                print_failure_and_exit
+                  ~code:"AUDIT_LOG_ERROR"
+                  ~message:"Could not append workspace audit log."
+              | Ok () ->
+                let%bind report_input, sources_input =
+                  Deferred.both
+                    (Sandwalk_runtime.File_input.read
+                       ~path:report_path
+                       ~maximum_bytes:Sandwalk_core.Report.maximum_bytes)
+                    (Sandwalk_runtime.File_input.read
+                       ~path:sources_path
+                       ~maximum_bytes:1_048_576)
+                in
+                (match report_input, sources_input with
+                 | Error _, _ | _, Error _ ->
+                   fail_with_audit
+                     ~code:"EXPORT_INPUT_ERROR"
+                     ~message:
+                       "Final report or bibliography is missing or oversized."
+                 | Ok report_input, Ok sources_input ->
+                   let report_md5 =
+                     Sandwalk_runtime.File_input.md5 report_input
+                   in
+                   let sources_md5 =
+                     Sandwalk_runtime.File_input.md5 sources_input
+                   in
+                   if
+                     not
+                       (String.equal report_md5 expected_report_md5
+                        && String.equal sources_md5 expected_sources_md5)
+                   then
+                     fail_with_audit
+                       ~code:"EXPORT_INPUT_STALE"
+                       ~message:
+                         "Final report or bibliography differs from the \
+                          finalized workspace."
+                   else (
+                     let temporary_path =
+                       Sandwalk_runtime.Workspace.temporary_export_path
+                         workspace
+                         ~invocation_id
+                     in
+                     let%bind () = Unix.mkdir ~p:() temporary_path in
+                     let request =
+                       Sandwalk_protocol.Export_adapter.request
+                         ~format:"pdf"
+                         ~inputs:
+                           [ "report", report_path, report_md5
+                           ; "bibliography", sources_path, sources_md5
+                           ]
+                         ~output_directory:temporary_path
+                     in
+                     let%bind adapter_output =
+                       Sandwalk_runtime.Adapter.run_json
+                         ~executable:adapter
+                         ~request
+                         ~timeout:(Time_float.Span.of_sec 120.)
+                         ~maximum_output_bytes:65_536
+                     in
+                     (match adapter_output with
+                      | Error _ ->
+                        fail_with_audit
+                          ~code:"EXPORT_ADAPTER_FAILED"
+                          ~message:"PDF export adapter failed."
+                      | Ok _ ->
+                        let manifest_path =
+                          Filename.concat temporary_path "manifest.json"
+                        in
+                        let%bind manifest_input =
+                          Sandwalk_runtime.File_input.read
+                            ~path:manifest_path
+                            ~maximum_bytes:262_144
+                        in
+                        (match manifest_input with
+                         | Error _ ->
+                           fail_with_audit
+                             ~code:"EXPORT_ARTIFACT_ERROR"
+                             ~message:
+                               "Export adapter omitted its bounded manifest."
+                         | Ok manifest_input ->
+                           let decoded =
+                             try
+                               manifest_input
+                               |> Sandwalk_runtime.File_input.content
+                               |> Yojson.Safe.from_string
+                               |> Sandwalk_protocol.Export_adapter.manifest
+                             with
+                             | _ ->
+                               Error
+                                 Sandwalk_protocol.Export_adapter.Invalid_manifest
+                           in
+                           (match decoded with
+                            | Error _ ->
+                              fail_with_audit
+                                ~code:"EXPORT_PROTOCOL_ERROR"
+                                ~message:"Export manifest is invalid."
+                            | Ok manifest ->
+                              let artifact_path =
+                                Filename.concat
+                                  temporary_path
+                                  (Sandwalk_protocol.Export_adapter.artifact_path
+                                     manifest)
+                              in
+                              let manifest_matches =
+                                String.equal
+                                  (Sandwalk_protocol.Export_adapter.format
+                                     manifest)
+                                  "pdf"
+                                && String.equal
+                                     (Sandwalk_protocol.Export_adapter
+                                      .artifact_path
+                                        manifest)
+                                     "report.pdf"
+                                && String.equal
+                                     (Sandwalk_protocol.Export_adapter.media_type
+                                        manifest)
+                                     "application/pdf"
+                                && Option.value_map
+                                     (Sandwalk_protocol.Export_adapter.input_md5
+                                        manifest
+                                        "report")
+                                     ~default:false
+                                     ~f:(String.equal report_md5)
+                                && Option.value_map
+                                     (Sandwalk_protocol.Export_adapter.input_md5
+                                        manifest
+                                        "bibliography")
+                                     ~default:false
+                                     ~f:(String.equal sources_md5)
+                              in
+                              if not manifest_matches
+                              then
+                                fail_with_audit
+                                  ~code:"EXPORT_PROTOCOL_ERROR"
+                                  ~message:
+                                    "Export manifest does not match the current \
+                                     finalized inputs."
+                              else (
+                                let%bind artifact_input =
+                                  Sandwalk_runtime.File_input.read
+                                    ~path:artifact_path
+                                    ~maximum_bytes:104_857_600
+                                in
+                                (match artifact_input with
+                                 | Error _ ->
+                                   fail_with_audit
+                                     ~code:"EXPORT_ARTIFACT_ERROR"
+                                     ~message:
+                                       "Export adapter omitted the PDF artifact."
+                                 | Ok artifact_input ->
+                                   let artifact_md5 =
+                                     Sandwalk_runtime.File_input.md5
+                                       artifact_input
+                                   in
+                                   let artifact_content =
+                                     Sandwalk_runtime.File_input.content
+                                       artifact_input
+                                   in
+                                   if
+                                     not
+                                       (String.is_prefix
+                                          artifact_content
+                                          ~prefix:"%PDF-"
+                                        && String.equal
+                                             artifact_md5
+                                             (Sandwalk_protocol.Export_adapter
+                                              .artifact_md5
+                                                manifest))
+                                   then
+                                     fail_with_audit
+                                       ~code:"EXPORT_ARTIFACT_ERROR"
+                                       ~message:
+                                         "Exported artifact is not the declared \
+                                          PDF."
+                                   else (
+                                     let%bind published =
+                                       Deferred.Or_error.try_with (fun () ->
+                                         Unix.rename
+                                           ~src:artifact_path
+                                           ~dst:output_path)
+                                     in
+                                     (match published with
+                                      | Error _ ->
+                                        fail_with_audit
+                                          ~code:"WORKSPACE_IO_ERROR"
+                                          ~message:
+                                            "Could not publish PDF export."
+                                      | Ok () ->
+                                        let%bind _ =
+                                          Monitor.try_with (fun () ->
+                                            let%bind () =
+                                              Unix.unlink manifest_path
+                                            in
+                                            Unix.rmdir temporary_path)
+                                        in
+                                        let finished_at =
+                                          Time_float_unix.now ()
+                                        in
+                                        let duration_ms =
+                                          Time_float.diff finished_at started_at
+                                          |> Time_float.Span.to_ms
+                                          |> Float.iround_nearest_exn
+                                        in
+                                        let%bind logged =
+                                          append_event
+                                            ~kind:`Finished
+                                            ~timestamp:
+                                              (Sandwalk_runtime.timestamp_utc
+                                                 finished_at)
+                                            ~state_changes:
+                                              [ `Assoc
+                                                  [ ( "entity"
+                                                    , `String "export.pdf" )
+                                                  ; "from", `Null
+                                                  ; ( "to"
+                                                    , `String artifact_md5 )
+                                                  ]
+                                              ]
+                                            ~duration_ms
+                                            ~outcome:"success"
+                                            ()
+                                        in
+                                        (match logged with
+                                         | Error _ ->
+                                           print_failure_and_exit
+                                             ~code:"AUDIT_LOG_ERROR"
+                                             ~message:
+                                               "Could not append workspace \
+                                                audit log."
+                                         | Ok () ->
+                                           let result =
+                                             `Assoc
+                                               [ "format", `String "pdf"
+                                               ; "artifact", `String output_path
+                                               ; ( "media_type"
+                                                 , `String "application/pdf" )
+                                               ; "md5", `String artifact_md5
+                                               ; ( "size"
+                                                 , `Int
+                                                     (Sandwalk_runtime.File_input
+                                                      .size
+                                                        artifact_input) )
+                                               ]
+                                           in
+                                           Sandwalk_protocol.Envelope.success
+                                             ~result
+                                             ()
+                                           |> Sandwalk_protocol.Envelope.render
+                                           |> print_endline;
+                                           Deferred.unit)))))))))))))
+;;
+
+let export_command =
+  Async.Command.group
+    ~summary:"Render finalized reports through export adapters."
+    [ "pdf", export_pdf_command ]
+;;
+
 let gc_command =
   Async.Command.async
     ~summary:"Plan or apply explicit raw snapshot cleanup."
@@ -8900,7 +9410,7 @@ let continue_command =
                                      ([ "packet", `String packet_path
                                       ; ( "loop"
                                         , `String
-                                            "Read and edit only the packet, apply it, then run continue again." )
+                                            "Edit only editable; keep integrity_md5 unchanged; apply the packet; then run continue again." )
                                       ]
                                       @ fields)
                                  | _ -> assert false
@@ -8948,34 +9458,15 @@ let apply_command =
            ~message:"Could not read the bounded work packet."
        | Ok packet_input ->
          let parsed =
-           Or_error.try_with (fun () ->
-             let packet =
-               Yojson.Safe.from_string
-                 (Sandwalk_runtime.File_input.content packet_input)
-             in
-             validate_work_protocol packet;
-             let slug_text, directory_prefix = work_packet_workspace packet in
-             let slug =
-               match Sandwalk_core.Slug.of_string slug_text with
-               | Ok slug -> slug
-               | Error _ -> failwith "Invalid work-packet workspace slug"
-             in
-             let workspace =
-               Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug
-             in
-             if
-               not
-                 (String.equal
-                    packet_path
-                    (Sandwalk_runtime.Workspace.work_packet_path workspace))
-             then failwith "Only the current workspace packet may be applied";
-             packet, slug, directory_prefix, workspace)
+           parse_work_packet
+             ~packet_path
+             ~content:(Sandwalk_runtime.File_input.content packet_input)
          in
          (match parsed with
-          | Error _ ->
+          | Error error ->
             print_failure_and_exit
               ~code:"INVALID_WORK_PACKET"
-              ~message:"Work packet is invalid, stale, or unsupported."
+              ~message:(work_packet_parse_error_message error)
           | Ok (packet, slug, directory_prefix, workspace) ->
             let action = json_string_member "action" packet in
             let fixed = json_member_assoc "fixed" packet in
@@ -9655,6 +10146,7 @@ let command =
     ; "draft", draft_command
     ; "explain", explain_command
     ; "excerpt", excerpt_command
+    ; "export", export_command
     ; "fetch", fetch_command
     ; "finding", finding_command
     ; "finalize", finalize_command

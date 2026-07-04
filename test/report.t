@@ -8,7 +8,7 @@ Prose blocks require typed citations.
   $ sandwalk draft submit \
   >   --slug report-test --directory-prefix workspace \
   >   --report-file uncited.md
-  {"ok":false,"error":{"code":"REPORT_BLOCK_UNCITED","message":"Report block 2 has no citation."}}
+  {"ok":false,"error":{"code":"REPORT_BLOCK_UNCITED","message":"Report block 2 has no citation. Block preview: \"An uncited assertion.\" Blank lines separate blocks; add a current [cite:step-key/finding-key] token to this prose block."}}
   [1]
 
 Citation targets must be current, reviewed, and accepted.

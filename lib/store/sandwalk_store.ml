@@ -73,6 +73,8 @@ module Error = struct
     | Report_block_stale of int
     | Finalize_wrong_phase of Sandwalk_core.Phase.t
     | Finalize_gate_failed
+    | Export_wrong_phase of Sandwalk_core.Phase.t
+    | Export_not_finalized
     | Plan_objective_wrong_phase of Sandwalk_core.Phase.t
     | Plan_dependency_wrong_phase of Sandwalk_core.Phase.t
     | Plan_dependency_self
@@ -336,6 +338,16 @@ module Finalization_state = struct
   let report_text t = t.report_text
   let report_md5 t = t.report_md5
   let sources_by_finding t = t.sources_by_finding
+end
+
+module Completed_export_state = struct
+  type t =
+    { final_report_md5 : string
+    ; sources_md5 : string
+    }
+
+  let final_report_md5 t = t.final_report_md5
+  let sources_md5 t = t.sources_md5
 end
 
 module Stored_hit = struct
@@ -7443,6 +7455,66 @@ let read_finalization_state
           ; report_md5
           ; sources_by_finding
           }
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let read_completed_export_state
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind slug_text, phase_text = query_workspace database in
+          let expected = Sandwalk_core.Slug.to_string expected_slug in
+          let%bind () =
+            if String.equal expected slug_text
+            then Ok ()
+            else
+              Error
+                (Error.Workspace_slug_mismatch
+                   { expected; actual = slug_text })
+          in
+          let%bind phase =
+            Sandwalk_core.Phase.of_string phase_text
+            |> Result.of_option
+                 ~error:(Error.Invalid_persisted_phase phase_text)
+          in
+          let%bind () =
+            if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Completed
+            then Ok ()
+            else Error (Error.Export_wrong_phase phase)
+          in
+          with_statement
+            database
+            {|
+SELECT final_report_md5, sources_md5
+FROM finalizations
+WHERE singleton = 1
+|}
+            ~f:(fun statement ->
+              match Sqlite3.step statement with
+              | Sqlite3.Rc.ROW ->
+                Ok
+                  { Completed_export_state.final_report_md5 =
+                      Sqlite3.column_text statement 0
+                  ; sources_md5 = Sqlite3.column_text statement 1
+                  }
+              | Sqlite3.Rc.DONE -> Error Error.Export_not_finalized
+              | return_code ->
+                check database return_code
+                |> Result.bind ~f:(fun () ->
+                  Error Error.Export_not_finalized))
         with
         | exn -> Error (Error.Database_error (Exn.to_string exn)))
       ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))

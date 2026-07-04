@@ -344,6 +344,122 @@ module Fetch_adapter = struct
   let markdown_sha256 t = t.markdown_sha256
 end
 
+module Export_adapter = struct
+  type manifest =
+    { format : string
+    ; artifact_path : string
+    ; media_type : string
+    ; artifact_md5 : string
+    ; inputs : (string * string) list
+    }
+
+  type error =
+    | Invalid_manifest
+    | Unsupported_protocol
+  [@@deriving sexp_of]
+
+  let request ~format ~inputs ~output_directory =
+    `Assoc
+      [ "protocol", `String "sandwalk.export.v1"
+      ; "format", `String format
+      ; ( "inputs"
+        , `List
+            (List.map inputs ~f:(fun (role, path, md5) ->
+               `Assoc
+                 [ "role", `String role
+                 ; "path", `String path
+                 ; "md5", `String md5
+                 ])) )
+      ; "output_directory", `String output_directory
+      ]
+  ;;
+
+  let string_field fields name =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`String value) -> Some value
+    | Some _ | None -> None
+  ;;
+
+  let assoc_field fields name =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`Assoc value) -> Some value
+    | Some _ | None -> None
+  ;;
+
+  let md5 value =
+    String.length value = 32
+    && String.for_all value ~f:(function
+      | '0' .. '9' | 'a' .. 'f' -> true
+      | _ -> false)
+  ;;
+
+  let safe_name value =
+    (not (String.is_empty value))
+    && String.length value <= 128
+    && String.equal value (Filename.basename value)
+    && not (String.equal value "." || String.equal value "..")
+  ;;
+
+  let input = function
+    | `Assoc fields ->
+      let open Option.Let_syntax in
+      let%bind role = string_field fields "role" in
+      let%bind digest = string_field fields "md5" in
+      if safe_name role && md5 digest then Some (role, digest) else None
+    | _ -> None
+  ;;
+
+  let manifest = function
+    | `Assoc fields ->
+      (match List.Assoc.find fields "protocol" ~equal:String.equal with
+       | Some (`String "sandwalk.export-manifest.v1") ->
+         let open Option.Let_syntax in
+         let parsed =
+           let%bind format = string_field fields "format" in
+           let%bind artifact = assoc_field fields "artifact" in
+           let%bind artifact_path = string_field artifact "path" in
+           let%bind media_type = string_field artifact "media_type" in
+           let%bind artifact_md5 = string_field artifact "md5" in
+           let%bind inputs =
+             match List.Assoc.find fields "inputs" ~equal:String.equal with
+             | Some (`List values) when List.length values <= 16 ->
+               values |> List.map ~f:input |> Option.all
+             | Some _ | None -> None
+           in
+           Some
+             { format
+             ; artifact_path
+             ; media_type
+             ; artifact_md5
+             ; inputs
+             }
+         in
+         (match parsed with
+          | Some manifest
+            when safe_name manifest.format
+                 && safe_name manifest.artifact_path
+                 && (not (String.is_empty manifest.media_type))
+                 && String.length manifest.media_type <= 128
+                 && md5 manifest.artifact_md5
+                 && not
+                      (List.contains_dup
+                         manifest.inputs
+                         ~compare:(fun (left, _) (right, _) ->
+                           String.compare left right)) ->
+            Ok manifest
+          | Some _ | None -> Error Invalid_manifest)
+       | Some (`String _) -> Error Unsupported_protocol
+       | Some _ | None -> Error Invalid_manifest)
+    | _ -> Error Invalid_manifest
+  ;;
+
+  let format t = t.format
+  let artifact_path t = t.artifact_path
+  let media_type t = t.media_type
+  let artifact_md5 t = t.artifact_md5
+  let input_md5 t role = List.Assoc.find t.inputs role ~equal:String.equal
+end
+
 module Finding_review = struct
   type verdict =
     | Supported

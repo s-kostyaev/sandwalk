@@ -8,7 +8,7 @@
 The packet loop has an explicit terminal response.
 
   $ sandwalk continue --slug final-test --directory-prefix workspace
-  {"ok":true,"result":{"packet":"workspace/final-test/artifacts/work/current.json","loop":"Read and edit only the packet, apply it, then run continue again.","phase":"completed","action":"inspect-completed-workspace","reason":"The workflow is complete.","advisory":true,"alternatives_possible":true}}
+  {"ok":true,"result":{"packet":"workspace/final-test/artifacts/work/current.json","loop":"Edit only editable; keep integrity_md5 unchanged; apply the packet; then run continue again.","phase":"completed","action":"inspect-completed-workspace","reason":"The workflow is complete.","advisory":true,"alternatives_possible":true}}
 
   $ cat workspace/final-test/exports/report.md
   # Fixture

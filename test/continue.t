@@ -12,7 +12,7 @@ Create a current research fixture with one registered excerpt and no findings.
 command.
 
   $ sandwalk continue --slug continue-test --directory-prefix workspace
-  {"ok":true,"result":{"packet":"workspace/continue-test/artifacts/work/current.json","loop":"Read and edit only the packet, apply it, then run continue again.","phase":"researching","action":"create-finding","reason":"The selected active step has exact evidence but no finding. Author a bounded statement in finding.md.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","candidate_excerpt":"excerpt_00000000000000000000000000000001","candidate_excerpt_path":"fixture-excerpt.md"},"next":"'sandwalk' 'apply' '--file' 'workspace/continue-test/artifacts/work/current.json'"}
+  {"ok":true,"result":{"packet":"workspace/continue-test/artifacts/work/current.json","loop":"Edit only editable; keep integrity_md5 unchanged; apply the packet; then run continue again.","phase":"researching","action":"create-finding","reason":"The selected active step has exact evidence but no finding. Author a bounded statement in finding.md.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","candidate_excerpt":"excerpt_00000000000000000000000000000001","candidate_excerpt_path":"fixture-excerpt.md"},"next":"'sandwalk' 'apply' '--file' 'workspace/continue-test/artifacts/work/current.json'"}
 
   $ grep -E '"(protocol|action|candidate_excerpt|key|statement|relation)"' \
   >   workspace/continue-test/artifacts/work/current.json
@@ -36,9 +36,32 @@ child command runs.
   >   workspace/continue-test/artifacts/work/current.json > tampered.json
   $ mv tampered.json workspace/continue-test/artifacts/work/current.json
   $ sandwalk apply --file workspace/continue-test/artifacts/work/current.json
-  {"ok":false,"error":{"code":"INVALID_WORK_PACKET","message":"Work packet is invalid, stale, or unsupported."}}
+  {"ok":false,"error":{"code":"INVALID_WORK_PACKET","message":"Work-packet fixed fields or integrity_md5 changed. Run sandwalk continue again, edit only editable, and keep integrity_md5 unchanged."}}
   [1]
   $ sandwalk continue --slug continue-test --directory-prefix workspace >/dev/null
+
+Malformed and unsupported packets distinguish their repair paths.
+
+  $ printf '{\n' > workspace/continue-test/artifacts/work/current.json
+  $ sandwalk apply --file workspace/continue-test/artifacts/work/current.json
+  {"ok":false,"error":{"code":"INVALID_WORK_PACKET","message":"Work packet is malformed. Run sandwalk continue again and apply the regenerated current.json."}}
+  [1]
+  $ sandwalk continue --slug continue-test --directory-prefix workspace >/dev/null
+
+  $ sed -e 's/sandwalk.work.v1/sandwalk.work.v0/' \
+  >   workspace/continue-test/artifacts/work/current.json > unsupported.json
+  $ mv unsupported.json workspace/continue-test/artifacts/work/current.json
+  $ sandwalk apply --file workspace/continue-test/artifacts/work/current.json
+  {"ok":false,"error":{"code":"INVALID_WORK_PACKET","message":"Work packet protocol is missing or unsupported. Run sandwalk continue again and apply the regenerated current.json."}}
+  [1]
+  $ sandwalk continue --slug continue-test --directory-prefix workspace >/dev/null
+
+Only the canonical current packet path can be applied.
+
+  $ cp workspace/continue-test/artifacts/work/current.json copied-packet.json
+  $ sandwalk apply --file copied-packet.json
+  {"ok":false,"error":{"code":"INVALID_WORK_PACKET","message":"Work packet workspace or path is invalid. Apply only the exact current.json path returned by sandwalk continue."}}
+  [1]
 
 Fill only the semantic fields. Applying the packet creates, attaches, and seals
 the finding without requiring the agent to reproduce identifiers or CLI flags.

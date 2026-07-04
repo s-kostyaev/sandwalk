@@ -11,6 +11,18 @@
   $ sandwalk explain SEARCH_ADAPTER_FAILED
   {"ok":true,"result":{"code":"SEARCH_ADAPTER_FAILED","explanation":"The search adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify `sandwalk-search-ddgr` and `ddgr` are on PATH, the temporary directory exists, and DuckDuckGo is allowed by the network sandbox."}}
 
+  $ sandwalk explain INVALID_WORK_PACKET
+  {"ok":true,"result":{"code":"INVALID_WORK_PACKET","explanation":"The current work packet is malformed, unsupported, applied from the wrong path, or has modified fixed context.","repair":"Run `sandwalk continue --slug <slug>` once, edit only `editable`, leave `integrity_md5` unchanged, and run the exact returned `apply` command."}}
+
+  $ sandwalk explain REPORT_BLOCK_UNCITED
+  {"ok":true,"result":{"code":"REPORT_BLOCK_UNCITED","explanation":"A non-heading report block contains no current typed citation token.","repair":"Use the block preview from the failing command. Blank lines delimit blocks; add `[cite:step-key/finding-key]` to that exact prose block."}}
+
+  $ sandwalk explain EXPORT_ADAPTER_FAILED
+  {"ok":true,"result":{"code":"EXPORT_ADAPTER_FAILED","explanation":"The selected export adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify the adapter, Pandoc, and a supported Pandoc PDF engine are on PATH, then retry the export."}}
+
+  $ sandwalk explain EXPORT_INPUT_STALE
+  {"ok":true,"result":{"code":"EXPORT_INPUT_STALE","explanation":"The final Markdown report or bibliography no longer matches the hashes recorded at finalization.","repair":"Do not edit finalized projections. Restore the exact finalized `report.md` and `sources.md` before exporting."}}
+
   $ sandwalk init --slug guidance-test --directory-prefix workspaces
   {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":22}}
 

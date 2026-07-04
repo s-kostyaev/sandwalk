@@ -73,6 +73,8 @@ module Error : sig
     | Report_block_stale of int
     | Finalize_wrong_phase of Sandwalk_core.Phase.t
     | Finalize_gate_failed
+    | Export_wrong_phase of Sandwalk_core.Phase.t
+    | Export_not_finalized
     | Plan_objective_wrong_phase of Sandwalk_core.Phase.t
     | Plan_dependency_wrong_phase of Sandwalk_core.Phase.t
     | Plan_dependency_self
@@ -249,6 +251,13 @@ module Finalization_state : sig
   val report_text : t -> string
   val report_md5 : t -> string
   val sources_by_finding : t -> (string * string list) list
+end
+
+module Completed_export_state : sig
+  type t
+
+  val final_report_md5 : t -> string
+  val sources_md5 : t -> string
 end
 
 module Stored_hit : sig
@@ -902,6 +911,13 @@ val read_finalization_state
   -> expected_slug:Sandwalk_core.Slug.t
   -> unit
   -> (Finalization_state.t, Error.t) Result.t
+
+val read_completed_export_state
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> unit
+  -> (Completed_export_state.t, Error.t) Result.t
 
 val finalize_workspace
   :  ?busy_timeout_ms:int

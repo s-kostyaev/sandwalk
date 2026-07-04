@@ -45,7 +45,7 @@ of its irrelevant hits. Guidance prefers the newest query.
   oxcaml features
   $ sandwalk continue --slug restart --directory-prefix restart | \
   >   sed -E 's/hit_[0-9a-f]{32}/hit_ID/g'
-  {"ok":true,"result":{"packet":"restart/restart/artifacts/work/current.json","loop":"Read and edit only the packet, apply it, then run continue again.","phase":"researching","action":"fetch","reason":"The selected active step has an unfetched search result and no snapshot.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","hit":"hit_ID","hit_title":"Primary result","hit_url":"https://example.test/primary","hit_snippet":"A deterministic search result."},"next":"'sandwalk' 'apply' '--file' 'restart/restart/artifacts/work/current.json'"}
+  {"ok":true,"result":{"packet":"restart/restart/artifacts/work/current.json","loop":"Edit only editable; keep integrity_md5 unchanged; apply the packet; then run continue again.","phase":"researching","action":"fetch","reason":"The selected active step has an unfetched search result and no snapshot.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_00000000000000000000000000000001","hit":"hit_ID","hit_title":"Primary result","hit_url":"https://example.test/primary","hit_snippet":"A deterministic search result."},"next":"'sandwalk' 'apply' '--file' 'restart/restart/artifacts/work/current.json'"}
 
 A context-only evidence bundle cannot seal a finding.
 
@@ -115,7 +115,7 @@ rejects the previous evidence for this step.
   >   --file repair/repair-test/artifacts/work/current.json >/dev/null
   $ sandwalk continue --slug repair-test --directory-prefix repair | \
   >   sed -E 's/claim_[0-9a-f]{32}/claim_ID/g'
-  {"ok":true,"result":{"packet":"repair/repair-test/artifacts/work/current.json","loop":"Read and edit only the packet, apply it, then run continue again.","phase":"researching","action":"create-excerpt","reason":"Inspect the selected normalized snapshot, then create an exact excerpt from a semantically relevant range.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_ID","snapshot":"snap_00000000000000000000000000000001","document_path":"workspace/repair-test/artifacts/snapshots/snap_00000000000000000000000000000001/document.md"},"next":"'sandwalk' 'apply' '--file' 'repair/repair-test/artifacts/work/current.json'"}
+  {"ok":true,"result":{"packet":"repair/repair-test/artifacts/work/current.json","loop":"Edit only editable; keep integrity_md5 unchanged; apply the packet; then run continue again.","phase":"researching","action":"create-excerpt","reason":"Inspect the selected normalized snapshot, then create an exact excerpt from a semantically relevant range.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_ID","snapshot":"snap_00000000000000000000000000000001","document_path":"workspace/repair-test/artifacts/snapshots/snap_00000000000000000000000000000001/document.md"},"next":"'sandwalk' 'apply' '--file' 'repair/repair-test/artifacts/work/current.json'"}
 
 Released schema 21 migrates candidate rejection and finding repair state.
 

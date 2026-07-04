@@ -8,4 +8,5 @@
   inspect_workspace.exe
   ../adapters/ddgr-search
   ../adapters/curl-pandoc-fetch
+  ../adapters/pandoc-pdf-export
   (source_tree fakes)))
