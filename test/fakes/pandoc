@@ -1,0 +1,35 @@
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'pandoc fake-1.0'
+  exit 0
+fi
+
+[ "${PANDOC_FORCE_FAILURE:-}" != 1 ] || {
+  printf '%s\n' 'pandoc must not be called' >&2
+  exit 70
+}
+
+output_format=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --to=*)
+      output_format=${1#--to=}
+      ;;
+    --to)
+      shift
+      output_format=${1:-}
+      ;;
+  esac
+  shift
+done
+
+[ "$output_format" = "gfm-raw_html" ] || {
+  printf 'unexpected pandoc output format: %s\n' "$output_format" >&2
+  exit 64
+}
+
+cat <<'EOF'
+# Fetched title
+
+Queryable body.
+EOF

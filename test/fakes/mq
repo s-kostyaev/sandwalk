@@ -1,0 +1,10 @@
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'mq fake-1.0'
+  exit 0
+fi
+
+[ "$2" = ".tree" ]
+grep -q '^# Fetched title' "$1"
+[ "${MQ_FORCE_FAILURE:-0}" = 0 ] || exit 1
+printf '%s|%s\n' "$1" "$2" >>"$MQ_TEST_LOG"

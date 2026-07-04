@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+query=$(printf '%s' "$request" | jq -er '.query')
+limit=$(printf '%s' "$request" | jq -er '.limit // 10')
+
+[ "$protocol" = "sandwalk.search.v1" ] || {
+  printf '%s\n' 'unsupported search protocol' >&2
+  exit 64
+}
+
+printf '%s' "$limit" | grep -Eq '^[0-9]+$' || {
+  printf '%s\n' 'search limit must be an integer' >&2
+  exit 64
+}
+
+[ "$limit" -ge 1 ] && [ "$limit" -le 25 ] || {
+  printf '%s\n' 'search limit must be between 1 and 25' >&2
+  exit 64
+}
+
+[ -n "$query" ] && [ "${#query}" -le 2048 ] || {
+  printf '%s\n' 'search query must contain between 1 and 2048 bytes' >&2
+  exit 64
+}
+
+temporary_directory=${TMPDIR:-/tmp}
+if [ ! -d "$temporary_directory" ] || [ ! -w "$temporary_directory" ]; then
+  temporary_directory=/tmp
+fi
+stderr_file=$(mktemp "$temporary_directory/sandwalk-ddgr.XXXXXX")
+trap 'rm -f "$stderr_file"' EXIT HUP INT TERM
+
+if ! raw=$(ddgr --json --num "$limit" -- "$query" 2>"$stderr_file"); then
+  cat "$stderr_file" >&2
+  exit 69
+fi
+
+result_count=$(printf '%s' "$raw" | jq -er 'if type == "array" then length else 0 end')
+if [ "$result_count" -eq 0 ] && [ -s "$stderr_file" ]; then
+  cat "$stderr_file" >&2
+  exit 69
+fi
+
+printf '%s' "$raw" | jq -c \
+  --argjson limit "$limit" \
+  '{
+    protocol: "sandwalk.search-results.v1",
+    adapter: {
+      name: "ddgr",
+      protocol_version: 1
+    },
+    results: (
+      (if type == "array" then . else [] end)
+      | .[0:$limit]
+      | map({
+          url: ((.url // "") | tostring | .[0:2048]),
+          title: ((.title // "") | tostring | .[0:500]),
+          snippet: ((.abstract // .snippet // "") | tostring | .[0:1000])
+        })
+      | map(select(.url | test("^https?://")))
+    )
+  }'

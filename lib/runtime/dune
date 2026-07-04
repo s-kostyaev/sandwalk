@@ -1,0 +1,13 @@
+(library
+ (name sandwalk_runtime)
+ (public_name sandwalk.runtime)
+ (libraries
+  core
+  core_unix
+  async
+  async_unix
+  yojson
+  sandwalk_core
+  sandwalk_protocol)
+ (preprocess
+  (pps ppx_jane)))

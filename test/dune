@@ -1,0 +1,11 @@
+(executable
+ (name inspect_workspace)
+ (libraries sqlite3))
+
+(cram
+ (deps
+  %{bin:sandwalk}
+  inspect_workspace.exe
+  ../adapters/ddgr-search
+  ../adapters/curl-pandoc-fetch
+  (source_tree fakes)))

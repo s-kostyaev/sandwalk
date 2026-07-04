@@ -1,0 +1,7 @@
+(library
+ (name sandwalk_protocol)
+ (public_name sandwalk.protocol)
+ (libraries core yojson)
+ (preprocess
+  (pps ppx_jane))
+ (inline_tests))

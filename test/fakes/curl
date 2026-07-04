@@ -1,0 +1,62 @@
+#!/bin/sh
+output=
+headers=
+write_out=false
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output)
+      output=$2
+      shift 2
+      ;;
+    --dump-header)
+      headers=$2
+      shift 2
+      ;;
+    --user-agent)
+      [ "$2" = 'Lynx/2.9.2 libwww-FM/2.14 SSL-MM/1.4.1 GNUTLS/3.8.3' ]
+      shift 2
+      ;;
+    --header)
+      [ "$2" = 'Accept: text/markdown, text/html;q=0.9' ]
+      shift 2
+      ;;
+    --write-out)
+      write_out=true
+      shift 2
+      ;;
+    -L|-sS|--fail-with-body)
+      shift
+      ;;
+    --version)
+      printf '%s\n' 'curl fake-1.0'
+      exit 0
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [ "${CURL_FAKE_MARKDOWN:-}" = 1 ]; then
+  cat >"$output" <<'EOF'
+---
+title: Fetched title
+---
+
+# Fetched title
+
+Server-provided Markdown.
+EOF
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: text/markdown; charset=utf-8\r\n\r\n' >"$headers"
+  [ "$write_out" = true ] &&
+    printf '%s' '{"url_effective":"https://example.test/final","http_code":200,"num_redirects":1,"content_type":"text/markdown; charset=utf-8"}'
+else
+  cat >"$output" <<'EOF'
+<!doctype html>
+<html><body><h1>Fetched title</h1><p>Queryable body.</p></body></html>
+EOF
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n' >"$headers"
+  [ "$write_out" = true ] &&
+    printf '%s' '{"url_effective":"https://example.test/final","http_code":200,"num_redirects":1,"content_type":"text/html"}'
+fi
