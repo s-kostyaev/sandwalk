@@ -39,8 +39,10 @@ concurrently against the same claim. Then repeat this loop:
 2. Read the returned `artifacts/work/current.json` and every artifact it
    explicitly asks you to inspect.
 3. Edit only fields inside `editable`. Never change `fixed`, `workspace`,
-   `action`, or identifiers. Make the requested semantic decisions from the
-   exact artifacts, not from memory or search snippets.
+   `action`, identifiers, or `integrity_md5`. The integrity hash excludes
+   `editable`, so it remains valid after the intended edit and must never be
+   removed or recomputed. Make the requested semantic decisions from the exact
+   artifacts, not from memory or search snippets.
 4. Run the exact `sandwalk apply --file ...` command returned by `continue`.
 5. Run the `continue` command returned by `apply` and repeat until the reported
    phase is `completed`.
@@ -50,6 +52,11 @@ checklists, old errors, and any lost command response. After compaction,
 uncertainty, or a partially applied action, discard the session-local procedure
 and run `continue` again. It migrates old state and derives a valid action from
 the state that actually committed.
+
+If `apply` reports `INVALID_WORK_PACKET`, run `continue` once to regenerate the
+packet, then edit only `editable` and retry the exact returned `apply` command.
+Do not recompute the integrity hash, use `next`, or switch to the manual command
+workflow while a current packet exists.
 
 The packet presents one deterministic valid path; other legal research actions
 may exist. If inspecting its fixed artifact shows that candidate is unsuitable,
@@ -96,7 +103,14 @@ retrieval path.
 7. Complete the claim only after its current findings pass review. Repeat until
    all required steps complete.
 8. Prepare the writer pack, draft using only its typed citation tokens, submit
-   the report, review every hashed block, and finalize.
+   the report, review every hashed block, and finalize. When the user requests
+   a PDF, run `sandwalk export pdf --slug <slug>` after completion.
+
+Report blocks are separated by blank lines. Every non-heading block needs a
+current citation token, including short lead-in prose before a list. When
+Sandwalk reports `REPORT_BLOCK_UNCITED`, use the returned block preview to edit
+that exact block inside `editable.report_markdown`; do not repair a separate
+draft file and do not guess the ordinal.
 
 On interruption, use the continuation loop. Use `sandwalk resume` only when
 you need its richer crash diagnostics or bounded recovery report. Do not edit

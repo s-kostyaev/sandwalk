@@ -669,7 +669,7 @@ module Report = struct
     | Too_many_blocks of int
     | Block_too_large of int
     | No_citations
-    | Missing_citation of int
+    | Missing_citation of int * string
     | Invalid_citation of string
   [@@deriving sexp_of]
 
@@ -755,7 +755,7 @@ module Report = struct
           if
             List.is_empty citations
             && not (String.is_prefix (String.strip text) ~prefix:"#")
-          then Error (Missing_citation (index + 1))
+          then Error (Missing_citation (index + 1, text))
           else Ok { text; citations })
         |> Result.all
         |> Result.bind ~f:(fun blocks ->
@@ -1530,7 +1530,9 @@ let%test_unit "report blocks require canonical typed citations" =
      [%test_eq: string] "fixture-step" (Report.citation_step citation);
      [%test_eq: string] "small-claim" (Report.citation_finding citation));
   (match Report.create "Uncited statement." with
-   | Error (Report.Missing_citation 1) -> ()
+   | Error (Report.Missing_citation (ordinal, text)) ->
+     [%test_eq: int] 1 ordinal;
+     [%test_eq: string] "Uncited statement.\n" text
    | _ -> failwith "expected uncited prose rejection");
   (match Report.create "Bad. [cite:../escape]" with
    | Error (Report.Invalid_citation _) -> ()

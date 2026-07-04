@@ -2,4 +2,5 @@
  (section bin)
  (files
   (ddgr-search as sandwalk-search-ddgr)
-  (curl-pandoc-fetch as sandwalk-fetch-curl-pandoc)))
+  (curl-pandoc-fetch as sandwalk-fetch-curl-pandoc)
+  (pandoc-pdf-export as sandwalk-export-pandoc-pdf)))

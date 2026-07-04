@@ -92,6 +92,28 @@ module Fetch_adapter : sig
   val markdown_sha256 : manifest -> string
 end
 
+module Export_adapter : sig
+  type manifest
+
+  type error =
+    | Invalid_manifest
+    | Unsupported_protocol
+  [@@deriving sexp_of]
+
+  val request
+    :  format:string
+    -> inputs:(string * string * string) list
+    -> output_directory:string
+    -> Yojson.Safe.t
+
+  val manifest : Yojson.Safe.t -> (manifest, error) Result.t
+  val format : manifest -> string
+  val artifact_path : manifest -> string
+  val media_type : manifest -> string
+  val artifact_md5 : manifest -> string
+  val input_md5 : manifest -> string -> string option
+end
+
 module Finding_review : sig
   type verdict =
     | Supported

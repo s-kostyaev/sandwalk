@@ -75,7 +75,8 @@ The workspace root is:
 │   ├── research-plan.md
 │   ├── writer-pack.md
 │   ├── report.md
-│   └── sources.md
+│   ├── sources.md
+│   └── report.pdf
 └── logs/
     └── events.jsonl
 ```
@@ -315,7 +316,11 @@ sandwalk apply --file <workspace>/artifacts/work/current.json
 
 `apply` accepts only the current packet at the path derived from its embedded
 workspace identity. An integrity hash covers every field except `editable`, so
-changing fixed context invalidates the packet before a child command runs.
+changing fixed context invalidates the packet before a child command runs. The
+hash remains unchanged when the agent fills `editable`; packet validation
+failures distinguish malformed or unsupported packets, modified fixed context,
+and an invalid current-packet path, and direct the agent back through
+`continue`.
 `apply` validates editable values, materializes bounded input files under
 `artifacts/work/`, and invokes the ordinary invariant-checking commands with
 the fixed identifiers and flags. Candidate rejection is the one direct store
@@ -545,6 +550,10 @@ targets must name current reviewed findings with `supported` or
 and blocks, publishes `exports/report.md`, and performs the checked
 `drafting → draft-review` transition.
 
+An uncited-block failure includes the one-based block ordinal, a bounded
+single-line preview of that exact block, and the blank-line splitting rule so an
+agent can repair the correct paragraph without reconstructing parser behavior.
+
 ```console
 sandwalk draft review --slug <slug> --review-file <path>
 ```
@@ -582,6 +591,50 @@ The writer produces ordinary Markdown with typed citation tokens:
 Sandwalk deterministically validates tokens, assigns stable citation numbers,
 deduplicates sources, and writes the bibliography. Agents do not manually
 maintain citation numbering.
+
+## Export adapters
+
+Finalized Markdown projections can be rendered into additional delivery formats
+through versioned export adapters:
+
+```console
+sandwalk export pdf --slug <slug> [--adapter <executable>]
+```
+
+Export is allowed only after the workspace reaches `completed`. Before invoking
+an adapter, Sandwalk verifies `exports/report.md` and `exports/sources.md`
+against the hashes recorded by finalization. Adapter execution occurs outside
+SQLite in a Sandwalk-controlled temporary directory. Sandwalk validates the
+returned manifest, input hashes, media type, declared output hash, and format
+signature before atomically publishing the artifact.
+
+An exporter receives a `sandwalk.export.v1` request:
+
+```json
+{
+  "protocol": "sandwalk.export.v1",
+  "format": "pdf",
+  "inputs": [
+    {"role": "report", "path": ".../report.md", "md5": "..."},
+    {"role": "bibliography", "path": ".../sources.md", "md5": "..."}
+  ],
+  "output_directory": ".../artifacts/temporary/export-..."
+}
+```
+
+It writes the declared artifact plus `manifest.json` using
+`sandwalk.export-manifest.v1`, then returns bounded JSON. Artifact paths in the
+manifest are relative basenames, so an adapter cannot publish outside its
+assigned directory.
+
+The first bundled exporter is `sandwalk-export-pandoc-pdf`. It invokes Pandoc
+on the finalized report followed by its bibliography and writes
+`exports/report.pdf`. It turns rendered numeric citations such as `[1]` into
+internal links to the corresponding bibliography entries, preserves external
+URL annotations, and enables visible link colors. Pandoc PDF generation also
+requires one of its supported external PDF engines; the bundled exporter uses
+Pandoc's configured default. Additional formats and renderers use the same
+protocol rather than adding renderer logic to the Sandwalk core.
 
 ## Audit log
 

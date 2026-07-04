@@ -102,6 +102,7 @@ sandwalk draft prepare --slug <slug>
 sandwalk draft submit --slug <slug> --report-file <draft.md>
 sandwalk draft review --slug <slug> --review-file <report-review.json>
 sandwalk finalize --slug <slug>
+sandwalk export pdf --slug <slug>
 ```
 
 `draft prepare` writes `exports/writer-pack.md`. Every prose block in the draft
@@ -110,6 +111,11 @@ must include at least one current token copied from that pack:
 ```text
 [cite:step-key/finding-key]
 ```
+
+Blank lines delimit report blocks. Headings may be uncited; every other block,
+including a lead-in sentence before a list, needs a citation. A
+`REPORT_BLOCK_UNCITED` response includes a bounded preview of the exact block
+to repair.
 
 `draft submit` returns the report revision and an ordered list of block MD5
 hashes. Review every block exactly once:
@@ -134,6 +140,10 @@ Accepted block verdicts are `supported` and `partially-supported`. An
 a new complete report revision after repair. Finalization writes
 `exports/report.md` and `exports/sources.md`.
 
+After finalization, `export pdf` verifies those two projections against the
+durable finalization hashes and invokes the configured export adapter. The
+bundled `sandwalk-export-pandoc-pdf` adapter publishes `exports/report.pdf`.
+
 ## Guidance and recovery
 
 ```console
@@ -147,9 +157,14 @@ sandwalk resume --slug <slug>
 
 Use `continue` as the normal agent loop. It migrates the workspace and writes a
 bounded current packet. Inspect its referenced artifacts, change only
-`editable`, run the returned `apply`, then follow the returned `continue`.
+`editable`, leave `integrity_md5` unchanged, run the returned `apply`, then
+follow the returned `continue`. The hash covers the fixed packet context, not
+`editable`, and must not be removed or recomputed.
 `apply` supplies fixed identifiers and command flags and validates the semantic
 fields. Stop when `continue` reports phase `completed`.
+
+After `INVALID_WORK_PACKET`, run `continue` once and retry the packet loop. Do
+not switch to `next` or a manual mutation while a current packet exists.
 
 Search packets provide an editable subject-aware query. Candidate packets
 require `accept` or `reject`; rejection reasons are persisted and the rejected
