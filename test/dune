@@ -7,6 +7,8 @@
   %{bin:sandwalk}
   inspect_workspace.exe
   ../adapters/ddgr-search
+  ../adapters/ugrep-search
   ../adapters/curl-pandoc-fetch
+  ../adapters/xberg-fetch
   ../adapters/pandoc-pdf-export
   (source_tree fakes)))

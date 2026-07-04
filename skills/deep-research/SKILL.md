@@ -1,6 +1,6 @@
 ---
 name: deep-research
-description: Conduct durable, source-grounded research with Sandwalk, including planning, parallel claims, immutable web snapshots, exact excerpts, reviewed findings, citation-safe drafting, recovery, and finalization. Use for research tasks that need auditable provenance, interruption recovery, independent evidence review, or a reviewed report rather than an informal web summary.
+description: Conduct durable, source-grounded research with Sandwalk, including planning, parallel claims, immutable web or local-document snapshots, exact excerpts, reviewed findings, citation-safe drafting, recovery, and finalization. Use for research tasks that need auditable provenance, interruption recovery, independent evidence review, or a reviewed report rather than an informal summary.
 ---
 
 # Deep Research
@@ -65,21 +65,31 @@ packet. Sandwalk will durably skip it and derive another action. Never create an
 excerpt or finding from a bot challenge, access-denied page, irrelevant result,
 or content that does not address the packet's research objective and step.
 
-Search packets contain an editable query. Confirm that it names the research
-subject and current step goal; refine it before apply when it is ambiguous.
+Search packets contain an editable query and an initially empty
+`editable.source_root`. Confirm that the query names the research subject and
+current step goal. When the user authorized a local document directory, put
+that readable directory in `source_root`; otherwise leave it empty.
 
 ## Exclusive retrieval
 
 While this skill is active, Sandwalk is the only permitted path for every
-network search and fetch, including reconnaissance. Do not load or invoke
+network or local-document search and fetch, including reconnaissance. Do not load or invoke
 another web-search, browsing, or fetch skill. Do not call `ddgr`, `curl`,
-`wget`, a browser, or an HTTP client directly. These programs may run only
-behind a Sandwalk adapter.
+`wget`, `ug`, `ugrep`, Xberg, Docling, a browser, or an HTTP client directly.
+These programs may run only behind a Sandwalk adapter.
 
 Use `sandwalk search` to discover persisted hits, `sandwalk fetch` to create
 immutable snapshots, and read only the returned `document.md`. If either
 command fails, diagnose and retry its adapter; never substitute another
 retrieval path.
+
+For user-authorized local documents, run `sandwalk search` with exactly one
+`--source-root <directory>`. The root must already be readable inside the
+agent's filesystem sandbox. Sandwalk records it with every hit, defaults to
+the `ugrep+` connector, and later selects the structured Xberg fetch connector
+for `file://` hits. Inspect the snapshot through `mq document.md '.tree'` or
+bounded reads so headings and subheadings remain the navigation surface; never
+treat the search snippet as document content.
 
 ## Workflow
 

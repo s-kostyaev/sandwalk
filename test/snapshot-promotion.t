@@ -1,5 +1,5 @@
   $ sandwalk init --slug promotion-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"promotion-test","phase":"initialized","schema_version":22}}
+  {"ok":true,"result":{"slug":"promotion-test","phase":"initialized","schema_version":23}}
   $ printf 'Find one reusable source.' > goal.md
   $ sandwalk recon start --slug promotion-test --directory-prefix workspaces \
   >   --goal-file goal.md >/dev/null
@@ -76,4 +76,4 @@ Released schema 19 upgrades through the promotion migration.
   $ ./inspect_workspace.exe --create-v19 legacy/database/sandwalk.sqlite3 legacy
   $ sandwalk gc --slug legacy --directory-prefix . --raw --plan >/dev/null
   $ ./inspect_workspace.exe legacy/database/sandwalk.sqlite3 | sed -n '2p'
-  22
+  23

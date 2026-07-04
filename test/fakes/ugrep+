@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+root=
+for argument do
+  root=$argument
+done
+
+jq -n --arg file "$root/Architecture Notes.pdf" '
+  [
+    {
+      file: $file,
+      matches: [
+        {line: 3, match: "Typed adapter architecture"},
+        {line: 9, match: "Adapter protocol details"}
+      ]
+    }
+  ]
+'

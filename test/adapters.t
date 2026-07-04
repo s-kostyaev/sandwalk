@@ -68,3 +68,67 @@ The manifest is not published when mq cannot query the Markdown.
   [1]
 
   $ test ! -e rejected-output/manifest.json
+
+Local discovery emits bounded file locators without consulting ~/.ugrep.
+
+  $ mkdir -p "local documents"
+  $ touch "local documents/Architecture Notes.pdf"
+  $ PATH="$PWD/fakes:$PATH" ../adapters/ugrep-search <<EOF \
+  > | sed "s#file://$PWD#file://ROOT#"
+  > {"protocol":"sandwalk.search.v1","query":"adapter architecture","limit":1,"source_root":"$PWD/local documents"}
+  > EOF
+  {"protocol":"sandwalk.search-results.v1","adapter":{"name":"ugrep+","protocol_version":1,"search_profile":"fixed-string-recursive-sorted-v1"},"results":[{"url":"file://ROOT/local%20documents/Architecture%20Notes.pdf","title":"Architecture Notes.pdf","snippet":"Typed adapter architecture Adapter protocol details"}]}
+
+Xberg fetch retains hierarchical Markdown and the structured source model.
+
+  $ mkdir local-output
+  $ PATH="$PWD/fakes:$PATH" ../adapters/xberg-fetch <<EOF
+  > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/local%20documents/Architecture%20Notes.pdf","source_root":"$PWD/local documents","output_directory":"local-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"local-output/manifest.json"}
+
+  $ cat local-output/document.md
+  # Architecture Notes
+  
+  ## Adapter protocol
+  
+  Typed adapter architecture.
+
+  $ jq -r '[.artifacts.structure, .adapter.extraction_profile, .queryability_check.ok] | @tsv' \
+  >   local-output/manifest.json
+  document.json	markdown-hierarchy-tesseract-v1	true
+
+  $ jq -r '.results[0].document.nodes[] | [.content.node_type, (.content.level // 0)] | @tsv' \
+  >   local-output/document.json
+  title	0
+  heading	2
+  paragraph	0
+
+Flattening recognized subheadings fails before snapshot publication.
+
+  $ mkdir flat-output
+  $ XBERG_FLAT_MARKDOWN=1 PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/xberg-fetch >/dev/null <<EOF
+  > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/local%20documents/Architecture%20Notes.pdf","source_root":"$PWD/local documents","output_directory":"flat-output"}
+  > EOF
+  xberg flattened Markdown subheadings
+  [65]
+
+  $ test ! -e flat-output/manifest.json
+
+Canonicalization prevents a file locator from escaping the authorized root.
+
+  $ mkdir outside
+  $ touch outside/secret.pdf
+  $ PATH="$PWD/fakes:$PATH" ../adapters/xberg-fetch >/dev/null <<EOF
+  > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/outside/secret.pdf","source_root":"$PWD/local documents","output_directory":"escape-output"}
+  > EOF
+  local source resolves outside its authorized root
+  [77]
+
+  $ ln -s "$PWD/outside/secret.pdf" "local documents/linked-secret.pdf"
+  $ PATH="$PWD/fakes:$PATH" ../adapters/xberg-fetch >/dev/null <<EOF
+  > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/local%20documents/linked-secret.pdf","source_root":"$PWD/local documents","output_directory":"symlink-output"}
+  > EOF
+  local source resolves outside its authorized root
+  [77]

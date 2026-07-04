@@ -1,0 +1,85 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+query=$(printf '%s' "$request" | jq -er '.query')
+limit=$(printf '%s' "$request" | jq -er '.limit // 10')
+source_root=$(printf '%s' "$request" | jq -er '.source_root')
+
+[ "$protocol" = "sandwalk.search.v1" ] || {
+  printf '%s\n' 'unsupported search protocol' >&2
+  exit 64
+}
+
+printf '%s' "$limit" | grep -Eq '^[0-9]+$' || {
+  printf '%s\n' 'search limit must be an integer' >&2
+  exit 64
+}
+
+[ "$limit" -ge 1 ] && [ "$limit" -le 25 ] || {
+  printf '%s\n' 'search limit must be between 1 and 25' >&2
+  exit 64
+}
+
+[ -n "$query" ] && [ "${#query}" -le 2048 ] || {
+  printf '%s\n' 'search query must contain between 1 and 2048 bytes' >&2
+  exit 64
+}
+
+[ -d "$source_root" ] || {
+  printf '%s\n' 'local source root must be an existing directory' >&2
+  exit 66
+}
+
+canonical_root=$(cd "$source_root" && pwd -P)
+
+set +e
+raw=$(
+  LC_ALL=C ugrep+ \
+    --json -n -F -r --no-messages -J1 --sort=name \
+    --max-files="$limit" --max-count=3 \
+    -- "$query" "$canonical_root"
+)
+status=$?
+set -e
+
+case "$status" in
+  0|1) ;;
+  *) exit "$status" ;;
+esac
+
+printf '%s' "$raw" |
+  jq -c \
+    --arg root "$canonical_root" \
+    --argjson limit "$limit" \
+    '
+      def file_uri:
+        "file://" + (split("/") | map(@uri) | join("/"));
+      {
+        protocol: "sandwalk.search-results.v1",
+        adapter: {
+          name: "ugrep+",
+          protocol_version: 1,
+          search_profile: "fixed-string-recursive-sorted-v1"
+        },
+        results: (
+          (if type == "array" then . else [] end)
+          | map(select(
+              (.file | type == "string")
+              and (.file == $root or (.file | startswith($root + "/")))
+            ))
+          | .[0:$limit]
+          | map({
+              url: (.file | file_uri | .[0:2048]),
+              title: (.file | split("/") | last | .[0:500]),
+              snippet: (
+                [.matches[]?.match]
+                | join(" ")
+                | gsub("[\r\n\t]+"; " ")
+                | .[0:1000]
+              )
+            })
+        )
+      }
+    '

@@ -213,12 +213,14 @@ module Search_adapter = struct
     | Invalid_result
   [@@deriving sexp_of]
 
-  let request ~query ~limit =
+  let request ?source_root ~query ~limit () =
     `Assoc
-      [ "protocol", `String "sandwalk.search.v1"
-      ; "query", `String query
-      ; "limit", `Int limit
-      ]
+      (List.filter_opt
+         [ Some ("protocol", `String "sandwalk.search.v1")
+         ; Some ("query", `String query)
+         ; Some ("limit", `Int limit)
+         ; Option.map source_root ~f:(fun root -> "source_root", `String root)
+         ])
   ;;
 
   let string_field fields name maximum =
@@ -235,7 +237,8 @@ module Search_adapter = struct
       let%bind snippet = string_field fields "snippet" 1000 in
       if
         (String.is_prefix url ~prefix:"http://"
-         || String.is_prefix url ~prefix:"https://")
+         || String.is_prefix url ~prefix:"https://"
+         || String.is_prefix url ~prefix:"file://")
         && not (String.is_empty title)
       then Some { url; title; snippet }
       else None
@@ -269,6 +272,8 @@ module Fetch_adapter = struct
     { final_url : string
     ; input_sha256 : string
     ; markdown_sha256 : string
+    ; structure_artifact : string option
+    ; structure_sha256 : string option
     }
 
   type error =
@@ -277,12 +282,14 @@ module Fetch_adapter = struct
     | Queryability_check_failed
   [@@deriving sexp_of]
 
-  let request ~url ~output_directory =
+  let request ?source_root ~url ~output_directory () =
     `Assoc
-      [ "protocol", `String "sandwalk.fetch.v1"
-      ; "url", `String url
-      ; "output_directory", `String output_directory
-      ]
+      (List.filter_opt
+         [ Some ("protocol", `String "sandwalk.fetch.v1")
+         ; Some ("url", `String url)
+         ; Some ("output_directory", `String output_directory)
+         ; Option.map source_root ~f:(fun root -> "source_root", `String root)
+         ])
   ;;
 
   let assoc_field fields name =
@@ -316,22 +323,58 @@ module Fetch_adapter = struct
            let%bind markdown_sha256 =
              string_field hashes "normalized_markdown_sha256"
            in
+           let structure_artifact =
+             assoc_field fields "artifacts"
+             |> Option.bind ~f:(fun artifacts ->
+               string_field artifacts "structure")
+           in
+           let structure_sha256 = string_field hashes "structure_sha256" in
            let%bind queryability = assoc_field fields "queryability_check" in
            let%bind queryable =
              match List.Assoc.find queryability "ok" ~equal:String.equal with
              | Some (`Bool value) -> Some value
              | Some _ | None -> None
            in
-           Some (final_url, input_sha256, markdown_sha256, queryable)
+           Some
+             ( final_url
+             , input_sha256
+             , markdown_sha256
+             , structure_artifact
+             , structure_sha256
+             , queryable )
          in
          (match parsed with
-          | Some (_, _, _, false) -> Error Queryability_check_failed
-          | Some (final_url, input_sha256, markdown_sha256, true)
+          | Some (_, _, _, _, _, false) -> Error Queryability_check_failed
+          | Some
+              ( final_url
+              , input_sha256
+              , markdown_sha256
+              , structure_artifact
+              , structure_sha256
+              , true )
             when (String.is_prefix final_url ~prefix:"http://"
-                  || String.is_prefix final_url ~prefix:"https://")
+                  || String.is_prefix final_url ~prefix:"https://"
+                  || String.is_prefix final_url ~prefix:"file://")
                  && sha256 input_sha256
-                 && sha256 markdown_sha256 ->
-            Ok { final_url; input_sha256; markdown_sha256 }
+                 && sha256 markdown_sha256
+                 &&
+                 (match structure_artifact, structure_sha256 with
+                  | None, None -> true
+                  | Some artifact, Some hash ->
+                    (not (String.is_empty artifact))
+                    && String.equal artifact (Filename.basename artifact)
+                    && sha256 hash
+                  | None, Some _ | Some _, None -> false)
+                 &&
+                 (not (String.is_prefix final_url ~prefix:"file://")
+                  || Option.is_some structure_artifact) ->
+            Ok
+              { final_url
+              ; input_sha256
+              ; markdown_sha256
+              ; structure_artifact
+              ; structure_sha256
+              }
           | Some _ | None -> Error Invalid_manifest)
        | Some (`String _) -> Error Unsupported_protocol
        | Some _ | None -> Error Invalid_manifest)
@@ -342,6 +385,8 @@ module Fetch_adapter = struct
   let final_url t = t.final_url
   let input_sha256 t = t.input_sha256
   let markdown_sha256 t = t.markdown_sha256
+  let structure_artifact t = t.structure_artifact
+  let structure_sha256 t = t.structure_sha256
 end
 
 module Export_adapter = struct
@@ -766,6 +811,41 @@ let%expect_test "fetch manifests require a successful mq gate" =
   |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
   |> print_s;
   [%expect {| (Error Queryability_check_failed) |}]
+;;
+
+let%expect_test "local fetch manifests require a structured artifact" =
+  let manifest artifacts structure_hash =
+    `Assoc
+      [ "protocol", `String "sandwalk.fetch-manifest.v1"
+      ; "final_url", `String "file:///documents/report.pdf"
+      ; ( "hashes"
+        , `Assoc
+            (List.filter_opt
+               [ Some ("input_sha256", `String (String.make 64 'a'))
+               ; Some
+                   ( "normalized_markdown_sha256"
+                   , `String (String.make 64 'b') )
+               ; Option.map structure_hash ~f:(fun hash ->
+                   "structure_sha256", `String hash)
+               ]) )
+      ; "artifacts", `Assoc artifacts
+      ; "queryability_check", `Assoc [ "ok", `Bool true ]
+      ]
+  in
+  manifest [] None
+  |> Fetch_adapter.validate_manifest
+  |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
+  |> print_s;
+  manifest
+    [ "structure", `String "document.json" ]
+    (Some (String.make 64 'c'))
+  |> Fetch_adapter.validate_manifest
+  |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
+  |> print_s;
+  [%expect
+    {|
+    (Error Invalid_manifest)
+    (Ok ()) |}]
 ;;
 
 let%expect_test "finding reviews are versioned and agent-authored" =

@@ -129,7 +129,11 @@ let explanation = function
   | "SEARCH_ADAPTER_FAILED" ->
     Some
       ( "The search adapter exited unsuccessfully, timed out, or returned invalid JSON."
-      , "Verify `sandwalk-search-ddgr` and `ddgr` are on PATH, the temporary directory exists, and DuckDuckGo is allowed by the network sandbox." )
+      , "Verify the selected adapter and its search tool (`ddgr` or `ugrep+`) are on PATH and allowed by the filesystem or network sandbox." )
+  | "FETCH_ADAPTER_FAILED" ->
+    Some
+      ( "The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON."
+      , "Verify the selected adapter and its normalizer are on PATH; local-document fetches require Xberg, Tesseract, and a sandbox-readable source root." )
   | "PLAN_EMPTY" ->
     Some
       ( "The plan has no steps, so it cannot be validated."
@@ -964,10 +968,12 @@ let work_packet
   | "search" ->
     base
       "search"
-      "Refine editable.query into a concise search query that preserves the research subject and current step goal. Apply runs Sandwalk search."
+      "Refine editable.query into a concise search query that preserves the research subject and current step goal. To search user-authorized local documents, set editable.source_root to their readable directory; otherwise leave it empty. Apply runs Sandwalk search."
       [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
       ]
-      [ "query", `String (default_search_query step_context recommendation) ]
+      [ "query", `String (default_search_query step_context recommendation)
+      ; "source_root", `String ""
+      ]
   | "fetch" ->
     base
       "fetch"
@@ -4556,7 +4562,7 @@ let fetch_command =
      and adapter =
        flag
          "--adapter"
-         (optional_with_default "sandwalk-fetch-curl-pandoc" string)
+         (optional string)
          ~doc:"PATH Fetch adapter executable"
      in
      fun () ->
@@ -4615,6 +4621,15 @@ let fetch_command =
                 let code, message = fetch_error error in
                 print_failure_and_exit ~code ~message
               | Ok hit ->
+                let url = Sandwalk_store.Hit_for_fetch.url hit in
+                let adapter =
+                  Option.value
+                    adapter
+                    ~default:
+                      (if String.is_prefix url ~prefix:"file://"
+                       then "sandwalk-fetch-xberg"
+                       else "sandwalk-fetch-curl-pandoc")
+                in
                 let%bind status =
                   In_thread.run (fun () ->
                     Sandwalk_store.read_status
@@ -4651,7 +4666,6 @@ let fetch_command =
                    let snapshot_path =
                      Sandwalk_runtime.Workspace.snapshot_path workspace snapshot_id
                    in
-                   let url = Sandwalk_store.Hit_for_fetch.url hit in
                    let arguments =
                      `Assoc
                        [ "slug", `String (Sandwalk_core.Slug.to_string slug)
@@ -4741,8 +4755,11 @@ let fetch_command =
                       let%bind () = Unix.mkdir ~p:() temporary_path in
                       let request =
                         Sandwalk_protocol.Fetch_adapter.request
+                          ?source_root:
+                            (Sandwalk_store.Hit_for_fetch.source_root hit)
                           ~url
                           ~output_directory:temporary_path
+                          ()
                       in
                       let%bind adapter_output =
                         Sandwalk_runtime.Adapter.run_json
@@ -4803,19 +4820,57 @@ let fetch_command =
                                   ~code:"FETCH_PROTOCOL_ERROR"
                                   ~message:"Fetch manifest is invalid."
                               | Ok manifest ->
-                                let%bind published =
-                                  Deferred.Or_error.try_with (fun () ->
-                                    Unix.rename
-                                      ~src:temporary_path
-                                      ~dst:snapshot_path)
+                                let%bind structure_valid =
+                                  match
+                                    Sandwalk_protocol.Fetch_adapter
+                                    .structure_artifact
+                                      manifest
+                                  with
+                                  | None -> return true
+                                  | Some artifact ->
+                                    let%map input =
+                                      Sandwalk_runtime.File_input.read
+                                        ~path:
+                                          (Filename.concat
+                                             temporary_path
+                                             artifact)
+                                        ~maximum_bytes:104_857_600
+                                    in
+                                    (match input with
+                                     | Error _ -> false
+                                     | Ok input ->
+                                       (try
+                                          ignore
+                                            (Sandwalk_runtime.File_input.content
+                                               input
+                                             |> Yojson.Safe.from_string
+                                             : Yojson.Safe.t);
+                                          Sandwalk_runtime.File_input.size input
+                                          > 0
+                                        with
+                                        | _ -> false))
                                 in
-                                (match published with
-                                 | Error _ ->
+                                if not structure_valid
+                                then
+                                  fail_with_audit
+                                    ~code:"FETCH_ARTIFACT_ERROR"
+                                    ~message:
+                                      "Fetch adapter returned an invalid \
+                                       structured document artifact."
+                                else (
+                                  let%bind published =
+                                    Deferred.Or_error.try_with (fun () ->
+                                      Unix.rename
+                                        ~src:temporary_path
+                                        ~dst:snapshot_path)
+                                  in
+                                  match published with
+                                  | Error _ ->
                                    fail_with_audit
                                      ~code:"WORKSPACE_IO_ERROR"
                                      ~message:
                                        "Could not publish immutable snapshot."
-                                 | Ok () ->
+                                  | Ok () ->
                                    let persisted_at = Time_float_unix.now () in
                                    let%bind persisted =
                                      In_thread.run (fun () ->
@@ -5587,6 +5642,11 @@ let search_command =
          ~doc:"PATH Parent directory for Sandwalk workspaces"
      and query =
        flag "--query" (required string) ~doc:"QUERY Search query"
+     and source_root =
+       flag
+         "--source-root"
+         (optional string)
+         ~doc:"PATH Restrict local-document search to this directory"
      and claim_text =
        flag "--claim" (optional string) ~doc:"CLAIM Active research claim"
      and limit =
@@ -5597,7 +5657,7 @@ let search_command =
      and adapter =
        flag
          "--adapter"
-         (optional_with_default "sandwalk-search-ddgr" string)
+         (optional string)
          ~doc:"PATH Search adapter executable"
      in
      fun () ->
@@ -5617,7 +5677,28 @@ let search_command =
            print_failure_and_exit
              ~code:"INVALID_SEARCH_LIMIT"
              ~message:"Search limit must be between 1 and 25."
+         else if
+           Option.exists source_root ~f:(fun root ->
+             String.is_empty root || String.length root > 4_096)
+         then
+           print_failure_and_exit
+             ~code:"INVALID_SOURCE_ROOT"
+             ~message:"Source root must contain between 1 and 4096 bytes."
          else (
+           let source_root =
+             Option.map source_root ~f:(fun root ->
+               if Filename.is_absolute root
+               then root
+               else Filename.concat (Sys_unix.getcwd ()) root)
+           in
+           let adapter =
+             Option.value
+               adapter
+               ~default:
+                 (if Option.is_some source_root
+                  then "sandwalk-search-ugrep"
+                  else "sandwalk-search-ddgr")
+           in
            let claim_id =
              match claim_text with
              | None -> Ok None
@@ -5675,6 +5756,11 @@ let search_command =
                      ; "query", `String query
                      ; "limit", `Int limit
                      ; "adapter", `String adapter
+                     ; ( "source_root"
+                       , Option.value_map
+                           source_root
+                           ~default:`Null
+                           ~f:(fun value -> `String value) )
                      ; ( "claim"
                        , Option.value_map
                            claim_text
@@ -5758,7 +5844,11 @@ let search_command =
                       ~message:"Could not append workspace audit log."
                   | Ok () ->
                     let request =
-                      Sandwalk_protocol.Search_adapter.request ~query ~limit
+                      Sandwalk_protocol.Search_adapter.request
+                        ?source_root
+                        ~query
+                        ~limit
+                        ()
                     in
                     let%bind adapter_output =
                       Sandwalk_runtime.Adapter.run_json
@@ -5804,6 +5894,7 @@ let search_command =
                                 ~claim_id
                                 ~query
                                 ~adapter
+                                ~source_root
                                 ~hits
                                 ~now:
                                   (Sandwalk_runtime.timestamp_utc persisted_at)
@@ -9525,14 +9616,23 @@ let apply_command =
                   let query = json_string_member "query" editable |> String.strip in
                   if String.is_empty query
                   then failwith "Search query must not be empty";
+                  let source_root =
+                    json_string_member "source_root" editable |> String.strip
+                  in
+                  if String.length source_root > 4_096
+                  then failwith "Source root is too long";
                   let command =
                     workspace_arguments
-                      [ "search"
-                      ; "--claim"
-                      ; json_string_member "claim" fixed
-                      ; "--query"
-                      ; query
-                      ]
+                      ([ "search"
+                       ; "--claim"
+                       ; json_string_member "claim" fixed
+                       ; "--query"
+                       ; query
+                       ]
+                       @
+                       if String.is_empty source_root
+                       then []
+                       else [ "--source-root"; source_root ])
                   in
                   `Commands [ command ], None
                 | "fetch" ->

@@ -36,6 +36,8 @@ atomically records one new step and its reason without changing existing steps.
 sandwalk step claim --slug <slug> --step <step>
 sandwalk snapshot promote --slug <slug> --claim <claim_id> <snapshot_id>
 sandwalk search --slug <slug> --claim <claim_id> --query <query> [--limit 10]
+sandwalk search --slug <slug> --claim <claim_id> --query <query> \
+  --source-root <authorized-directory> [--limit 10]
 sandwalk fetch --slug <slug> --claim <claim_id> <hit_id>
 sandwalk excerpt create --slug <slug> --claim <claim_id> \
   --snapshot <snapshot_id> --lines <first:last>
@@ -50,6 +52,13 @@ sandwalk finding review --slug <slug> --claim <claim_id> \
   --finding <step>/<finding> --review-file <review.json>
 sandwalk step complete --slug <slug> --claim <claim_id>
 ```
+
+Use the second search form for local documents. `--source-root` changes the
+default search adapter to `sandwalk-search-ugrep`; the resulting `file://` hit
+changes the default fetch adapter to `sandwalk-fetch-xberg`. The directory must
+be visible to the surrounding sandbox. Do not invoke `ugrep+`, Xberg, or
+Docling directly, and inspect the resulting hierarchical `document.md` with
+`mq` before selecting excerpt ranges.
 
 Fetch accepts only a persisted hit ID, not an arbitrary URL. Its default
 connector stores the original response, headers, converted Markdown, hashes,

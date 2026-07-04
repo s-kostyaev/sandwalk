@@ -95,6 +95,7 @@ module Hit_for_fetch : sig
 
   val hit_id : t -> Sandwalk_core.Hit_id.t
   val url : t -> string
+  val source_root : t -> string option
 end
 
 module Record_snapshot_result : sig
@@ -728,6 +729,7 @@ val record_search
   -> claim_id:Sandwalk_core.Claim_id.t option
   -> query:string
   -> adapter:string
+  -> source_root:string option
   -> hits:(Sandwalk_core.Hit_id.t * string * string * string) list
   -> now:string
   -> unit

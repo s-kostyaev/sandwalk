@@ -905,6 +905,16 @@ ORDER BY position
 |}
 ;;
 
+let inspect_search_roots database =
+  print_query
+    database
+    {|
+SELECT adapter, COALESCE(source_root, 'NULL')
+FROM search_queries
+ORDER BY query_id
+|}
+;;
+
 let inspect_snapshots database =
   print_query
     database
@@ -1060,6 +1070,7 @@ let () =
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
+    | [| _; "--inspect-search-roots"; path |] -> `Inspect_search_roots, path
     | [| _; "--inspect-snapshots"; path |] -> `Inspect_snapshots, path
     | [| _; "--inspect-excerpts"; path |] -> `Inspect_excerpts, path
     | [| _; "--inspect-findings"; path |] -> `Inspect_findings, path
@@ -1108,6 +1119,7 @@ let () =
       | `Inspect_claims -> inspect_claims database
       | `Inspect_checkpoints -> inspect_checkpoints database
       | `Inspect_hits -> inspect_hits database
+      | `Inspect_search_roots -> inspect_search_roots database
       | `Inspect_snapshots -> inspect_snapshots database
       | `Inspect_excerpts -> inspect_excerpts database
       | `Inspect_findings -> inspect_findings database

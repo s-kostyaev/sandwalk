@@ -2,5 +2,7 @@
  (section bin)
  (files
   (ddgr-search as sandwalk-search-ddgr)
+  (ugrep-search as sandwalk-search-ugrep)
   (curl-pandoc-fetch as sandwalk-fetch-curl-pandoc)
+  (xberg-fetch as sandwalk-fetch-xberg)
   (pandoc-pdf-export as sandwalk-export-pandoc-pdf)))

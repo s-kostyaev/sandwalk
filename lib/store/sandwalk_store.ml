@@ -94,10 +94,12 @@ module Hit_for_fetch = struct
   type t =
     { hit_id : Sandwalk_core.Hit_id.t
     ; url : string
+    ; source_root : string option
     }
 
   let hit_id t = t.hit_id
   let url t = t.url
+  let source_root t = t.source_root
 end
 
 module Record_snapshot_result = struct
@@ -670,7 +672,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 22
+let current_schema_version = 23
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -1233,6 +1235,13 @@ PRAGMA user_version = 22;
 |}
 ;;
 
+let migration_v23 =
+  {|
+ALTER TABLE search_queries ADD COLUMN source_root TEXT;
+PRAGMA user_version = 23;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -1406,10 +1415,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:21 ~now)
       else Ok ()
     in
-    if from_version < 22
+    let%bind () =
+      if from_version < 22
+      then (
+        let%bind () = execute database migration_v22 in
+        insert_migration database ~version:22 ~now)
+      else Ok ()
+    in
+    if from_version < 23
     then (
-      let%bind () = execute database migration_v22 in
-      insert_migration database ~version:22 ~now)
+      let%bind () = execute database migration_v23 in
+      insert_migration database ~version:23 ~now)
     else Ok ())
 ;;
 
@@ -4776,15 +4792,16 @@ let insert_search_query
       ~claim_id
       ~step_key
       ~adapter
+      ~source_root
       ~now
   =
   with_statement
     database
     {|
 INSERT INTO search_queries (
-  query, phase, claim_id, step_key, adapter, created_at
+  query, phase, claim_id, step_key, adapter, source_root, created_at
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 |}
     ~f:(fun statement ->
       let open Result.Let_syntax in
@@ -4811,7 +4828,8 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6)
           (Option.map step_key ~f:Sandwalk_core.Plan_step.Key.to_string)
       in
       let%bind () = bind_text database statement 5 adapter in
-      let%bind () = bind_text database statement 6 now in
+      let%bind () = bind_optional_text 6 source_root in
+      let%bind () = bind_text database statement 7 now in
       let%map () = step_done database statement in
       Sqlite3.last_insert_rowid database)
 ;;
@@ -4856,6 +4874,7 @@ let record_search
       ~claim_id
       ~query
       ~adapter
+      ~source_root
       ~hits
       ~now
       ()
@@ -4913,6 +4932,7 @@ let record_search
                 ~claim_id
                 ~step_key
                 ~adapter
+                ~source_root
                 ~now
             in
             let%bind stored_hits =
@@ -4954,6 +4974,7 @@ let hit_for_fetch
         try
           Sqlite3.busy_timeout database busy_timeout_ms;
           let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
           let%bind slug_text, _ = query_workspace database in
           let expected = Sandwalk_core.Slug.to_string expected_slug in
           let%bind () =
@@ -4966,13 +4987,36 @@ let hit_for_fetch
           in
           with_statement
             database
-            "SELECT url FROM search_hits WHERE hit_ref = ?1"
+            (if schema_version >= 23
+             then
+               {|
+SELECT h.url, q.source_root
+FROM search_hits h
+JOIN search_queries q ON q.query_id = h.query_id
+WHERE h.hit_ref = ?1
+|}
+             else
+               {|
+SELECT h.url, NULL
+FROM search_hits h
+WHERE h.hit_ref = ?1
+|})
             ~f:(fun statement ->
               let reference = Sandwalk_core.Hit_id.to_string hit_id in
               let%bind () = bind_text database statement 1 reference in
               match Sqlite3.step statement with
               | Sqlite3.Rc.ROW ->
-                Ok { Hit_for_fetch.hit_id; url = Sqlite3.column_text statement 0 }
+                let source_root =
+                  match Sqlite3.column statement 1 with
+                  | Sqlite3.Data.NULL -> None
+                  | Sqlite3.Data.TEXT value -> Some value
+                  | _ -> None
+                in
+                Ok
+                  { Hit_for_fetch.hit_id
+                  ; url = Sqlite3.column_text statement 0
+                  ; source_root
+                  }
               | Sqlite3.Rc.DONE -> Error (Error.Hit_not_found reference)
               | return_code ->
                 check database return_code

@@ -144,6 +144,8 @@ records terms, themes, authoritative domains, and scope boundaries.
 ```console
 sandwalk recon start --slug <slug> --goal-file <path>
 sandwalk search --slug <slug> --query <query> [--claim <claim>]
+sandwalk search --slug <slug> --query <query> --source-root <path> \
+  [--claim <claim>]
 sandwalk fetch --slug <slug> <hit-ref>
 sandwalk recon add-observation --slug <slug> ...
 sandwalk recon finish --slug <slug> --summary-file <path>
@@ -356,8 +358,10 @@ Adapters are executables using a versioned JSON protocol over standard input and
 standard output. Shell command templates are not part of the protocol.
 
 A search adapter returns bounded structured results. Sandwalk mints `hit_...`
-references and records the query, adapter, result position, URL, title, and
-snippet.
+references and records the query, adapter, result position, source locator,
+title, and snippet. The schema-7 `url` column and v1 JSON field retain their
+names for compatibility, but accept HTTP(S) URLs and absolute `file://`
+locators. Schema 23 adds the requested local source root to search provenance.
 
 The bundled ddgr connector accepts:
 
@@ -368,6 +372,14 @@ The bundled ddgr connector accepts:
 and returns at most 25 bounded results in a
 `sandwalk.search-results.v1` envelope. It invokes `ddgr --json` without a
 shell command template.
+
+When `--source-root` is present, the default bundled search connector is
+`sandwalk-search-ugrep`. It invokes `ugrep+`, not `ug+`, so user or
+working-directory `.ugrep` files cannot silently change scripted behavior. It
+performs a fixed-string recursive search with stable pathname ordering,
+does not follow directory symlinks, returns at most the requested number of
+files, and emits canonical percent-encoded `file://` locators. Search snippets
+are discovery metadata only and never become evidence.
 
 A fetch adapter receives an output directory controlled by Sandwalk. It writes:
 
@@ -395,6 +407,26 @@ extraction profile as `server-markdown-direct-v1` or
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.
 
+The bundled local-document fetch connector is `sandwalk-fetch-xberg`. `fetch`
+selects it by default for a `file://` hit. The request repeats the source root
+recorded with the search. The adapter canonicalizes both paths, rejects
+non-regular files and symlink/path traversal outside that root, and copies the
+source into its controlled output directory before extraction so normalization
+and hashing observe one input.
+
+Xberg runs with an explicit configuration rather than auto-discovered
+`xberg.toml`, local Tesseract OCR, Markdown output, PDF hierarchy and bounding
+boxes, and document-structure extraction. Its profile must not enable VLM or
+remote enrichment. The snapshot retains `original`, hierarchical
+`document.md`, and Xberg's `document.json`. If Xberg reports title or heading
+nodes but emits no ATX Markdown headings, or reports level-two-or-deeper nodes
+without corresponding Markdown subheadings, the adapter rejects the result
+instead of publishing a flattened document. For naturally unstructured input,
+the adapter adds one filename heading. `mq document.md '.tree'` remains the
+final queryability gate. A future Docling connector can implement the same
+fetch protocol and artifact contract; choosing a normalizer is an adapter
+decision, not a core-state distinction.
+
 Sandwalk records:
 
 - retrieval time in UTC;
@@ -411,9 +443,12 @@ silently call an LLM under a profile documented as non-LLM.
 
 ## Sources and snapshots
 
-A source is an internal logical identity, usually a canonical URL. Each fetch
-creates an immutable snapshot with its own retrieval timestamp. Refetching does
-not modify old snapshots or invalidate their excerpts.
+A source is an internal logical identity, usually a canonical URL or canonical
+local file locator. Each fetch creates an immutable snapshot with its own
+retrieval timestamp. Refetching does not modify old snapshots or invalidate
+their excerpts. Local source identity does not imply mutable filesystem
+contents are stable: the copied original and its content hash define the
+snapshot actually used as evidence.
 
 Raw payloads are retained by default with configurable size limits. If a limit
 is exceeded, the snapshot remains usable but records why the raw payload was

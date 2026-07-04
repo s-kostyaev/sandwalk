@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "version" ]; then
+  printf '%s\n' 'xberg 5.test'
+  exit 0
+fi
+
+if [ "${XBERG_FLAT_MARKDOWN:-0}" = 1 ]; then
+  markdown='# Architecture Notes
+
+Adapter protocol
+
+Typed adapter architecture.
+'
+else
+  markdown='# Architecture Notes
+
+## Adapter protocol
+
+Typed adapter architecture.
+'
+fi
+
+jq -n --arg content "$markdown" '
+  {
+    results: [
+      {
+        content: $content,
+        document: {
+          nodes: [
+            {
+              id: "node-title",
+              content: {
+                node_type: "title",
+                text: "Architecture Notes"
+              },
+              parent: null,
+              children: [1],
+              page: 1
+            },
+            {
+              id: "node-heading",
+              content: {
+                node_type: "heading",
+                level: 2,
+                text: "Adapter protocol"
+              },
+              parent: 0,
+              children: [2],
+              page: 1
+            },
+            {
+              id: "node-body",
+              content: {
+                node_type: "paragraph",
+                text: "Typed adapter architecture."
+              },
+              parent: 1,
+              children: [],
+              page: 1
+            }
+          ]
+        }
+      }
+    ]
+  }
+'
