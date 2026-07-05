@@ -86,10 +86,14 @@ retrieval path.
 For user-authorized local documents, run `sandwalk search` with exactly one
 `--source-root <directory>`. The root must already be readable inside the
 agent's filesystem sandbox. Sandwalk records it with every hit, defaults to
-the `ugrep+` connector, and later selects the structured Xberg fetch connector
-for `file://` hits. Inspect the snapshot through `mq document.md '.tree'` or
-bounded reads so headings and subheadings remain the navigation surface; never
-treat the search snippet as document content.
+the `ugrep+` connector, and later selects the structured Docling fetch
+connector for `file://` hits. Remote PDF hits use the same structured
+normalization. For arXiv hits, Sandwalk prefers the article HTML for
+`document.md` and retains the matching versioned `source.pdf` for the user; an
+unusable HTML representation falls back to Docling automatically. Inspect the
+snapshot through `mq document.md '.tree'` or bounded reads so headings and
+subheadings remain the navigation surface; never treat the search snippet as
+document content.
 
 ## Workflow
 

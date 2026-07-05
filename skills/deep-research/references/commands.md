@@ -69,6 +69,14 @@ connector stores the original response, headers, converted Markdown, hashes,
 and a queryability check. For excerpts, use either `--lines first:last` or
 `--text-file path [--occurrence N]`.
 
+The default web adapter dispatches genuine remote PDFs to the same Docling
+normalizer instead of treating binary input as HTML. For arXiv abstract, HTML,
+or PDF hits it prefers the structured article HTML for `document.md`, always
+retains the matching exact-version PDF as `source.pdf` for the user, and falls
+back to that PDF when the HTML representation fails its structural gate. Read
+and cite through the immutable `document.md`; do not invoke either
+representation URL directly.
+
 Use `snapshot promote` when reconnaissance already fetched the needed source.
 It binds the immutable snapshot to the claimed step without fetching it again.
 

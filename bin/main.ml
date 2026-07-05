@@ -4768,6 +4768,12 @@ let fetch_command =
                           ~timeout:
                             (Time_float.Span.of_sec
                                (if String.is_prefix url ~prefix:"file://"
+                                   || List.mem
+                                        [ "sandwalk-fetch-curl-pandoc"
+                                        ; "curl-pandoc-fetch"
+                                        ]
+                                        (Filename.basename adapter)
+                                        ~equal:String.equal
                                 then 900.
                                 else 120.))
                           ~maximum_output_bytes:65_536

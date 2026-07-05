@@ -395,14 +395,48 @@ optional:
 ```
 
 The bundled web connector accepts a `sandwalk.fetch.v1` request. It uses
-`curl -L` with a Lynx user-agent and requests `text/markdown` with HTML as a
-lower-priority fallback. A response explicitly labeled `text/markdown` becomes
-`document.md` directly. Other responses use the HTML-to-GitHub-flavored
-Markdown fallback with pandoc's raw-HTML extension disabled. The original
-response is retained in both cases, and `mq document.md '.tree'` must succeed
-before `manifest.json` is published. The manifest identifies the selected
-extraction profile as `server-markdown-direct-v1` or
-`html-to-gfm-no-raw-html-v1`.
+`curl -L` with a Lynx user-agent and negotiates Markdown, HTML, and PDF. The
+transport has explicit connection and total-request bounds; the adapter process
+has the same 15-minute outer timeout as a local document fetch because a remote
+PDF may require first-use model acquisition and CPU-only OCR.
+
+A response explicitly labeled `text/markdown` becomes `document.md` directly.
+HTML uses the HTML-to-GitHub-flavored Markdown fallback with pandoc's raw-HTML
+extension disabled. A response with PDF magic bytes, regardless of a generic or
+incorrect content type, is normalized by the same pinned Docling profile as a
+local PDF. A response labeled as PDF without PDF magic is rejected instead of
+being passed to the HTML reader. Other binary formats remain unsupported until
+their normalizer is explicitly configured. The original response and any
+Docling structure and quality artifacts are retained. `mq document.md '.tree'`
+must succeed before `manifest.json` is published. The manifest identifies the
+selected extraction profile as `server-markdown-direct-v1`,
+`html-to-gfm-no-raw-html-v1`, or
+`standard-native-hierarchy-bookmark-095-v2`.
+
+arXiv is the first site-specific source constructor. For a recognized
+`arxiv.org/abs`, `/html`, or `/pdf` locator, the connector:
+
+1. requests the matching arXiv HTML representation;
+2. resolves an exact article version from the HTML when the hit was
+   unversioned;
+3. always downloads and validates the PDF for that exact version;
+4. isolates the LaTeXML `ltx_page_content` article in Pandoc's AST, resolves
+   relative links, and converts embedded data images into bounded `images/`
+   artifacts; and
+5. publishes the HTML-derived Markdown only when it has a title-sized heading
+   tree, sufficient nonblank content, and passes `mq`.
+
+Pandoc provides the embedded Lua runtime used by the AST filter; Sandwalk does
+not depend on a separately installed Lua interpreter. Remote figure images are
+kept as absolute links rather than silently downloaded. The mandatory
+`source.pdf` artifact is retained for human reading even when HTML supplies
+`document.md`. If HTML is unavailable, malformed, or fails the structural
+quality gate, the already downloaded PDF is normalized through Docling and
+remains available as `source.pdf`. The snapshot manifest records the canonical
+versioned abstract URL, HTML and PDF representation URLs, selected
+normalization source, both relevant hashes, and the fallback reason. Final
+bibliographies therefore cite the stable abstract page rather than an
+implementation-specific representation URL.
 
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.
@@ -412,9 +446,10 @@ The bundled default local-document fetch connector is
 repeats the source root recorded with the search. The adapter canonicalizes both
 paths, rejects non-regular files and symlink/path traversal outside that root,
 and copies the source into its controlled output directory before extraction so
-normalization and hashing observe one input. Local adapters receive a
-15-minute process timeout because first-use model acquisition and CPU-only OCR
-may exceed the web adapter's two-minute bound.
+normalization and hashing observe one input. Local adapters and the bundled web
+dispatcher receive a 15-minute process timeout because first-use model
+acquisition and CPU-only OCR may exceed the transport's two-minute request
+bound.
 
 The Docling connector runs a pinned `docling==2.110.0` standard pipeline through
 `uv`. It explicitly disables remote services and code, formula, picture,
