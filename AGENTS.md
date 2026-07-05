@@ -22,6 +22,12 @@ dune exec sandwalk -- about
 
 Run `dune build @install` and `dune runtest` before handing off changes.
 
+## Git workflow
+
+Commit and push every completed stage of work. Never commit or push work
+directly to `main`; create or switch to a non-main branch first. Do not leave a
+completed stage as uncommitted changes.
+
 ## Source map
 
 - `lib/core/`: pure domain types, FSM, and invariants.
