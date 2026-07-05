@@ -69,6 +69,49 @@ The manifest is not published when mq cannot query the Markdown.
 
   $ test ! -e rejected-output/manifest.json
 
+YouTube snapshots use source-provided chapters as Markdown structure.
+
+  $ mkdir youtube-chapters-output
+  $ PATH="$PWD/fakes:$PATH" ../adapters/youtube-fetch <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://www.youtube.com/watch?v=chapter-test","output_directory":"youtube-chapters-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"youtube-chapters-output/manifest.json"}
+
+  $ jq -r '[.artifacts.document, .document_media_type, .youtube.caption_kind, .youtube.chapter_count, .queryability_check.tool] | @tsv' \
+  >   youtube-chapters-output/manifest.json
+  document.md	text/markdown	manual	2	mq
+
+  $ grep '^## ' youtube-chapters-output/document.md
+  ## [00:00] Introduction
+  ## [01:00] Main result
+
+  $ grep -F 'youtube.com/watch?v=chapter-test&t=70s' \
+  >   youtube-chapters-output/document.md
+  [01:10](https://www.youtube.com/watch?v=chapter-test&t=70s) The main result follows. The conclusion is bounded.
+
+Without source chapters the same constructor publishes plain text and no
+Markdown alias.
+
+  $ mkdir youtube-flat-output
+  $ PATH="$PWD/fakes:$PATH" ../adapters/youtube-fetch <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://youtu.be/flat-test","output_directory":"youtube-flat-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"youtube-flat-output/manifest.json"}
+
+  $ jq -r '[.artifacts.document, .document_media_type, .youtube.caption_kind, .youtube.chapter_count, .queryability_check.tool] | @tsv' \
+  >   youtube-flat-output/manifest.json
+  transcript.txt	text/plain	automatic	0	rg
+
+  $ find youtube-flat-output -maxdepth 1 -type f -exec basename {} \; | sort
+  blocks.jsonl
+  captions.json3
+  manifest.json
+  metadata.json
+  transcript.txt
+
+  $ grep '^#' youtube-flat-output/transcript.txt
+  [1]
+
 Remote PDFs are normalized by the same pinned Docling profile as local PDFs.
 
   $ mkdir remote-pdf-output
@@ -124,7 +167,8 @@ to the already downloaded PDF without losing it as a reader artifact.
   >   arxiv-fallback-output/manifest.json
   arxiv-pdf-docling	pdf	html-unavailable-or-quality-gate	source.pdf
 
-  $ cmp arxiv-fallback-output/original arxiv-fallback-output/source.pdf
+  $ test -s arxiv-fallback-output/source.pdf
+  $ test ! -e arxiv-fallback-output/original
 
 The reader PDF is mandatory; a partial HTML-only snapshot is never published.
 
@@ -173,12 +217,13 @@ metrics alongside the structured source model.
   >   docling-output/quality.json
   2	1.0	0
 
-The temporary extension-preserving input and explicit profile are removed.
+Normalization reads the retained extension-preserving original directly, and
+the explicit profile is removed.
 
   $ sed "s#$PWD#ROOT#g" docling.log
-  docling-output/input-Architecture Notes.pdf|docling-output/docling-profile.json
+  docling-output/original/Architecture Notes.pdf|docling-output/docling-profile.json
 
-  $ test ! -e "docling-output/input-Architecture Notes.pdf"
+  $ test -f "docling-output/original/Architecture Notes.pdf"
   $ test ! -e docling-output/docling-profile.json
 
 Xberg remains an explicit fast adapter and retains its structured source model.
@@ -207,6 +252,11 @@ Xberg remains an explicit fast adapter and retains its structured source model.
   paragraph	0
 
   $ test ! -e "local-output/input-Architecture Notes.pdf"
+
+Retained source artifacts are independent files, not hardlink aliases.
+
+  $ find docling-output local-output remote-pdf-output arxiv-fallback-output \
+  >   -type f -links +1 -print
 
 Flattening recognized subheadings fails before snapshot publication.
 

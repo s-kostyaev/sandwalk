@@ -75,8 +75,8 @@ that readable directory in `source_root`; otherwise leave it empty.
 While this skill is active, Sandwalk is the only permitted path for every
 network or local-document search and fetch, including reconnaissance. Do not load or invoke
 another web-search, browsing, or fetch skill. Do not call `ddgr`, `curl`,
-`wget`, `ug`, `ugrep`, Xberg, Docling, a browser, or an HTTP client directly.
-These programs may run only behind a Sandwalk adapter.
+`wget`, `yt-dlp`, `ug`, `ugrep`, Xberg, Docling, a browser, or an HTTP client
+directly. These programs may run only behind a Sandwalk adapter.
 
 Use `sandwalk search` to discover persisted hits, `sandwalk fetch` to create
 immutable snapshots, and read only the returned `document_path`. If either
@@ -96,6 +96,12 @@ normalization. For arXiv hits, Sandwalk prefers the article HTML for
 unusable HTML representation falls back to Docling automatically. Inspect the
 returned primary document according to its declared media type; never treat
 the search snippet as document content.
+
+For YouTube hits, the default constructor uses source chapters when they exist.
+If it returns `text/plain`, the video had no usable source chapter structure:
+search the timestamped transcript with `rg -n` and read bounded ranges. Never
+invent headings, summarize unread transcript regions, or fetch the video,
+audio, or captions outside Sandwalk.
 
 ## Workflow
 

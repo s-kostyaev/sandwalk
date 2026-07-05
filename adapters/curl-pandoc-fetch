@@ -38,10 +38,9 @@ quality="$output_directory/quality.json"
 manifest="$output_directory/manifest.json"
 manifest_temporary="$output_directory/manifest.json.tmp"
 docling_config="$output_directory/docling-profile.json"
-docling_input="$output_directory/input-source.pdf"
 
 cleanup() {
-  rm -f "$manifest_temporary" "$docling_config" "$docling_input"
+  rm -f "$manifest_temporary" "$docling_config"
 }
 trap cleanup EXIT HUP INT TERM
 rm -f "$manifest" "$manifest_temporary"
@@ -109,10 +108,10 @@ write_docling_profile() {
 }
 
 normalize_pdf() {
+  pdf_input=$1
   write_docling_profile
-  ln "$original" "$docling_input"
   sandwalk-docling-normalize \
-    --source "$docling_input" \
+    --source "$pdf_input" \
     --document "$document" \
     --structure "$structure" \
     --quality "$quality" \
@@ -327,9 +326,8 @@ if [ -n "$arxiv_id" ]; then
       mv "$original" "$output_directory/html-original"
     fi
     rm -rf "$output_directory/images"
-    ln "$pdf_artifact" "$original"
-    normalize_pdf
-    input_sha256=$(sha256_file "$original")
+    normalize_pdf "$pdf_artifact"
+    input_sha256=$(sha256_file "$pdf_artifact")
     markdown_sha256=$(sha256_file "$document")
     structure_sha256=$(sha256_file "$structure")
     quality_sha256=$(sha256_file "$quality")
@@ -393,7 +391,7 @@ if [ -n "$arxiv_id" ]; then
           document: "document.md",
           structure: "document.json",
           quality: "quality.json",
-          original: "original",
+          original: "source.pdf",
           pdf: "source.pdf"
         },
         queryability_check: {
@@ -413,8 +411,10 @@ else
   fi
 
   if [ "$pdf_magic" = true ]; then
+    mv "$original" "$output_directory/source.pdf"
+    original="$output_directory/source.pdf"
     extraction_profile=$docling_profile
-    normalize_pdf
+    normalize_pdf "$original"
   else
     case "$normalized_content_type" in
       text/markdown|text/markdown\;*)
@@ -469,6 +469,7 @@ else
       --arg docling_version "$docling_version" \
       --arg mq_version "$mq_version" \
       --arg content_type "$content_type" \
+      --arg original_artifact "source.pdf" \
       --argjson status "$status" \
       --argjson redirects "$redirects" \
       '{
@@ -502,7 +503,7 @@ else
           document: "document.md",
           structure: "document.json",
           quality: "quality.json",
-          original: "original"
+          original: $original_artifact
         },
         queryability_check: {
           tool: "mq",

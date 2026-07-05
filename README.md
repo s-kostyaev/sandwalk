@@ -13,7 +13,10 @@ for `mq`, the original file, and Docling's structured JSON and quality report.
 Remote PDFs use the same normalization path. arXiv snapshots prefer the
 structured HTML article for agents while always retaining the matching
 versioned PDF for readers, with PDF-to-Docling fallback when HTML fails its
-quality gate. Packet decisions can durably
+quality gate. YouTube snapshots use real source chapters when present and
+otherwise retain a flat timestamped `transcript.txt`; the latter is never
+disguised as Markdown. The YouTube adapter requires `yt-dlp` and downloads
+captions rather than video or audio. Packet decisions can durably
 reject irrelevant or blocked source candidates, and reviewed findings can be
 explicitly reopened before drafting. See [`DESIGN.md`](DESIGN.md) for the
 canonical architecture and invariants.

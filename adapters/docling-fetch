@@ -44,8 +44,8 @@ case "$canonical_source" in
 esac
 
 mkdir -p "$output_directory"
-original="$output_directory/original"
-extraction_input="$output_directory/input-$source_basename"
+original_directory="$output_directory/original"
+original="$original_directory/$source_basename"
 document="$output_directory/document.md"
 structure="$output_directory/document.json"
 quality="$output_directory/quality.json"
@@ -54,26 +54,26 @@ manifest="$output_directory/manifest.json"
 manifest_temporary="$output_directory/manifest.json.tmp"
 
 cleanup() {
-  rm -f "$extraction_input" "$manifest_temporary" "$config"
+  rm -f "$manifest_temporary" "$config"
 }
 trap cleanup EXIT HUP INT TERM
 rm -f "$manifest" "$manifest_temporary"
 
 # Copy first so extraction and hashes observe one immutable input even if the
 # user's source file changes during adapter execution.
+mkdir -p "$original_directory"
 cp -P "$canonical_source" "$original"
 [ ! -L "$original" ] && [ -f "$original" ] || {
   printf '%s\n' 'local source changed to an unsafe file during import' >&2
   exit 77
 }
-ln "$original" "$extraction_input"
 
 printf '%s\n' \
   '{"protocol":"sandwalk.docling-profile.v1","pipeline":"standard","enable_remote_services":false,"ocr":true,"table_mode":"accurate","generate_parsed_pages":true,"heading_hierarchy":{"enabled":true,"use_bookmarks":true,"use_numbering":true,"use_style":true,"bookmark_match_threshold":0.95,"max_level":6},"enrichments":{"code":false,"formula":false,"picture_classification":false,"picture_description":false,"chart":false}}' \
   >"$config"
 
 sandwalk-docling-normalize \
-  --source "$extraction_input" \
+  --source "$original" \
   --document "$document" \
   --structure "$structure" \
   --quality "$quality" \
@@ -106,6 +106,7 @@ jq -n \
   --arg final_url "$url" \
   --arg source_root "$canonical_root" \
   --arg source_path "$canonical_source" \
+  --arg source_basename "$source_basename" \
   --arg input_sha256 "$input_sha256" \
   --arg markdown_sha256 "$markdown_sha256" \
   --arg structure_sha256 "$structure_sha256" \
@@ -140,7 +141,7 @@ jq -n \
       document: "document.md",
       structure: "document.json",
       quality: "quality.json",
-      original: "original"
+      original: ("original/" + $source_basename)
     },
     queryability_check: {
       tool: "mq",

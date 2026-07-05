@@ -1,0 +1,116 @@
+#!/bin/sh
+set -eu
+
+for argument in "$@"; do
+  if [ "$argument" = "--version" ]; then
+    printf '%s\n' '2026.03.17-fake'
+    exit 0
+  fi
+done
+
+dump=false
+info_json=
+output=
+language=
+kind=manual
+url=
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dump-single-json)
+      dump=true
+      shift
+      ;;
+    --load-info-json|--output|--sub-langs|--sub-format)
+      case "$1" in
+        --load-info-json) info_json=$2 ;;
+        --output) output=$2 ;;
+        --sub-langs) language=$2 ;;
+      esac
+      shift 2
+      ;;
+    --write-auto-subs)
+      kind=automatic
+      shift
+      ;;
+    --write-subs|--no-playlist|--skip-download|--quiet|--no-warnings)
+      shift
+      ;;
+    --*)
+      printf 'unexpected yt-dlp option: %s\n' "$1" >&2
+      exit 64
+      ;;
+    *)
+      url=$1
+      shift
+      ;;
+  esac
+done
+
+if [ "$dump" = true ]; then
+  case "$url" in
+    *flat*)
+      jq -n \
+        --arg url "$url" \
+        '{
+          id: "flat-test",
+          title: "Unchaptered lecture",
+          channel: "Fixture channel",
+          upload_date: "20260705",
+          duration: 140,
+          webpage_url: $url,
+          language: "en",
+          chapters: null,
+          subtitles: {},
+          automatic_captions: {
+            "en-orig": [{ext: "json3", url: "https://captions.test/flat"}]
+          }
+        }'
+      ;;
+    *)
+      jq -n \
+        --arg url "$url" \
+        '{
+          id: "chapter-test",
+          title: "Structured lecture",
+          channel: "Fixture channel",
+          upload_date: "20260705",
+          duration: 140,
+          webpage_url: $url,
+          language: "en",
+          chapters: [
+            {title: "Introduction", start_time: 0, end_time: 60},
+            {title: "Main result", start_time: 60, end_time: 140}
+          ],
+          subtitles: {
+            en: [{ext: "json3", url: "https://captions.test/chapters"}]
+          },
+          automatic_captions: {}
+        }'
+      ;;
+  esac
+  exit 0
+fi
+
+[ -f "$info_json" ] && [ -n "$output" ] && [ -n "$language" ] || {
+  printf '%s\n' 'incomplete fake subtitle request' >&2
+  exit 64
+}
+
+if [ "$kind" = automatic ]; then
+  [ "$language" = en-orig ]
+else
+  [ "$language" = en ]
+fi
+
+caption_path=$(printf '%s' "$output" | sed "s/%(ext)s$/$language.json3/")
+mkdir -p "$(dirname "$caption_path")"
+jq -n \
+  '{
+    events: [
+      {tStartMs: 0, dDurationMs: 12000, segs: [{utf8: "Opening context."}]},
+      {tStartMs: 15000, dDurationMs: 12000, segs: [{utf8: "The first claim is explained."}]},
+      {tStartMs: 70000, dDurationMs: 12000, segs: [{utf8: "The main result follows."}]},
+      {tStartMs: 100000, dDurationMs: 12000, segs: [{utf8: "The conclusion is bounded."}]}
+    ]
+  }' >"$caption_path"

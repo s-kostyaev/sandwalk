@@ -57,6 +57,18 @@ Markdown alias.
   $ cat workspace/fetch-test/artifacts/excerpts/excerpt_*.md
   [00:42] Exact plain-text evidence.
 
+YouTube locators select the site adapter by default and persist its genuine
+plain-text primary artifact.
+
+  $ sqlite3 workspace/fetch-test/database/sandwalk.sqlite3 \
+  >   "INSERT INTO search_hits (hit_ref, query_id, position, url, title, snippet) VALUES ('hit_00000000000000000000000000000004', 1, 2, 'https://youtu.be/flat-test', 'Fixture video', 'Fixture video snippet.');"
+  $ youtube_fetch=$(PATH="$PWD/fakes:$PATH" sandwalk fetch \
+  >   --slug fetch-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   hit_00000000000000000000000000000004)
+  $ printf '%s\n' "$youtube_fetch" | sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
+  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/fetch-test/artifacts/snapshots/snap_ID/transcript.txt","document_media_type":"text/plain"}}
+
 Research fetches fail before invoking an adapter when no claim is supplied.
 
   $ PATH="$PWD/fakes:$PATH" sandwalk fetch \

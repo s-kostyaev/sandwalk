@@ -1,0 +1,169 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+url=$(printf '%s' "$request" | jq -er '.url')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+
+[ "$protocol" = "sandwalk.fetch.v1" ] || {
+  printf '%s\n' 'unsupported fetch protocol' >&2
+  exit 64
+}
+
+printf '%s' "$url" |
+  grep -Eq '^https?://((www|m)\.)?(youtube\.com|youtu\.be)/' || {
+  printf '%s\n' 'YouTube fetch requires a YouTube URL' >&2
+  exit 64
+}
+
+mkdir -p "$output_directory"
+metadata_original="$output_directory/metadata-original.json"
+selection_file="$output_directory/caption-selection.json"
+caption_directory="$output_directory/caption-download"
+captions="$output_directory/captions.json3"
+manifest="$output_directory/manifest.json"
+manifest_temporary="$output_directory/manifest.json.tmp"
+
+cleanup() {
+  rm -rf "$caption_directory"
+  rm -f "$metadata_original" "$selection_file" "$manifest_temporary"
+}
+trap cleanup EXIT HUP INT TERM
+rm -f "$manifest" "$manifest_temporary"
+
+yt-dlp \
+  --no-playlist \
+  --skip-download \
+  --quiet \
+  --no-warnings \
+  --dump-single-json \
+  "$url" >"$metadata_original"
+
+sandwalk-youtube-normalize select \
+  --metadata "$metadata_original" >"$selection_file"
+caption_kind=$(jq -er '.kind' "$selection_file")
+caption_language=$(jq -er '.language' "$selection_file")
+
+mkdir -p "$caption_directory"
+if [ "$caption_kind" = manual ]; then
+  caption_flag=--write-subs
+else
+  caption_flag=--write-auto-subs
+fi
+
+yt-dlp \
+  --load-info-json "$metadata_original" \
+  --no-playlist \
+  --skip-download \
+  --quiet \
+  --no-warnings \
+  "$caption_flag" \
+  --sub-langs "$caption_language" \
+  --sub-format json3 \
+  --output "$caption_directory/captions.%(ext)s"
+
+caption_count=$(
+  find "$caption_directory" -type f -name '*.json3' | wc -l | tr -d ' '
+)
+[ "$caption_count" = 1 ] || {
+  printf '%s\n' 'yt-dlp did not produce exactly one JSON3 subtitle track' >&2
+  exit 65
+}
+caption_source=$(find "$caption_directory" -type f -name '*.json3')
+mv "$caption_source" "$captions"
+
+normalization=$(
+  sandwalk-youtube-normalize normalize \
+    --metadata "$metadata_original" \
+    --captions "$captions" \
+    --output-directory "$output_directory" \
+    --caption-kind "$caption_kind" \
+    --caption-language "$caption_language"
+)
+
+document_artifact=$(printf '%s' "$normalization" | jq -er '.document_artifact')
+document_media_type=$(
+  printf '%s' "$normalization" | jq -er '.document_media_type'
+)
+canonical_url=$(printf '%s' "$normalization" | jq -er '.canonical_url')
+chapter_count=$(printf '%s' "$normalization" | jq -er '.chapter_count')
+block_count=$(printf '%s' "$normalization" | jq -er '.block_count')
+document="$output_directory/$document_artifact"
+
+if [ "$document_media_type" = text/markdown ]; then
+  mq "$document" '.tree' >/dev/null
+  query_tool=mq
+  query='.tree'
+else
+  rg -q '[^[:space:]]' "$document"
+  query_tool=rg
+  query='[^[:space:]]'
+fi
+
+input_sha256=$(shasum -a 256 "$captions" | awk '{print $1}')
+document_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
+metadata_sha256=$(shasum -a 256 "$output_directory/metadata.json" | awk '{print $1}')
+blocks_sha256=$(shasum -a 256 "$output_directory/blocks.jsonl" | awk '{print $1}')
+yt_dlp_version=$(yt-dlp --version | sed -n '1{s/"/\\"/g;p;}')
+
+jq -n \
+  --arg protocol "sandwalk.fetch-manifest.v1" \
+  --arg adapter "youtube" \
+  --arg requested_url "$url" \
+  --arg final_url "$canonical_url" \
+  --arg document_artifact "$document_artifact" \
+  --arg document_media_type "$document_media_type" \
+  --arg input_sha256 "$input_sha256" \
+  --arg document_sha256 "$document_sha256" \
+  --arg metadata_sha256 "$metadata_sha256" \
+  --arg blocks_sha256 "$blocks_sha256" \
+  --arg caption_kind "$caption_kind" \
+  --arg caption_language "$caption_language" \
+  --arg query_tool "$query_tool" \
+  --arg query "$query" \
+  --arg yt_dlp_version "$yt_dlp_version" \
+  --argjson chapter_count "$chapter_count" \
+  --argjson block_count "$block_count" \
+  '{
+    protocol: $protocol,
+    adapter: {
+      name: $adapter,
+      protocol_version: 1,
+      implementation_version: $yt_dlp_version,
+      extraction_profile: "youtube-json3-source-chapters-v1"
+    },
+    requested_url: $requested_url,
+    final_url: $final_url,
+    document_media_type: $document_media_type,
+    youtube: {
+      caption_kind: $caption_kind,
+      caption_language: $caption_language,
+      chapter_count: $chapter_count,
+      block_count: $block_count
+    },
+    hashes: {
+      input_sha256: $input_sha256,
+      normalized_document_sha256: $document_sha256,
+      metadata_sha256: $metadata_sha256,
+      blocks_sha256: $blocks_sha256
+    },
+    artifacts: {
+      document: $document_artifact,
+      original: "captions.json3",
+      metadata: "metadata.json",
+      blocks: "blocks.jsonl"
+    },
+    queryability_check: {
+      tool: $query_tool,
+      query: $query,
+      ok: true
+    }
+  }' >"$manifest_temporary"
+
+mv "$manifest_temporary" "$manifest"
+
+jq -nc \
+  --arg protocol "sandwalk.fetch-result.v1" \
+  --arg manifest "$manifest" \
+  '{protocol: $protocol, manifest: $manifest}'

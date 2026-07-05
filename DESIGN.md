@@ -446,6 +446,20 @@ normalization source, both relevant hashes, and the fallback reason. Final
 bibliographies therefore cite the stable abstract page rather than an
 implementation-specific representation URL.
 
+YouTube is a second site-specific source constructor. Recognized
+`youtube.com` and `youtu.be` hits select `sandwalk-fetch-youtube`, which uses
+`yt-dlp` to resolve metadata and download exactly one JSON3 caption track
+without downloading video or audio. It prefers a manual track in the video's
+language, then the original automatic track, and rejects videos without usable
+captions. Source-provided chapters become timestamped H2 sections in
+`document.md`; timestamps link to the corresponding playback position. If the
+source has no chapters, the adapter publishes `transcript.txt` as
+`text/plain`, with timestamped bounded paragraphs but no synthetic headings.
+The flat transcript is gated with `rg`, while chaptered Markdown is gated with
+`mq`. Both retain `captions.json3`, sanitized `metadata.json`, and
+`blocks.jsonl` line-to-playback mappings. Sandwalk does not invent fixed-time
+chapters, invoke an embedding model, or transcribe audio.
+
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.
 
@@ -453,8 +467,12 @@ The bundled default local-document fetch connector is
 `sandwalk-fetch-docling`. `fetch` selects it for a `file://` hit. The request
 repeats the source root recorded with the search. The adapter canonicalizes both
 paths, rejects non-regular files and symlink/path traversal outside that root,
-and copies the source into its controlled output directory before extraction so
-normalization and hashing observe one input. Local adapters and the bundled web
+and copies the source under its original basename into the controlled snapshot
+directory before extraction so normalization and hashing observe one input.
+Adapters pass that retained artifact directly to their normalizer; they do not
+create hardlink aliases merely to recover a filename extension. Remote PDF
+fallbacks likewise normalize the retained `source.pdf` directly. Local
+adapters and the bundled web
 dispatcher receive a 15-minute process timeout because first-use model
 acquisition and CPU-only OCR may exceed the transport's two-minute request
 bound.

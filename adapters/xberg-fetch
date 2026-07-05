@@ -44,8 +44,8 @@ case "$canonical_source" in
 esac
 
 mkdir -p "$output_directory"
-original="$output_directory/original"
-extraction_input="$output_directory/input-$source_basename"
+original_directory="$output_directory/original"
+original="$original_directory/$source_basename"
 document="$output_directory/document.md"
 structure="$output_directory/document.json"
 config="$output_directory/xberg-config.json"
@@ -55,25 +55,24 @@ rm -f "$manifest" "$manifest_temporary"
 
 # Copy first so extraction and hashes observe one immutable input even if the
 # user's source file changes during adapter execution.
+mkdir -p "$original_directory"
 cp -P "$canonical_source" "$original"
 [ ! -L "$original" ] && [ -f "$original" ] || {
   printf '%s\n' 'local source changed to an unsafe file during import' >&2
   exit 77
 }
-ln "$original" "$extraction_input"
 
 printf '%s\n' \
   '{"output_format":"markdown","include_document_structure":true,"pdf_options":{"hierarchy":{"enabled":true,"include_bbox":true}}}' \
   >"$config"
 
-NO_COLOR=1 xberg --log-level error extract "$extraction_input" \
+NO_COLOR=1 xberg --log-level error extract "$original" \
   --config "$config" \
   --content-format markdown \
   --format json \
   --ocr true \
   --ocr-backend tesseract \
   >"$structure"
-rm -f "$extraction_input"
 
 jq -ej '
   def extraction_result:
@@ -169,6 +168,7 @@ jq -n \
   --arg final_url "$url" \
   --arg source_root "$canonical_root" \
   --arg source_path "$canonical_source" \
+  --arg source_basename "$source_basename" \
   --arg input_sha256 "$input_sha256" \
   --arg markdown_sha256 "$markdown_sha256" \
   --arg structure_sha256 "$structure_sha256" \
@@ -200,7 +200,7 @@ jq -n \
     artifacts: {
       document: "document.md",
       structure: "document.json",
-      original: "original"
+      original: ("original/" + $source_basename)
     },
     queryability_check: {
       tool: "mq",

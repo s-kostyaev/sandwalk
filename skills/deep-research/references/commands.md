@@ -80,6 +80,12 @@ back to that PDF when the HTML representation fails its structural gate. Read
 and cite through the returned immutable primary document; do not invoke either
 representation URL directly.
 
+YouTube hits select `sandwalk-fetch-youtube` by default. The bundled adapter
+requires `yt-dlp` but downloads only metadata and one caption track. A
+chaptered result is `text/markdown`; an unchaptered result is
+`text/plain` at the returned `transcript.txt` path. Do not invoke `yt-dlp`
+directly.
+
 Use `snapshot promote` when reconnaissance already fetched the needed source.
 It binds the immutable snapshot to the claimed step without fetching it again.
 

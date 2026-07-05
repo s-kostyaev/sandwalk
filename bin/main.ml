@@ -4538,7 +4538,7 @@ let snapshot_promotion_error = function
 
 let excerpt_selection_error = function
   | Sandwalk_core.Excerpt.Empty_document ->
-    "EMPTY_SNAPSHOT", "Snapshot Markdown is empty."
+    "EMPTY_SNAPSHOT", "Snapshot document is empty."
   | Empty_excerpt -> "EMPTY_EXCERPT", "Excerpt text must not be empty."
   | Invalid_line_range ->
     "INVALID_LINE_RANGE", "Line range must identify existing inclusive lines."
@@ -4555,6 +4555,20 @@ let excerpt_selection_error = function
         "Excerpt is %d bytes; maximum size is %d bytes."
         size
         Sandwalk_core.Excerpt.maximum_bytes )
+;;
+
+let is_youtube_url url =
+  List.exists
+    [ "https://www.youtube.com/"
+    ; "http://www.youtube.com/"
+    ; "https://youtube.com/"
+    ; "http://youtube.com/"
+    ; "https://m.youtube.com/"
+    ; "http://m.youtube.com/"
+    ; "https://youtu.be/"
+    ; "http://youtu.be/"
+    ]
+    ~f:(fun prefix -> String.is_prefix url ~prefix)
 ;;
 
 let fetch_command =
@@ -4639,6 +4653,8 @@ let fetch_command =
                     ~default:
                       (if String.is_prefix url ~prefix:"file://"
                        then "sandwalk-fetch-docling"
+                       else if is_youtube_url url
+                       then "sandwalk-fetch-youtube"
                        else "sandwalk-fetch-curl-pandoc")
                 in
                 let%bind status =
@@ -4779,6 +4795,7 @@ let fetch_command =
                           ~timeout:
                             (Time_float.Span.of_sec
                                (if String.is_prefix url ~prefix:"file://"
+                                   || is_youtube_url url
                                    || List.mem
                                         [ "sandwalk-fetch-curl-pandoc"
                                         ; "curl-pandoc-fetch"

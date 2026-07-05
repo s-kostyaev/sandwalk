@@ -7,5 +7,7 @@
   (arxiv-html-filter.lua as sandwalk-arxiv-html-filter.lua)
   (docling-fetch as sandwalk-fetch-docling)
   (docling-normalize as sandwalk-docling-normalize)
+  (youtube-fetch as sandwalk-fetch-youtube)
+  (youtube-normalize as sandwalk-youtube-normalize)
   (xberg-fetch as sandwalk-fetch-xberg)
   (pandoc-pdf-export as sandwalk-export-pandoc-pdf)))

@@ -11,6 +11,8 @@
   ../adapters/curl-pandoc-fetch
   ../adapters/arxiv-html-filter.lua
   ../adapters/docling-fetch
+  ../adapters/youtube-fetch
+  ../adapters/youtube-normalize
   ../adapters/xberg-fetch
   ../adapters/pandoc-pdf-export
   (source_tree fakes)))
