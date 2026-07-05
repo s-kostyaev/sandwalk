@@ -99,6 +99,9 @@ module Fetch_adapter : sig
   val validate_manifest : Yojson.Safe.t -> (unit, error) Result.t
   val final_url : manifest -> string
   val input_sha256 : manifest -> string
+  val document_artifact : manifest -> string
+  val document_media_type : manifest -> string
+  val document_sha256 : manifest -> string
   val markdown_sha256 : manifest -> string
   val structure_artifact : manifest -> string option
   val structure_sha256 : manifest -> string option

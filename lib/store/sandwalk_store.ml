@@ -116,13 +116,18 @@ module Snapshot_for_excerpt = struct
   type t =
     { snapshot_id : Sandwalk_core.Snapshot_id.t
     ; artifact_path : string
-    ; markdown_sha256 : string
+    ; document_artifact : string
+    ; document_media_type : string
+    ; document_sha256 : string
     ; step_key : Sandwalk_core.Plan_step.Key.t option
     }
 
   let snapshot_id t = t.snapshot_id
   let artifact_path t = t.artifact_path
-  let markdown_sha256 t = t.markdown_sha256
+  let document_artifact t = t.document_artifact
+  let document_media_type t = t.document_media_type
+  let document_sha256 t = t.document_sha256
+  let markdown_sha256 t = t.document_sha256
   let step_key t = t.step_key
 end
 
@@ -402,6 +407,7 @@ module Research_guidance = struct
         ; step_key : Sandwalk_core.Plan_step.Key.t
         ; snapshot_id : Sandwalk_core.Snapshot_id.t
         ; document_path : string
+        ; document_media_type : string
         }
     | Create_finding of
         { claim_id : Sandwalk_core.Claim_id.t
@@ -672,7 +678,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 23
+let current_schema_version = 24
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -1242,6 +1248,22 @@ PRAGMA user_version = 23;
 |}
 ;;
 
+let migration_v24 =
+  {|
+ALTER TABLE snapshots
+ADD COLUMN document_artifact TEXT NOT NULL DEFAULT 'document.md'
+CHECK (
+  document_artifact NOT IN ('', '.', '..')
+  AND document_artifact NOT LIKE '%/%'
+  AND document_artifact NOT LIKE '%\%'
+);
+ALTER TABLE snapshots
+ADD COLUMN document_media_type TEXT NOT NULL DEFAULT 'text/markdown'
+CHECK (document_media_type IN ('text/markdown', 'text/plain'));
+PRAGMA user_version = 24;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -1422,10 +1444,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:22 ~now)
       else Ok ()
     in
-    if from_version < 23
+    let%bind () =
+      if from_version < 23
+      then (
+        let%bind () = execute database migration_v23 in
+        insert_migration database ~version:23 ~now)
+      else Ok ()
+    in
+    if from_version < 24
     then (
-      let%bind () = execute database migration_v23 in
-      insert_migration database ~version:23 ~now)
+      let%bind () = execute database migration_v24 in
+      insert_migration database ~version:24 ~now)
     else Ok ())
 ;;
 
@@ -3397,7 +3426,8 @@ let query_first_snapshot database step_key =
   with_statement
     database
     {|
-SELECT s.snapshot_ref, s.artifact_path
+SELECT s.snapshot_ref, s.artifact_path, s.document_artifact,
+       s.document_media_type
 FROM snapshots s
 LEFT JOIN snapshot_promotions p ON p.snapshot_ref = s.snapshot_ref
 WHERE COALESCE(s.step_key, p.step_key) = ?1
@@ -3428,7 +3458,11 @@ LIMIT 1
                ~error:
                  (Error.Database_error "Invalid persisted snapshot reference")
         in
-        Some (snapshot_id, Sqlite3.column_text statement 1)
+        Some
+          ( snapshot_id
+          , Sqlite3.column_text statement 1
+          , Sqlite3.column_text statement 2
+          , Sqlite3.column_text statement 3 )
       | Sqlite3.Rc.DONE -> Ok None
       | return_code ->
         check database return_code |> Result.map ~f:(Fn.const None))
@@ -3581,13 +3615,19 @@ let query_research_guidance database =
     let source_guidance () =
       let%bind snapshot = query_first_snapshot database step_key in
       match snapshot with
-      | Some (snapshot_id, artifact_path) ->
+      | Some
+          ( snapshot_id
+          , artifact_path
+          , document_artifact
+          , document_media_type ) ->
         Ok
           (Research_guidance.Create_excerpt
              { claim_id
              ; step_key
              ; snapshot_id
-             ; document_path = Filename.concat artifact_path "document.md"
+             ; document_path =
+                 Filename.concat artifact_path document_artifact
+             ; document_media_type
              })
       | None ->
         let%bind hit = query_first_unfetched_hit database step_key in
@@ -5083,9 +5123,11 @@ let insert_snapshot
       ~step_key
       ~snapshot_id
       ~artifact_path
+      ~document_artifact
+      ~document_media_type
       ~final_url
       ~input_sha256
-      ~markdown_sha256
+      ~document_sha256
       ~manifest_json
       ~now
   =
@@ -5094,9 +5136,10 @@ let insert_snapshot
     {|
 INSERT INTO snapshots (
   snapshot_ref, hit_ref, claim_id, step_key, artifact_path, final_url,
-  input_sha256, markdown_sha256, manifest_json, retrieved_at
+  input_sha256, markdown_sha256, manifest_json, retrieved_at,
+  document_artifact, document_media_type
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
 |}
     ~f:(fun statement ->
       let open Result.Let_syntax in
@@ -5124,9 +5167,11 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
       let%bind () = bind_text database statement 5 artifact_path in
       let%bind () = bind_text database statement 6 final_url in
       let%bind () = bind_text database statement 7 input_sha256 in
-      let%bind () = bind_text database statement 8 markdown_sha256 in
+      let%bind () = bind_text database statement 8 document_sha256 in
       let%bind () = bind_text database statement 9 manifest_json in
       let%bind () = bind_text database statement 10 now in
+      let%bind () = bind_text database statement 11 document_artifact in
+      let%bind () = bind_text database statement 12 document_media_type in
       step_done database statement)
 ;;
 
@@ -5138,9 +5183,11 @@ let record_snapshot
       ~hit_id
       ~snapshot_id
       ~artifact_path
+      ~document_artifact
+      ~document_media_type
       ~final_url
       ~input_sha256
-      ~markdown_sha256
+      ~document_sha256
       ~manifest_json
       ~now
       ()
@@ -5211,9 +5258,11 @@ let record_snapshot
                 ~step_key
                 ~snapshot_id
                 ~artifact_path
+                ~document_artifact
+                ~document_media_type
                 ~final_url
                 ~input_sha256
-                ~markdown_sha256
+                ~document_sha256
                 ~manifest_json
                 ~now
             in
@@ -5405,7 +5454,17 @@ let snapshot_for_excerpt
                    { expected; actual = slug_text })
           in
           let query =
-            if schema_version >= 20
+            if schema_version >= 24
+            then
+              {|
+SELECT s.artifact_path, s.markdown_sha256,
+       COALESCE(s.step_key, p.step_key),
+       s.document_artifact, s.document_media_type
+FROM snapshots s
+LEFT JOIN snapshot_promotions p ON p.snapshot_ref = s.snapshot_ref
+WHERE s.snapshot_ref = ?1
+|}
+            else if schema_version >= 20
             then
               {|
 SELECT s.artifact_path, s.markdown_sha256,
@@ -5447,7 +5506,15 @@ WHERE snapshot_ref = ?1
                 Ok
                   { Snapshot_for_excerpt.snapshot_id
                   ; artifact_path = Sqlite3.column_text statement 0
-                  ; markdown_sha256 = Sqlite3.column_text statement 1
+                  ; document_artifact =
+                      (if schema_version >= 24
+                       then Sqlite3.column_text statement 3
+                       else "document.md")
+                  ; document_media_type =
+                      (if schema_version >= 24
+                       then Sqlite3.column_text statement 4
+                       else "text/markdown")
+                  ; document_sha256 = Sqlite3.column_text statement 1
                   ; step_key
                   }
               | Sqlite3.Rc.DONE -> Error (Error.Snapshot_not_found reference)

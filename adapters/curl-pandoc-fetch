@@ -282,6 +282,7 @@ if [ -n "$arxiv_id" ]; then
         },
         requested_url: $requested_url,
         final_url: $final_url,
+        document_media_type: "text/markdown",
         arxiv: {
           id: $arxiv_id,
           normalization_source: "html",
@@ -306,7 +307,7 @@ if [ -n "$arxiv_id" ]; then
         hashes: {
           input_sha256: $input_sha256,
           pdf_sha256: $pdf_sha256,
-          normalized_markdown_sha256: $markdown_sha256,
+          normalized_document_sha256: $markdown_sha256,
           sanitized_configuration_sha256: $configuration_sha256
         },
         artifacts: {
@@ -365,6 +366,7 @@ if [ -n "$arxiv_id" ]; then
         },
         requested_url: $requested_url,
         final_url: $final_url,
+        document_media_type: "text/markdown",
         arxiv: {
           id: $arxiv_id,
           normalization_source: "pdf",
@@ -382,7 +384,7 @@ if [ -n "$arxiv_id" ]; then
         hashes: {
           input_sha256: $input_sha256,
           pdf_sha256: $pdf_sha256,
-          normalized_markdown_sha256: $markdown_sha256,
+          normalized_document_sha256: $markdown_sha256,
           structure_sha256: $structure_sha256,
           quality_sha256: $quality_sha256,
           sanitized_configuration_sha256: $configuration_sha256
@@ -481,6 +483,7 @@ else
         },
         requested_url: $requested_url,
         final_url: $final_url,
+        document_media_type: "text/markdown",
         redirect_count: $redirects,
         http: {
           status: $status,
@@ -490,7 +493,7 @@ else
         },
         hashes: {
           input_sha256: $input_sha256,
-          normalized_markdown_sha256: $markdown_sha256,
+          normalized_document_sha256: $markdown_sha256,
           structure_sha256: $structure_sha256,
           quality_sha256: $quality_sha256,
           sanitized_configuration_sha256: $configuration_sha256
@@ -544,6 +547,7 @@ else
         },
         requested_url: $requested_url,
         final_url: $final_url,
+        document_media_type: "text/markdown",
         redirect_count: $redirects,
         http: {
           status: $status,
@@ -553,7 +557,7 @@ else
         },
         hashes: {
           input_sha256: $input_sha256,
-          normalized_markdown_sha256: $markdown_sha256,
+          normalized_document_sha256: $markdown_sha256,
           sanitized_configuration_sha256: $configuration_sha256
         },
         artifacts: {

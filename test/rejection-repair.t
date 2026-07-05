@@ -130,7 +130,7 @@ rejects the previous evidence for this step.
   >   --file repair/repair-test/artifacts/work/current.json >/dev/null
   $ sandwalk continue --slug repair-test --directory-prefix repair | \
   >   sed -E 's/claim_[0-9a-f]{32}/claim_ID/g'
-  {"ok":true,"result":{"packet":"repair/repair-test/artifacts/work/current.json","loop":"Edit only editable; keep integrity_md5 unchanged; apply the packet; then run continue again.","phase":"researching","action":"create-excerpt","reason":"Inspect the selected normalized snapshot, then create an exact excerpt from a semantically relevant range.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_ID","snapshot":"snap_00000000000000000000000000000001","document_path":"workspace/repair-test/artifacts/snapshots/snap_00000000000000000000000000000001/document.md"},"next":"'sandwalk' 'apply' '--file' 'repair/repair-test/artifacts/work/current.json'"}
+  {"ok":true,"result":{"packet":"repair/repair-test/artifacts/work/current.json","loop":"Edit only editable; keep integrity_md5 unchanged; apply the packet; then run continue again.","phase":"researching","action":"create-excerpt","reason":"Inspect the selected normalized snapshot, then create an exact excerpt from a semantically relevant range.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_ID","snapshot":"snap_00000000000000000000000000000001","document_path":"workspace/repair-test/artifacts/snapshots/snap_00000000000000000000000000000001/document.md","document_media_type":"text/markdown"},"next":"'sandwalk' 'apply' '--file' 'repair/repair-test/artifacts/work/current.json'"}
 
 Released schema 21 migrates candidate rejection and finding repair state.
 
@@ -140,4 +140,4 @@ Released schema 21 migrates candidate rejection and finding repair state.
   $ sandwalk continue --slug legacy21 --directory-prefix legacy21 >/dev/null
   $ sqlite3 legacy21/legacy21/database/sandwalk.sqlite3 \
   >   "SELECT (SELECT COUNT(*) FROM candidate_rejections), (SELECT COUNT(*) FROM finding_repairs), user_version FROM pragma_user_version;"
-  0|0|23
+  0|0|24

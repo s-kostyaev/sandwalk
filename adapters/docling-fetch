@@ -124,13 +124,14 @@ jq -n \
     },
     requested_url: $requested_url,
     final_url: $final_url,
+    document_media_type: "text/markdown",
     local: {
       source_root: $source_root,
       canonical_path: $source_path
     },
     hashes: {
       input_sha256: $input_sha256,
-      normalized_markdown_sha256: $markdown_sha256,
+      normalized_document_sha256: $markdown_sha256,
       structure_sha256: $structure_sha256,
       quality_sha256: $quality_sha256,
       sanitized_configuration_sha256: $configuration_sha256

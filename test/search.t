@@ -33,7 +33,7 @@ Create a released-schema v6 workspace with an active claim and search through v7
   >   --claim claim_00000000000000000000000000000001 \
   >   "$local_hit")
   $ printf '%s\n' "$local_fetch" | sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
-  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/search-test/artifacts/snapshots/snap_ID/document.md"}}
+  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/search-test/artifacts/snapshots/snap_ID/document.md","document_media_type":"text/markdown"}}
 
   $ local_document=$(printf '%s' "$local_fetch" | jq -r '.result.document_path')
   $ grep '^#' "$local_document"
@@ -49,7 +49,7 @@ Create a released-schema v6 workspace with an active claim and search through v7
 
   $ ./inspect_workspace.exe workspace/search-test/database/sandwalk.sqlite3
   search-test|researching
-  23
+  24
   wal
   ok
 

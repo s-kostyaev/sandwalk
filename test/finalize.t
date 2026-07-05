@@ -26,7 +26,7 @@ The packet loop has an explicit terminal response.
 
   $ ./inspect_workspace.exe workspace/final-test/database/sandwalk.sqlite3
   final-test|completed
-  23
+  24
   wal
   ok
 

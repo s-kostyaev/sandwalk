@@ -529,7 +529,12 @@ let research_recommendation ~slug ~directory_prefix = function
     ; alternatives_possible = true
     }
   | Create_excerpt
-      { claim_id; step_key; snapshot_id; document_path } ->
+      { claim_id
+      ; step_key
+      ; snapshot_id
+      ; document_path
+      ; document_media_type
+      } ->
     { action = "create-excerpt"
     ; reason =
         "Inspect the selected normalized snapshot, then create an exact excerpt from a semantically relevant range."
@@ -539,6 +544,7 @@ let research_recommendation ~slug ~directory_prefix = function
         ; "claim", `String (Sandwalk_core.Claim_id.to_string claim_id)
         ; "snapshot", `String (Sandwalk_core.Snapshot_id.to_string snapshot_id)
         ; "document_path", `String document_path
+        ; "document_media_type", `String document_media_type
         ]
     ; alternatives_possible = true
     }
@@ -996,6 +1002,11 @@ let work_packet
       [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
       ; "snapshot", `String (recommendation_detail_string_exn recommendation "snapshot")
       ; "document_path", `String (recommendation_detail_string_exn recommendation "document_path")
+      ; ( "document_media_type"
+        , `String
+            (recommendation_detail_string_exn
+               recommendation
+               "document_media_type") )
       ; "allowed_decisions", candidate_decisions
       ]
       [ "decision", `String ""
@@ -4787,49 +4798,66 @@ let fetch_command =
                          let manifest_path =
                            Filename.concat temporary_path "manifest.json"
                          in
-                         let document_path =
-                           Filename.concat temporary_path "document.md"
+                         let%bind manifest_input =
+                           Sandwalk_runtime.File_input.read
+                             ~path:manifest_path
+                             ~maximum_bytes:262_144
                          in
-                         let%bind manifest_input, document_input =
-                           Deferred.both
-                             (Sandwalk_runtime.File_input.read
-                                ~path:manifest_path
-                                ~maximum_bytes:262_144)
-                             (Sandwalk_runtime.File_input.read
-                                ~path:document_path
-                                ~maximum_bytes:52_428_800)
-                         in
-                         (match manifest_input, document_input with
-                          | Error _, _ | _, Error _ ->
+                         (match manifest_input with
+                          | Error _ ->
                             fail_with_audit
                               ~code:"FETCH_ARTIFACT_ERROR"
-                              ~message:"Fetch adapter omitted required artifacts."
-                          | Ok manifest_input, Ok document_input ->
-                            if Sandwalk_runtime.File_input.size document_input = 0
-                            then
-                              fail_with_audit
-                                ~code:"FETCH_ARTIFACT_ERROR"
-                                ~message:"Fetched Markdown document is empty."
-                            else (
-                              let manifest_json =
-                                Sandwalk_runtime.File_input.content manifest_input
+                              ~message:"Fetch adapter omitted its manifest."
+                          | Ok manifest_input ->
+                            let manifest_json =
+                              Sandwalk_runtime.File_input.content manifest_input
+                            in
+                            let decoded =
+                              try
+                                manifest_json
+                                |> Yojson.Safe.from_string
+                                |> Sandwalk_protocol.Fetch_adapter.manifest
+                              with
+                              | _ ->
+                                Error
+                                  Sandwalk_protocol.Fetch_adapter.Invalid_manifest
+                            in
+                            (match decoded with
+                             | Error _ ->
+                               fail_with_audit
+                                 ~code:"FETCH_PROTOCOL_ERROR"
+                                 ~message:"Fetch manifest is invalid."
+                             | Ok manifest ->
+                              let document_artifact =
+                                Sandwalk_protocol.Fetch_adapter.document_artifact
+                                  manifest
                               in
-                              let decoded =
-                                try
-                                  manifest_json
-                                  |> Yojson.Safe.from_string
-                                  |> Sandwalk_protocol.Fetch_adapter.manifest
-                                with
-                                | _ ->
-                                  Error
-                                    Sandwalk_protocol.Fetch_adapter.Invalid_manifest
+                              let document_path =
+                                Filename.concat
+                                  temporary_path
+                                  document_artifact
                               in
-                              match decoded with
-                              | Error _ ->
+                              let%bind document_input =
+                                Sandwalk_runtime.File_input.read
+                                  ~path:document_path
+                                  ~maximum_bytes:52_428_800
+                              in
+                              (match document_input with
+                               | Error _ ->
                                 fail_with_audit
-                                  ~code:"FETCH_PROTOCOL_ERROR"
-                                  ~message:"Fetch manifest is invalid."
-                              | Ok manifest ->
+                                  ~code:"FETCH_ARTIFACT_ERROR"
+                                  ~message:
+                                    "Fetch adapter omitted its declared primary \
+                                     document."
+                               | Ok document_input ->
+                                if
+                                  Sandwalk_runtime.File_input.size document_input
+                                  = 0
+                                then
+                                  fail_with_audit
+                                    ~code:"FETCH_ARTIFACT_ERROR"
+                                    ~message:"Fetched primary document is empty."
+                                else (
                                 let%bind structure_valid =
                                   match
                                     Sandwalk_protocol.Fetch_adapter
@@ -4893,6 +4921,11 @@ let fetch_command =
                                          ~hit_id
                                          ~snapshot_id
                                          ~artifact_path:snapshot_path
+                                         ~document_artifact
+                                         ~document_media_type:
+                                           (Sandwalk_protocol.Fetch_adapter
+                                            .document_media_type
+                                              manifest)
                                          ~final_url:
                                            (Sandwalk_protocol.Fetch_adapter.final_url
                                               manifest)
@@ -4900,9 +4933,9 @@ let fetch_command =
                                            (Sandwalk_protocol.Fetch_adapter
                                             .input_sha256
                                               manifest)
-                                         ~markdown_sha256:
+                                         ~document_sha256:
                                            (Sandwalk_protocol.Fetch_adapter
-                                            .markdown_sha256
+                                            .document_sha256
                                               manifest)
                                          ~manifest_json
                                          ~now:
@@ -4967,7 +5000,13 @@ let fetch_command =
                                                , `String
                                                    (Filename.concat
                                                       snapshot_path
-                                                      "document.md") )
+                                                      document_artifact) )
+                                             ; ( "document_media_type"
+                                               , `String
+                                                   (Sandwalk_protocol
+                                                    .Fetch_adapter
+                                                    .document_media_type
+                                                      manifest) )
                                              ]
                                          in
                                          Sandwalk_protocol.Envelope.success
@@ -4975,7 +5014,7 @@ let fetch_command =
                                            ()
                                          |> Sandwalk_protocol.Envelope.render
                                          |> print_endline;
-                                         Deferred.unit)))))))))))
+                                         Deferred.unit)))))))))))))
 ;;
 
 let snapshot_promote_command =
@@ -5283,7 +5322,8 @@ let excerpt_create_command =
                 let document_path =
                   Filename.concat
                     (Sandwalk_store.Snapshot_for_excerpt.artifact_path snapshot)
-                    "document.md"
+                    (Sandwalk_store.Snapshot_for_excerpt.document_artifact
+                       snapshot)
                 in
                 let%bind document_input =
                   Sandwalk_runtime.File_input.read
@@ -5294,7 +5334,7 @@ let excerpt_create_command =
                  | Error _ ->
                    print_failure_and_exit
                      ~code:"SNAPSHOT_ARTIFACT_ERROR"
-                     ~message:"Could not read bounded snapshot Markdown."
+                     ~message:"Could not read bounded snapshot document."
                  | Ok document_input ->
                    let%bind text_input =
                      match selection with
@@ -5506,7 +5546,7 @@ let excerpt_create_command =
                                      ~artifact_path
                                      ~markdown_sha256:
                                        (Sandwalk_store.Snapshot_for_excerpt
-                                        .markdown_sha256
+                                        .document_sha256
                                           snapshot)
                                      ~line_start:
                                        (Sandwalk_core.Excerpt.line_start excerpt)

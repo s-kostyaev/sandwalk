@@ -10,7 +10,7 @@ Create a released-schema v7 workspace with an owned hit and fetch through v8.
   >   --adapter ../adapters/curl-pandoc-fetch \
   >   hit_00000000000000000000000000000001 | \
   >   sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
-  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/fetch-test/artifacts/snapshots/snap_ID/document.md"}}
+  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/fetch-test/artifacts/snapshots/snap_ID/document.md","document_media_type":"text/markdown"}}
 
   $ cat workspace/fetch-test/artifacts/snapshots/snap_*/document.md
   # Fetched title
@@ -26,9 +26,36 @@ Create a released-schema v7 workspace with an owned hit and fetch through v8.
 
   $ ./inspect_workspace.exe workspace/fetch-test/database/sandwalk.sqlite3
   fetch-test|researching
-  23
+  24
   wal
   ok
+
+Plain-text snapshots preserve their declared primary artifact without a
+Markdown alias.
+
+  $ text_fetch=$(PATH="$PWD/fakes:$PATH" sandwalk fetch \
+  >   --slug fetch-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --adapter "$PWD/fakes/sandwalk-fetch-text" \
+  >   hit_00000000000000000000000000000001)
+  $ printf '%s\n' "$text_fetch" | sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
+  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/fetch-test/artifacts/snapshots/snap_ID/transcript.txt","document_media_type":"text/plain"}}
+
+  $ text_snapshot=$(dirname "$(printf '%s' "$text_fetch" | jq -r '.result.document_path')")
+  $ find "$text_snapshot" -maxdepth 1 -type f -exec basename {} \; | sort
+  manifest.json
+  transcript.txt
+
+  $ text_snapshot_id=$(printf '%s' "$text_fetch" | jq -r '.result.snapshot')
+  $ sandwalk excerpt create \
+  >   --slug fetch-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --snapshot "$text_snapshot_id" --lines 2:2 | \
+  >   sed -E 's/excerpt_[0-9a-f]{32}/excerpt_ID/g'
+  {"ok":true,"result":{"excerpt":"excerpt_ID","created":true,"lines":"2:2","bytes":"25:60"}}
+
+  $ cat workspace/fetch-test/artifacts/excerpts/excerpt_*.md
+  [00:42] Exact plain-text evidence.
 
 Research fetches fail before invoking an adapter when no claim is supplied.
 

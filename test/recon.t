@@ -1,5 +1,5 @@
   $ sandwalk init --slug recon-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"recon-test","phase":"initialized","schema_version":23}}
+  {"ok":true,"result":{"slug":"recon-test","phase":"initialized","schema_version":24}}
   $ printf 'Map the small topic before planning.' > goal.md
 
   $ sandwalk recon start \
@@ -20,7 +20,7 @@ Search and fetch do not require a claim during reconnaissance.
   >   --slug recon-test --directory-prefix workspaces \
   >   --adapter ../adapters/curl-pandoc-fetch "$hit" | \
   >   sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
-  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspaces/recon-test/artifacts/snapshots/snap_ID/document.md"}}
+  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspaces/recon-test/artifacts/snapshots/snap_ID/document.md","document_media_type":"text/markdown"}}
 
   $ printf 'The primary result defines the topic boundary.' > observation.md
   $ sandwalk recon add-observation \

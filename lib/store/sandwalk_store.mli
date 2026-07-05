@@ -110,6 +110,9 @@ module Snapshot_for_excerpt : sig
 
   val snapshot_id : t -> Sandwalk_core.Snapshot_id.t
   val artifact_path : t -> string
+  val document_artifact : t -> string
+  val document_media_type : t -> string
+  val document_sha256 : t -> string
   val markdown_sha256 : t -> string
   val step_key : t -> Sandwalk_core.Plan_step.Key.t option
 end
@@ -300,6 +303,7 @@ module Research_guidance : sig
         ; step_key : Sandwalk_core.Plan_step.Key.t
         ; snapshot_id : Sandwalk_core.Snapshot_id.t
         ; document_path : string
+        ; document_media_type : string
         }
     | Create_finding of
         { claim_id : Sandwalk_core.Claim_id.t
@@ -751,9 +755,11 @@ val record_snapshot
   -> hit_id:Sandwalk_core.Hit_id.t
   -> snapshot_id:Sandwalk_core.Snapshot_id.t
   -> artifact_path:string
+  -> document_artifact:string
+  -> document_media_type:string
   -> final_url:string
   -> input_sha256:string
-  -> markdown_sha256:string
+  -> document_sha256:string
   -> manifest_json:string
   -> now:string
   -> unit

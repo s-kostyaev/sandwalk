@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+url=$(printf '%s' "$request" | jq -er '.url')
+
+mkdir -p "$output_directory"
+printf '%s\n' \
+  '[00:00] Opening context.' \
+  '[00:42] Exact plain-text evidence.' \
+  >"$output_directory/transcript.txt"
+
+input_sha256=$(printf '%s' "$url" | shasum -a 256 | awk '{print $1}')
+document_sha256=$(
+  shasum -a 256 "$output_directory/transcript.txt" | awk '{print $1}'
+)
+
+jq -n \
+  --arg protocol "sandwalk.fetch-manifest.v1" \
+  --arg final_url "$url" \
+  --arg input_sha256 "$input_sha256" \
+  --arg document_sha256 "$document_sha256" \
+  '{
+    protocol: $protocol,
+    final_url: $final_url,
+    document_media_type: "text/plain",
+    hashes: {
+      input_sha256: $input_sha256,
+      normalized_document_sha256: $document_sha256
+    },
+    artifacts: {
+      document: "transcript.txt"
+    },
+    queryability_check: {
+      tool: "rg",
+      query: "[^[:space:]]",
+      ok: true
+    }
+  }' >"$output_directory/manifest.json"
+
+jq -nc \
+  --arg protocol "sandwalk.fetch-result.v1" \
+  --arg manifest "$output_directory/manifest.json" \
+  '{protocol: $protocol, manifest: $manifest}'

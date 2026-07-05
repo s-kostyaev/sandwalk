@@ -385,14 +385,22 @@ A fetch adapter receives an output directory controlled by Sandwalk. It writes:
 
 ```text
 required:
-  document.md
   manifest.json
+  one primary text artifact declared by manifest.artifacts.document
 
 optional:
   blocks.jsonl
   original
   images/
 ```
+
+The primary artifact is a safe relative basename with media type
+`text/markdown` or `text/plain`. Structured normalizers publish
+`document.md`; genuinely flat sources may publish `transcript.txt`. Sandwalk
+does not create aliases, copies, or hardlinks to force a conventional
+filename. Schema 24 persists the basename and media type with each snapshot so
+continuation and excerpt creation always open the declared artifact. Existing
+snapshots migrate to `document.md` and `text/markdown`.
 
 The bundled web connector accepts a `sandwalk.fetch.v1` request. It uses
 `curl -L` with a Lynx user-agent and negotiates Markdown, HTML, and PDF. The
@@ -489,7 +497,7 @@ Sandwalk records:
 - retrieval time in UTC;
 - requested and final URLs;
 - redirect chain and HTTP metadata;
-- input and normalized Markdown hashes;
+- input and normalized primary-document hashes;
 - adapter name and adapter protocol version;
 - optional implementation version, extraction profile, and sanitized
   configuration digest.
@@ -540,14 +548,14 @@ sandwalk excerpt create --slug <slug> --snapshot <snapshot> \
 
 An excerpt records:
 
-- snapshot and Markdown hashes;
+- snapshot and normalized primary-document hashes;
 - line and byte ranges;
 - excerpt text hash;
 - optional source block, page, and bounding-box locators.
 
-Text must occur exactly in the normalized snapshot. Ambiguous matches require
-an occurrence selector. Oversized excerpts are rejected with a compact repair
-instruction. Creating the same excerpt twice is idempotent.
+Text must occur exactly in the normalized primary document. Ambiguous matches
+require an occurrence selector. Oversized excerpts are rejected with a compact
+repair instruction. Creating the same excerpt twice is idempotent.
 
 Line ranges are one-based, inclusive, and retain the source newline after the
 last selected line when one exists. Byte ranges are zero-based with an

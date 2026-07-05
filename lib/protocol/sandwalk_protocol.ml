@@ -271,7 +271,9 @@ module Fetch_adapter = struct
   type manifest =
     { final_url : string
     ; input_sha256 : string
-    ; markdown_sha256 : string
+    ; document_artifact : string
+    ; document_media_type : string
+    ; document_sha256 : string
     ; structure_artifact : string option
     ; structure_sha256 : string option
     }
@@ -311,6 +313,12 @@ module Fetch_adapter = struct
       | _ -> false)
   ;;
 
+  let artifact_basename value =
+    (not (String.is_empty value))
+    && String.equal value (Filename.basename value)
+    && not (List.mem [ "."; ".." ] value ~equal:String.equal)
+  ;;
+
   let manifest = function
     | `Assoc fields ->
       (match List.Assoc.find fields "protocol" ~equal:String.equal with
@@ -320,13 +328,32 @@ module Fetch_adapter = struct
            let%bind final_url = string_field fields "final_url" in
            let%bind hashes = assoc_field fields "hashes" in
            let%bind input_sha256 = string_field hashes "input_sha256" in
-           let%bind markdown_sha256 =
-             string_field hashes "normalized_markdown_sha256"
+           let document_sha256 =
+             match
+               string_field hashes "normalized_document_sha256",
+               string_field hashes "normalized_markdown_sha256"
+             with
+             | Some document, Some markdown when String.equal document markdown ->
+               Some document
+             | Some document, None -> Some document
+             | None, Some markdown -> Some markdown
+             | Some _, Some _ | None, None -> None
+           in
+           let%bind document_sha256 in
+           let artifacts = assoc_field fields "artifacts" in
+           let document_artifact =
+             artifacts
+             |> Option.bind ~f:(fun artifacts ->
+               string_field artifacts "document")
+             |> Option.value ~default:"document.md"
+           in
+           let document_media_type =
+             string_field fields "document_media_type"
+             |> Option.value ~default:"text/markdown"
            in
            let structure_artifact =
-             assoc_field fields "artifacts"
-             |> Option.bind ~f:(fun artifacts ->
-               string_field artifacts "structure")
+             artifacts
+             |> Option.bind ~f:(fun artifacts -> string_field artifacts "structure")
            in
            let structure_sha256 = string_field hashes "structure_sha256" in
            let%bind queryability = assoc_field fields "queryability_check" in
@@ -338,32 +365,39 @@ module Fetch_adapter = struct
            Some
              ( final_url
              , input_sha256
-             , markdown_sha256
+             , document_artifact
+             , document_media_type
+             , document_sha256
              , structure_artifact
              , structure_sha256
              , queryable )
          in
          (match parsed with
-          | Some (_, _, _, _, _, false) -> Error Queryability_check_failed
+          | Some (_, _, _, _, _, _, _, false) -> Error Queryability_check_failed
           | Some
               ( final_url
               , input_sha256
-              , markdown_sha256
+              , document_artifact
+              , document_media_type
+              , document_sha256
               , structure_artifact
               , structure_sha256
               , true )
             when (String.is_prefix final_url ~prefix:"http://"
                   || String.is_prefix final_url ~prefix:"https://"
-                  || String.is_prefix final_url ~prefix:"file://")
+                 || String.is_prefix final_url ~prefix:"file://")
                  && sha256 input_sha256
-                 && sha256 markdown_sha256
+                 && artifact_basename document_artifact
+                 && List.mem
+                      [ "text/markdown"; "text/plain" ]
+                      document_media_type
+                      ~equal:String.equal
+                 && sha256 document_sha256
                  &&
                  (match structure_artifact, structure_sha256 with
                   | None, None -> true
                   | Some artifact, Some hash ->
-                    (not (String.is_empty artifact))
-                    && String.equal artifact (Filename.basename artifact)
-                    && sha256 hash
+                    artifact_basename artifact && sha256 hash
                   | None, Some _ | Some _, None -> false)
                  &&
                  (not (String.is_prefix final_url ~prefix:"file://")
@@ -371,7 +405,9 @@ module Fetch_adapter = struct
             Ok
               { final_url
               ; input_sha256
-              ; markdown_sha256
+              ; document_artifact
+              ; document_media_type
+              ; document_sha256
               ; structure_artifact
               ; structure_sha256
               }
@@ -384,7 +420,10 @@ module Fetch_adapter = struct
   let validate_manifest json = manifest json |> Result.map ~f:ignore
   let final_url t = t.final_url
   let input_sha256 t = t.input_sha256
-  let markdown_sha256 t = t.markdown_sha256
+  let document_artifact t = t.document_artifact
+  let document_media_type t = t.document_media_type
+  let document_sha256 t = t.document_sha256
+  let markdown_sha256 t = t.document_sha256
   let structure_artifact t = t.structure_artifact
   let structure_sha256 t = t.structure_sha256
 end
@@ -846,6 +885,42 @@ let%expect_test "local fetch manifests require a structured artifact" =
     {|
     (Error Invalid_manifest)
     (Ok ()) |}]
+;;
+
+let%expect_test "fetch manifests can declare a plain-text primary document" =
+  let manifest artifact media_type =
+    `Assoc
+      [ "protocol", `String "sandwalk.fetch-manifest.v1"
+      ; "final_url", `String "https://example.test/transcript"
+      ; "document_media_type", `String media_type
+      ; ( "hashes"
+        , `Assoc
+            [ "input_sha256", `String (String.make 64 'a')
+            ; "normalized_document_sha256", `String (String.make 64 'b')
+            ] )
+      ; "artifacts", `Assoc [ "document", `String artifact ]
+      ; "queryability_check", `Assoc [ "ok", `Bool true ]
+      ]
+  in
+  manifest "transcript.txt" "text/plain"
+  |> Fetch_adapter.manifest
+  |> Result.map ~f:(fun value ->
+    Fetch_adapter.document_artifact value, Fetch_adapter.document_media_type value)
+  |> [%sexp_of: ((string * string), Fetch_adapter.error) Result.t]
+  |> print_s;
+  manifest "../transcript.txt" "text/plain"
+  |> Fetch_adapter.validate_manifest
+  |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
+  |> print_s;
+  manifest "transcript.txt" "application/octet-stream"
+  |> Fetch_adapter.validate_manifest
+  |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
+  |> print_s;
+  [%expect
+    {|
+    (Ok (transcript.txt text/plain))
+    (Error Invalid_manifest)
+    (Error Invalid_manifest) |}]
 ;;
 
 let%expect_test "finding reviews are versioned and agent-authored" =

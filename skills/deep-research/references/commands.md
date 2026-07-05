@@ -64,9 +64,12 @@ selecting excerpt ranges. Use
 `sandwalk fetch ... --adapter sandwalk-fetch-xberg` only as an explicit fast
 alternative for a simple document.
 
-Fetch accepts only a persisted hit ID, not an arbitrary URL. Its default
-connector stores the original response, headers, converted Markdown, hashes,
-and a queryability check. For excerpts, use either `--lines first:last` or
+Fetch accepts only a persisted hit ID, not an arbitrary URL. Its result returns
+the immutable primary `document_path` and `document_media_type`; the manifest
+stores the same basename and media type with the original response, headers,
+hashes, and queryability check. Use `mq` to navigate `text/markdown`. For
+`text/plain`, search with `rg -n` and read bounded line ranges around matches.
+For excerpts, use either `--lines first:last` or
 `--text-file path [--occurrence N]`.
 
 The default web adapter dispatches genuine remote PDFs to the same Docling
@@ -74,7 +77,7 @@ normalizer instead of treating binary input as HTML. For arXiv abstract, HTML,
 or PDF hits it prefers the structured article HTML for `document.md`, always
 retains the matching exact-version PDF as `source.pdf` for the user, and falls
 back to that PDF when the HTML representation fails its structural gate. Read
-and cite through the immutable `document.md`; do not invoke either
+and cite through the returned immutable primary document; do not invoke either
 representation URL directly.
 
 Use `snapshot promote` when reconnaissance already fetched the needed source.

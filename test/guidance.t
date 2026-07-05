@@ -24,7 +24,7 @@
   {"ok":true,"result":{"code":"EXPORT_INPUT_STALE","explanation":"The final Markdown report or bibliography no longer matches the hashes recorded at finalization.","repair":"Do not edit finalized projections. Restore the exact finalized `report.md` and `sources.md` before exporting."}}
 
   $ sandwalk init --slug guidance-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":23}}
+  {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":24}}
 
   $ sandwalk next --slug guidance-test --directory-prefix "work spaces"
   {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}
