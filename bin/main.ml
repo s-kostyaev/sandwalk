@@ -465,6 +465,112 @@ let status_error = function
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
+let path_is_directory path =
+  try
+    match (Core_unix.stat path).st_kind with
+    | S_DIR -> true
+    | S_REG | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> false
+  with
+  | _ -> false
+;;
+
+let workspace_list_entry ~directory_prefix name =
+  match Sandwalk_core.Slug.of_string name with
+  | Error _ -> None
+  | Ok slug ->
+    let workspace = Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug in
+    if not (path_is_directory (Sandwalk_runtime.Workspace.root workspace))
+    then None
+    else (
+      let database_path = Sandwalk_runtime.Workspace.database_path workspace in
+      let fields fields = `Assoc (("slug", `String name) :: fields) in
+      if not (Sys_unix.file_exists_exn database_path)
+      then
+        Some
+          (fields
+             [ "phase", `Null
+             ; "schema_version", `Null
+             ; "error_code", `String "WORKSPACE_NOT_FOUND"
+             ; "message", `String "Workspace does not exist."
+             ])
+      else (
+        match
+          Sandwalk_store.read_status ~database_path ~expected_slug:slug ()
+        with
+        | Ok status ->
+          Some
+            (fields
+               [ ( "phase"
+                 , `String
+                     (Sandwalk_store.Workspace_status.phase status
+                      |> Sandwalk_core.Phase.to_string) )
+               ; ( "schema_version"
+                 , `Int
+                     (Sandwalk_store.Workspace_status.schema_version status) )
+               ])
+        | Error error ->
+          let code, message = status_error error in
+          Some
+            (fields
+               [ "phase", `Null
+               ; "schema_version", `Null
+               ; "error_code", `String code
+               ; "message", `String message
+               ])))
+;;
+
+let list_workspace_entries ~directory_prefix =
+  Deferred.Or_error.try_with (fun () ->
+    In_thread.run (fun () ->
+      if not (Sys_unix.file_exists_exn directory_prefix)
+      then []
+      else
+        Sys_unix.ls_dir directory_prefix
+        |> List.filter_map ~f:(workspace_list_entry ~directory_prefix)
+        |> List.sort ~compare:(fun left right ->
+          let slug = function
+            | `Assoc fields ->
+              List.Assoc.find fields "slug" ~equal:String.equal
+              |> Option.value_map ~default:"" ~f:(function
+                | `String slug -> slug
+                | _ -> "")
+            | _ -> ""
+          in
+          String.compare (slug left) (slug right))))
+;;
+
+let list_command =
+  Async.Command.async
+    ~summary:"List Sandwalk workspaces under the current directory prefix."
+    (let%map_open.Command directory_prefix =
+       flag
+         "--directory-prefix"
+         (optional string)
+         ~doc:"PATH Parent directory for Sandwalk workspaces"
+     in
+     fun () ->
+       let directory_prefix =
+         Sandwalk_runtime.resolve_directory_prefix ~command_line:directory_prefix
+       in
+       let%bind entries = list_workspace_entries ~directory_prefix in
+       match entries with
+       | Error _ ->
+         print_failure_and_exit
+           ~code:"WORKSPACE_IO_ERROR"
+           ~message:"Could not read workspace directory prefix."
+       | Ok workspaces ->
+         let result =
+           `Assoc
+             [ "directory_prefix", `String directory_prefix
+             ; "workspaces", `List workspaces
+             ]
+         in
+         Sandwalk_protocol.Envelope.success ~result ()
+         |> Sandwalk_protocol.Envelope.render
+         |> print_endline;
+         Deferred.unit)
+;;
+
 type recommendation =
   { action : string
   ; reason : string
@@ -10319,6 +10425,7 @@ let command =
     ; "finalize", finalize_command
     ; "gc", gc_command
     ; "init", init_command
+    ; "list", list_command
     ; "next", next_command
     ; "plan", plan_command
     ; "recon", recon_command
