@@ -5,6 +5,7 @@
   (ugrep-search as sandwalk-search-ugrep)
   (curl-pandoc-fetch as sandwalk-fetch-curl-pandoc)
   (arxiv-html-filter.lua as sandwalk-arxiv-html-filter.lua)
+  (file-fetch as sandwalk-fetch-file)
   (docling-fetch as sandwalk-fetch-docling)
   (docling-normalize as sandwalk-docling-normalize)
   (youtube-fetch as sandwalk-fetch-youtube)

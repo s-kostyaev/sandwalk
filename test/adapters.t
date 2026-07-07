@@ -192,6 +192,42 @@ Local discovery emits bounded file locators without consulting ~/.ugrep.
   > EOF
   {"protocol":"sandwalk.search-results.v1","adapter":{"name":"ugrep+","protocol_version":1,"search_profile":"fixed-string-recursive-sorted-v1"},"results":[{"url":"file://ROOT/local%20documents/Architecture%20Notes.pdf","title":"Architecture Notes.pdf","snippet":"Typed adapter architecture Adapter protocol details"}]}
 
+Local file fetch preserves ordinary source text as a plain-text primary
+artifact, even when the file is not named *.txt.
+
+  $ cat > "local documents/source.el" <<'EOF'
+  > (defun sandwalk-example ()
+  >   "Plain source evidence."
+  >   t)
+  > EOF
+  $ PATH="$PWD/fakes:$PATH" ../adapters/file-fetch <<EOF \
+  > | sed "s#file://$PWD#file://ROOT#"
+  > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/local%20documents/source.el","source_root":"$PWD/local documents","output_directory":"file-text-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"file-text-output/manifest.json"}
+
+  $ jq -r '[.adapter.name, .adapter.extraction_profile, .artifacts.document, .document_media_type, .queryability_check.tool] | @tsv' \
+  >   file-text-output/manifest.json
+  file-text	plain-text-mime-v1	document.txt	text/plain	rg
+
+  $ cat file-text-output/document.txt
+  (defun sandwalk-example ()
+    "Plain source evidence."
+    t)
+
+Rich local document formats are delegated to Docling before plain-text
+classification, so ASCII-looking RTF is not treated as source text.
+
+  $ printf '{\\rtf1\\ansi Rich text evidence.}\n' > "local documents/Rich.rtf"
+  $ PATH="$PWD/fakes:$PATH" ../adapters/file-fetch <<EOF
+  > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/local%20documents/Rich.rtf","source_root":"$PWD/local documents","output_directory":"file-rich-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"file-rich-output/manifest.json"}
+
+  $ jq -r '[.adapter.name, .artifacts.document, .document_media_type, .queryability_check.tool] | @tsv' \
+  >   file-rich-output/manifest.json
+  docling	document.md	text/markdown	mq
+
 Docling fetch uses the pinned non-LLM hierarchy profile and retains quality
 metrics alongside the structured source model.
 

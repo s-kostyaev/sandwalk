@@ -69,6 +69,29 @@ plain-text primary artifact.
   $ printf '%s\n' "$youtube_fetch" | sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
   {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/fetch-test/artifacts/snapshots/snap_ID/transcript.txt","document_media_type":"text/plain"}}
 
+Local file locators select the bundled file dispatcher by default. Ordinary
+source text is preserved as text/plain without going through Docling.
+
+  $ mkdir -p plain-source
+  $ cat > plain-source/module.el <<'EOF'
+  > (defun fixture ()
+  >   "Default local text fetch."
+  >   t)
+  > EOF
+  $ sqlite3 workspace/fetch-test/database/sandwalk.sqlite3 \
+  >   "INSERT INTO search_queries (query, phase, claim_id, step_key, adapter, source_root, created_at) VALUES ('plain source', 'researching', 'claim_00000000000000000000000000000001', 'fixture-step', 'fixture-search', '$PWD/plain-source', '2026-01-01 00:00:00Z'); INSERT INTO search_hits (hit_ref, query_id, position, url, title, snippet) VALUES ('hit_00000000000000000000000000000005', last_insert_rowid(), 1, 'file://$PWD/plain-source/module.el', 'module.el', 'Default local text fetch.');"
+  $ file_fetch=$(PATH="$PWD/fakes:$PATH" sandwalk fetch \
+  >   --slug fetch-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   hit_00000000000000000000000000000005)
+  $ printf '%s\n' "$file_fetch" | sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
+  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/fetch-test/artifacts/snapshots/snap_ID/document.txt","document_media_type":"text/plain"}}
+
+  $ file_snapshot=$(dirname "$(printf '%s' "$file_fetch" | jq -r '.result.document_path')")
+  $ jq -r '[.adapter.name, .artifacts.document, .document_media_type] | @tsv' \
+  >   "$file_snapshot/manifest.json"
+  file-text	document.txt	text/plain
+
 Research fetches fail before invoking an adapter when no claim is supplied.
 
   $ PATH="$PWD/fakes:$PATH" sandwalk fetch \

@@ -133,7 +133,7 @@ let explanation = function
   | "FETCH_ADAPTER_FAILED" ->
     Some
       ( "The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON."
-      , "Verify the selected adapter and its normalizer are on PATH; local-document fetches require Xberg, Tesseract, and a sandbox-readable source root." )
+      , "Verify the selected adapter and its normalizer are on PATH; local-file fetches require `sandwalk-fetch-file`, Docling for rich documents, and a sandbox-readable source root." )
   | "PLAN_EMPTY" ->
     Some
       ( "The plan has no steps, so it cannot be validated."
@@ -4758,7 +4758,7 @@ let fetch_command =
                     adapter
                     ~default:
                       (if String.is_prefix url ~prefix:"file://"
-                       then "sandwalk-fetch-docling"
+                       then "sandwalk-fetch-file"
                        else if is_youtube_url url
                        then "sandwalk-fetch-youtube"
                        else "sandwalk-fetch-curl-pandoc")

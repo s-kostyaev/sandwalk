@@ -464,16 +464,22 @@ chapters, invoke an embedding model, or transcribe audio.
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.
 
-The bundled default local-document fetch connector is
-`sandwalk-fetch-docling`. `fetch` selects it for a `file://` hit. The request
-repeats the source root recorded with the search. The adapter canonicalizes both
-paths, rejects non-regular files and symlink/path traversal outside that root,
-and copies the source under its original basename into the controlled snapshot
-directory before extraction so normalization and hashing observe one input.
-Adapters pass that retained artifact directly to their normalizer; they do not
-create hardlink aliases merely to recover a filename extension. Remote PDF
-fallbacks likewise normalize the retained `source.pdf` directly. Local
-adapters and the bundled web
+The bundled default local-file fetch connector is `sandwalk-fetch-file`.
+`fetch` selects it for a `file://` hit. The request repeats the source root
+recorded with the search. The adapter canonicalizes both paths, rejects
+non-regular files and symlink/path traversal outside that root, and classifies
+the retained source before publication. Known rich document formats such as PDF,
+RTF, Office, OpenDocument, EPUB, and message files are delegated to
+`sandwalk-fetch-docling` before any byte-level text check, so ASCII-looking
+container formats are never silently treated as plain text. MIME-confirmed
+ordinary text and source files are copied to `document.txt` with
+`text/plain`, gated with `rg`, and retain the original file under
+`original/`. Rich local documents copy the source under its original basename
+into the controlled snapshot directory before extraction so normalization and
+hashing observe one input. Adapters pass that retained artifact directly to
+their normalizer; they do not create hardlink aliases merely to recover a
+filename extension. Remote PDF fallbacks likewise normalize the retained
+`source.pdf` directly. Local adapters and the bundled web
 dispatcher receive a 15-minute process timeout because first-use model
 acquisition and CPU-only OCR may exceed the transport's two-minute request
 bound.

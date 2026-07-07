@@ -10,6 +10,7 @@
   ../adapters/ugrep-search
   ../adapters/curl-pandoc-fetch
   ../adapters/arxiv-html-filter.lua
+  ../adapters/file-fetch
   ../adapters/docling-fetch
   ../adapters/youtube-fetch
   ../adapters/youtube-normalize

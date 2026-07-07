@@ -1,0 +1,160 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+url=$(printf '%s' "$request" | jq -er '.url')
+source_root=$(printf '%s' "$request" | jq -er '.source_root')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+
+[ "$protocol" = "sandwalk.fetch.v1" ] || {
+  printf '%s\n' 'unsupported fetch protocol' >&2
+  exit 64
+}
+
+printf '%s' "$url" | grep -Eq '^file://' || {
+  printf '%s\n' 'file fetch requires a file locator' >&2
+  exit 64
+}
+
+[ -d "$source_root" ] || {
+  printf '%s\n' 'local source root must be an existing directory' >&2
+  exit 66
+}
+
+encoded_source_path=${url#file://}
+source_path=$(
+  printf '%b' "$(printf '%s' "$encoded_source_path" | sed 's/%/\\x/g')"
+)
+source_basename=$(basename "$source_path")
+canonical_root=$(realpath "$source_root")
+canonical_source=$(realpath "$source_path")
+
+[ -f "$canonical_source" ] || {
+  printf '%s\n' 'local source must be a regular file' >&2
+  exit 66
+}
+
+case "$canonical_source" in
+  "$canonical_root"/*) ;;
+  *)
+    printf '%s\n' 'local source resolves outside its authorized root' >&2
+    exit 77
+    ;;
+esac
+
+extension=$(
+  printf '%s' "$source_basename" |
+    awk '
+      BEGIN { FS = "." }
+      NF > 1 { print tolower($NF) }
+    '
+)
+
+case "$extension" in
+  pdf|rtf|doc|dot|docm|docx|dotx|dotm|ppt|pps|pot|pptx|pptm|ppsx|ppsm|potx|potm|xls|xlt|xlsm|xlsx|xltx|xltm|xlsb|odt|ott|odp|otp|ods|ots|odg|otg|odf|epub|msg|vsd|vsdx|pub|fb2)
+    printf '%s' "$request" | sandwalk-fetch-docling
+    exit $?
+    ;;
+esac
+
+mime_type=$(
+  file -b --mime-type "$canonical_source" 2>/dev/null || printf '%s' unknown
+)
+
+case "$mime_type" in
+  text/*|application/json|application/ld+json|application/xml|application/*+xml|application/yaml|application/x-yaml|application/toml|application/x-toml|application/javascript|application/x-javascript|application/x-shellscript)
+    ;;
+  *)
+    printf '%s' "$request" | sandwalk-fetch-docling
+    exit $?
+    ;;
+esac
+
+perl -ne 'exit 1 if index($_, "\0") >= 0' "$canonical_source" || {
+  printf '%s' "$request" | sandwalk-fetch-docling
+  exit $?
+}
+
+mkdir -p "$output_directory"
+original_directory="$output_directory/original"
+original="$original_directory/$source_basename"
+document="$output_directory/document.txt"
+manifest="$output_directory/manifest.json"
+manifest_temporary="$output_directory/manifest.json.tmp"
+
+cleanup() {
+  rm -f "$manifest_temporary"
+}
+trap cleanup EXIT HUP INT TERM
+rm -f "$manifest" "$manifest_temporary"
+
+# Copy first so hashes and excerpts observe one immutable input even if the
+# user's source file changes during adapter execution.
+mkdir -p "$original_directory"
+cp -P "$canonical_source" "$original"
+[ ! -L "$original" ] && [ -f "$original" ] || {
+  printf '%s\n' 'local source changed to an unsafe file during import' >&2
+  exit 77
+}
+cp "$original" "$document"
+
+[ -s "$document" ] || {
+  printf '%s\n' 'plain-text source is empty' >&2
+  exit 65
+}
+rg -q '[^[:space:]]' "$document"
+
+input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
+document_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
+rg_version=$(rg --version | sed -n '1{s/"/\\"/g;p;}')
+
+jq -n \
+  --arg protocol "sandwalk.fetch-manifest.v1" \
+  --arg adapter "file-text" \
+  --arg requested_url "$url" \
+  --arg final_url "$url" \
+  --arg source_root "$canonical_root" \
+  --arg source_path "$canonical_source" \
+  --arg source_basename "$source_basename" \
+  --arg mime_type "$mime_type" \
+  --arg input_sha256 "$input_sha256" \
+  --arg document_sha256 "$document_sha256" \
+  --arg rg_version "$rg_version" \
+  '{
+    protocol: $protocol,
+    adapter: {
+      name: $adapter,
+      protocol_version: 1,
+      implementation_version: $rg_version,
+      extraction_profile: "plain-text-mime-v1"
+    },
+    requested_url: $requested_url,
+    final_url: $final_url,
+    document_media_type: "text/plain",
+    local: {
+      source_root: $source_root,
+      canonical_path: $source_path,
+      mime_type: $mime_type
+    },
+    hashes: {
+      input_sha256: $input_sha256,
+      normalized_document_sha256: $document_sha256
+    },
+    artifacts: {
+      document: "document.txt",
+      original: ("original/" + $source_basename)
+    },
+    queryability_check: {
+      tool: "rg",
+      query: "[^[:space:]]",
+      ok: true
+    }
+  }' >"$manifest_temporary"
+
+mv "$manifest_temporary" "$manifest"
+
+jq -nc \
+  --arg protocol "sandwalk.fetch-result.v1" \
+  --arg manifest "$manifest" \
+  '{protocol: $protocol, manifest: $manifest}'

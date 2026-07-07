@@ -401,6 +401,7 @@ module Fetch_adapter = struct
                   | None, Some _ | Some _, None -> false)
                  &&
                  (not (String.is_prefix final_url ~prefix:"file://")
+                  || String.equal document_media_type "text/plain"
                   || Option.is_some structure_artifact) ->
             Ok
               { final_url
@@ -888,10 +889,10 @@ let%expect_test "local fetch manifests require a structured artifact" =
 ;;
 
 let%expect_test "fetch manifests can declare a plain-text primary document" =
-  let manifest artifact media_type =
+  let manifest ?(final_url = "https://example.test/transcript") artifact media_type =
     `Assoc
       [ "protocol", `String "sandwalk.fetch-manifest.v1"
-      ; "final_url", `String "https://example.test/transcript"
+      ; "final_url", `String final_url
       ; "document_media_type", `String media_type
       ; ( "hashes"
         , `Assoc
@@ -912,6 +913,13 @@ let%expect_test "fetch manifests can declare a plain-text primary document" =
   |> Fetch_adapter.validate_manifest
   |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
   |> print_s;
+  manifest
+    ~final_url:"file:///documents/source.el"
+    "document.txt"
+    "text/plain"
+  |> Fetch_adapter.validate_manifest
+  |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
+  |> print_s;
   manifest "transcript.txt" "application/octet-stream"
   |> Fetch_adapter.validate_manifest
   |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
@@ -920,6 +928,7 @@ let%expect_test "fetch manifests can declare a plain-text primary document" =
     {|
     (Ok (transcript.txt text/plain))
     (Error Invalid_manifest)
+    (Ok ())
     (Error Invalid_manifest) |}]
 ;;
 
