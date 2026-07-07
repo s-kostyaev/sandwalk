@@ -472,8 +472,9 @@ the retained source before publication. Known rich document formats such as PDF,
 RTF, Office, OpenDocument, EPUB, and message files are delegated to
 `sandwalk-fetch-docling` before any byte-level text check, so ASCII-looking
 container formats are never silently treated as plain text. MIME-confirmed
-ordinary text and source files are copied to `document.txt` with
-`text/plain`, gated with `rg`, and retain the original file under
+ordinary text and source files are copied to a `document` primary artifact that
+preserves the source extension when one exists, declared as `text/plain`,
+gated with `rg`, and retain the original file under
 `original/`. Rich local documents copy the source under its original basename
 into the controlled snapshot directory before extraction so normalization and
 hashing observe one input. Adapters pass that retained artifact directly to

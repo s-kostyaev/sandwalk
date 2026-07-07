@@ -79,7 +79,11 @@ perl -ne 'exit 1 if index($_, "\0") >= 0' "$canonical_source" || {
 mkdir -p "$output_directory"
 original_directory="$output_directory/original"
 original="$original_directory/$source_basename"
-document="$output_directory/document.txt"
+document_artifact=document
+if [ -n "$extension" ]; then
+  document_artifact="document.$extension"
+fi
+document="$output_directory/$document_artifact"
 manifest="$output_directory/manifest.json"
 manifest_temporary="$output_directory/manifest.json.tmp"
 
@@ -117,6 +121,7 @@ jq -n \
   --arg source_root "$canonical_root" \
   --arg source_path "$canonical_source" \
   --arg source_basename "$source_basename" \
+  --arg document_artifact "$document_artifact" \
   --arg mime_type "$mime_type" \
   --arg input_sha256 "$input_sha256" \
   --arg document_sha256 "$document_sha256" \
@@ -142,7 +147,7 @@ jq -n \
       normalized_document_sha256: $document_sha256
     },
     artifacts: {
-      document: "document.txt",
+      document: $document_artifact,
       original: ("original/" + $source_basename)
     },
     queryability_check: {

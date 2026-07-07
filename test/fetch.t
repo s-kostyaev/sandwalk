@@ -85,12 +85,12 @@ source text is preserved as text/plain without going through Docling.
   >   --claim claim_00000000000000000000000000000001 \
   >   hit_00000000000000000000000000000005)
   $ printf '%s\n' "$file_fetch" | sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
-  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/fetch-test/artifacts/snapshots/snap_ID/document.txt","document_media_type":"text/plain"}}
+  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/fetch-test/artifacts/snapshots/snap_ID/document.el","document_media_type":"text/plain"}}
 
   $ file_snapshot=$(dirname "$(printf '%s' "$file_fetch" | jq -r '.result.document_path')")
   $ jq -r '[.adapter.name, .artifacts.document, .document_media_type] | @tsv' \
   >   "$file_snapshot/manifest.json"
-  file-text	document.txt	text/plain
+  file-text	document.el	text/plain
 
 Research fetches fail before invoking an adapter when no claim is supplied.
 

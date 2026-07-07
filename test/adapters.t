@@ -208,9 +208,9 @@ artifact, even when the file is not named *.txt.
 
   $ jq -r '[.adapter.name, .adapter.extraction_profile, .artifacts.document, .document_media_type, .queryability_check.tool] | @tsv' \
   >   file-text-output/manifest.json
-  file-text	plain-text-mime-v1	document.txt	text/plain	rg
+  file-text	plain-text-mime-v1	document.el	text/plain	rg
 
-  $ cat file-text-output/document.txt
+  $ cat file-text-output/document.el
   (defun sandwalk-example ()
     "Plain source evidence."
     t)
