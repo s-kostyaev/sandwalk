@@ -26,6 +26,24 @@ canonical architecture and invariants.
 The portable agent skill is installed under
 `share/sandwalk/skills/deep-research`.
 
+## Runtime Tools
+
+Sandwalk itself is built from the OCaml dependencies in `dune-project`, while
+the bundled adapters expect a few command-line tools on `PATH` when their source
+type is used:
+
+- [`mq`](https://github.com/muqsitnawaz/mq) for querying structured Markdown
+  snapshots before they are published and when agents inspect `text/markdown`
+  documents.
+- `rg` for local plain-text snapshots and flat transcripts.
+- `ugrep+` for local source-root discovery.
+- `ddgr` for the bundled web search adapter.
+- `pandoc` and `curl` for web page/PDF retrieval and PDF export paths.
+- `yt-dlp` for YouTube caption snapshots.
+
+Docling-based local and PDF normalization also uses the adapter's pinned
+Docling profile through `uv`.
+
 ## Development
 
 Sandwalk uses OCaml, Dune, and the Jane Street library ecosystem.

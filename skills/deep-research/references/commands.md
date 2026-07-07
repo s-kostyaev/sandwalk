@@ -55,12 +55,14 @@ sandwalk step complete --slug <slug> --claim <claim_id>
 
 Use the second search form for local documents. `--source-root` changes the
 default search adapter to `sandwalk-search-ugrep`; the resulting `file://` hit
-changes the default fetch adapter to `sandwalk-fetch-docling`. Its pinned
-standard profile runs locally through `uv`, restores PDF heading hierarchy, and
-does not enable remote services or LLM enrichments. The directory must be
-visible to the surrounding sandbox. Do not invoke `ugrep+`, Xberg, or Docling
-directly, and inspect the resulting hierarchical `document.md` with `mq` before
-selecting excerpt ranges. Use
+changes the default fetch adapter to `sandwalk-fetch-file`. Ordinary text and
+source files return `text/plain`; rich documents are delegated to
+`sandwalk-fetch-docling`. Docling's pinned standard profile runs locally through
+`uv`, restores PDF heading hierarchy, and does not enable remote services or
+LLM enrichments. The directory must be visible to the surrounding sandbox. Do
+not invoke `ugrep+`, Xberg, Docling, or `mq` directly except for bounded
+inspection of already-returned Sandwalk artifact paths. Inspect hierarchical
+`text/markdown` documents with `mq` before selecting excerpt ranges. Use
 `sandwalk fetch ... --adapter sandwalk-fetch-xberg` only as an explicit fast
 alternative for a simple document.
 

@@ -75,8 +75,9 @@ that readable directory in `source_root`; otherwise leave it empty.
 While this skill is active, Sandwalk is the only permitted path for every
 network or local-document search and fetch, including reconnaissance. Do not load or invoke
 another web-search, browsing, or fetch skill. Do not call `ddgr`, `curl`,
-`wget`, `yt-dlp`, `ug`, `ugrep`, Xberg, Docling, a browser, or an HTTP client
-directly. These programs may run only behind a Sandwalk adapter.
+`wget`, `yt-dlp`, `ug`, `ugrep`, `mq`, Xberg, Docling, a browser, or an HTTP
+client directly. These programs may run only behind a Sandwalk adapter or for
+bounded inspection of already-returned Sandwalk artifact paths.
 
 Use `sandwalk search` to discover persisted hits, `sandwalk fetch` to create
 immutable snapshots, and read only the returned `document_path`. If either
@@ -89,13 +90,14 @@ with `rg -n`, then read only bounded line ranges around matches. Do not run
 For user-authorized local documents, run `sandwalk search` with exactly one
 `--source-root <directory>`. The root must already be readable inside the
 agent's filesystem sandbox. Sandwalk records it with every hit, defaults to
-the `ugrep+` connector, and later selects the structured Docling fetch
-connector for `file://` hits. Remote PDF hits use the same structured
-normalization. For arXiv hits, Sandwalk prefers the article HTML for
-`document.md` and retains the matching versioned `source.pdf` for the user; an
-unusable HTML representation falls back to Docling automatically. Inspect the
-returned primary document according to its declared media type; never treat
-the search snippet as document content.
+the `ugrep+` connector, and later selects the local-file fetch dispatcher for
+`file://` hits. Ordinary text and source files return `text/plain`; rich
+documents are delegated to the structured Docling connector. Remote PDF hits
+use the same structured normalization. For arXiv hits, Sandwalk prefers the
+article HTML for `document.md` and retains the matching versioned `source.pdf`
+for the user; an unusable HTML representation falls back to Docling
+automatically. Inspect the returned primary document according to its declared
+media type; never treat the search snippet as document content.
 
 For YouTube hits, the default constructor uses source chapters when they exist.
 If it returns `text/plain`, the video had no usable source chapter structure:
