@@ -90,6 +90,7 @@ mainfont_path=$(find_cyrillic_font serif)
 sansfont_path=$(find_cyrillic_font sans-serif)
 monofont_path=$(find_cyrillic_font monospace)
 {
+  printf '%s\n' '\usepackage{pdflscape}'
   write_font_command setmainfont "$mainfont_path"
   write_font_command setsansfont "$sansfont_path"
   write_font_command setmonofont "$monofont_path"
@@ -106,6 +107,19 @@ local function fit_table_columns(table)
     table.colspecs[index][2] = 1 / column_count
   end
   return table
+end
+
+local function render_table(table)
+  table = fit_table_columns(table)
+  if #table.colspecs < 5 then
+    return table
+  end
+
+  return
+    { pandoc.RawBlock('latex', '\\begin{landscape}\\small')
+    , table
+    , pandoc.RawBlock('latex', '\\end{landscape}')
+    }
 end
 
 function Pandoc(document)
@@ -139,7 +153,7 @@ function Pandoc(document)
 
   return document:walk({
     Table = function(table)
-      return fit_table_columns(table)
+      return render_table(table)
     end,
     Str = function(element)
       local before, number, after =

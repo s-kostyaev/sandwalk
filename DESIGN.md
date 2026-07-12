@@ -764,8 +764,10 @@ makes Unicode text, including Cyrillic, render consistently without assuming a
 particular installed font family. Pandoc PDF generation therefore requires
 XeLaTeX and fontconfig. The exporter assigns equal bounded widths to Markdown
 table columns, so cells wrap within the PDF text area instead of extending past
-the page edge. Additional formats and renderers use the same protocol rather
-than adding renderer logic to the Sandwalk core.
+the page edge. Tables with five or more columns are rendered in a landscape
+page with a smaller table font so their columns remain readable rather than
+overlapping. Additional formats and renderers use the same protocol rather than
+adding renderer logic to the Sandwalk core.
 
 ## Audit log
 

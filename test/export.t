@@ -27,8 +27,11 @@ engine to fail.
   $ grep -E '^\\setmainfont\{[^}]+\}\[Path=[^]]+/\]$' unicode-fonts.tex >/dev/null
   $ grep -E '^\\setsansfont\{[^}]+\}\[Path=[^]]+/\]$' unicode-fonts.tex >/dev/null
   $ grep -E '^\\setmonofont\{[^}]+\}\[Path=[^]]+/\]$' unicode-fonts.tex >/dev/null
+  $ grep -F '\usepackage{pdflscape}' unicode-fonts.tex >/dev/null
   $ grep -F 'local function fit_table_columns(table)' pdf-filter.lua >/dev/null
   $ grep -F 'table.colspecs[index][2] = 1 / column_count' pdf-filter.lua >/dev/null
+  $ grep -F 'local function render_table(table)' pdf-filter.lua >/dev/null
+  $ grep -F 'begin{landscape}' pdf-filter.lua >/dev/null
 
 The exporter request and manifest are versioned contracts.
 
