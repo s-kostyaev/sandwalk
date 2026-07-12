@@ -1,0 +1,158 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+url=$(printf '%s' "$request" | jq -er '.url')
+source_root=$(printf '%s' "$request" | jq -er '.source_root')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+
+[ "$protocol" = "sandwalk.fetch.v1" ] || {
+  printf '%s\n' 'unsupported fetch protocol' >&2
+  exit 64
+}
+
+printf '%s' "$url" | grep -Eq '^file://' || {
+  printf '%s\n' 'docling fetch requires a file locator' >&2
+  exit 64
+}
+
+[ -d "$source_root" ] || {
+  printf '%s\n' 'local source root must be an existing directory' >&2
+  exit 66
+}
+
+encoded_source_path=${url#file://}
+source_path=$(
+  printf '%b' "$(printf '%s' "$encoded_source_path" | sed 's/%/\\x/g')"
+)
+source_basename=$(basename "$source_path")
+canonical_root=$(realpath "$source_root")
+canonical_source=$(realpath "$source_path")
+
+[ -f "$canonical_source" ] || {
+  printf '%s\n' 'local source must be a regular file' >&2
+  exit 66
+}
+
+case "$canonical_source" in
+  "$canonical_root"/*) ;;
+  *)
+    printf '%s\n' 'local source resolves outside its authorized root' >&2
+    exit 77
+    ;;
+esac
+
+mkdir -p "$output_directory"
+original_directory="$output_directory/original"
+original="$original_directory/$source_basename"
+document="$output_directory/document.md"
+structure="$output_directory/document.json"
+quality="$output_directory/quality.json"
+config="$output_directory/docling-profile.json"
+manifest="$output_directory/manifest.json"
+manifest_temporary="$output_directory/manifest.json.tmp"
+
+cleanup() {
+  rm -f "$manifest_temporary" "$config"
+}
+trap cleanup EXIT HUP INT TERM
+rm -f "$manifest" "$manifest_temporary"
+
+# Copy first so extraction and hashes observe one immutable input even if the
+# user's source file changes during adapter execution.
+mkdir -p "$original_directory"
+cp -P "$canonical_source" "$original"
+[ ! -L "$original" ] && [ -f "$original" ] || {
+  printf '%s\n' 'local source changed to an unsafe file during import' >&2
+  exit 77
+}
+
+printf '%s\n' \
+  '{"protocol":"sandwalk.docling-profile.v1","pipeline":"standard","enable_remote_services":false,"ocr":true,"table_mode":"accurate","generate_parsed_pages":true,"heading_hierarchy":{"enabled":true,"use_bookmarks":true,"use_numbering":true,"use_style":true,"bookmark_match_threshold":0.95,"max_level":6},"enrichments":{"code":false,"formula":false,"picture_classification":false,"picture_description":false,"chart":false}}' \
+  >"$config"
+
+sandwalk-docling-normalize \
+  --source "$original" \
+  --document "$document" \
+  --structure "$structure" \
+  --quality "$quality" \
+  --config "$config"
+
+[ -s "$document" ] || {
+  printf '%s\n' 'docling produced an empty Markdown document' >&2
+  exit 65
+}
+jq -e 'type == "object"' "$structure" >/dev/null
+jq -e '
+  .protocol == "sandwalk.docling-quality.v1"
+  and (.heading_count | type == "number" and . > 0)
+  and (.top_level_bookmarks.coverage | type == "number")
+' "$quality" >/dev/null
+mq "$document" '.tree' >/dev/null
+
+input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
+markdown_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
+structure_sha256=$(shasum -a 256 "$structure" | awk '{print $1}')
+quality_sha256=$(shasum -a 256 "$quality" | awk '{print $1}')
+configuration_sha256=$(shasum -a 256 "$config" | awk '{print $1}')
+docling_version=$(sandwalk-docling-normalize --version | sed -n '1{s/"/\\"/g;p;}')
+mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
+
+jq -n \
+  --arg protocol "sandwalk.fetch-manifest.v1" \
+  --arg adapter "docling" \
+  --arg requested_url "$url" \
+  --arg final_url "$url" \
+  --arg source_root "$canonical_root" \
+  --arg source_path "$canonical_source" \
+  --arg source_basename "$source_basename" \
+  --arg input_sha256 "$input_sha256" \
+  --arg markdown_sha256 "$markdown_sha256" \
+  --arg structure_sha256 "$structure_sha256" \
+  --arg quality_sha256 "$quality_sha256" \
+  --arg configuration_sha256 "$configuration_sha256" \
+  --arg docling_version "$docling_version" \
+  --arg mq_version "$mq_version" \
+  '{
+    protocol: $protocol,
+    adapter: {
+      name: $adapter,
+      protocol_version: 1,
+      implementation_version: $docling_version,
+      extraction_profile: "standard-native-hierarchy-bookmark-095-v2",
+      mq_version: $mq_version
+    },
+    requested_url: $requested_url,
+    final_url: $final_url,
+    document_media_type: "text/markdown",
+    local: {
+      source_root: $source_root,
+      canonical_path: $source_path
+    },
+    hashes: {
+      input_sha256: $input_sha256,
+      normalized_document_sha256: $markdown_sha256,
+      structure_sha256: $structure_sha256,
+      quality_sha256: $quality_sha256,
+      sanitized_configuration_sha256: $configuration_sha256
+    },
+    artifacts: {
+      document: "document.md",
+      structure: "document.json",
+      quality: "quality.json",
+      original: ("original/" + $source_basename)
+    },
+    queryability_check: {
+      tool: "mq",
+      query: ".tree",
+      ok: true
+    }
+  }' >"$manifest_temporary"
+
+mv "$manifest_temporary" "$manifest"
+
+jq -nc \
+  --arg protocol "sandwalk.fetch-result.v1" \
+  --arg manifest "$manifest" \
+  '{protocol: $protocol, manifest: $manifest}'

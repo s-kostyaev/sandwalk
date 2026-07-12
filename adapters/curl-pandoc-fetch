@@ -2,8 +2,13 @@
 set -eu
 
 lynx_user_agent='Lynx/2.9.2 libwww-FM/2.14 SSL-MM/1.4.1 GNUTLS/3.8.3'
-accept_header='text/markdown, text/html;q=0.9'
-negotiation_profile='server-markdown-with-html-fallback-v1'
+web_accept_header='text/markdown, text/html;q=0.9, application/pdf;q=0.8'
+html_accept_header='text/html'
+pdf_accept_header='application/pdf'
+negotiation_profile='server-markdown-html-or-pdf-v2'
+docling_profile='standard-native-hierarchy-bookmark-095-v2'
+arxiv_profile='arxiv-latexml-article-gfm-v1'
+
 request=$(cat)
 protocol=$(printf '%s' "$request" | jq -er '.protocol')
 url=$(printf '%s' "$request" | jq -er '.url')
@@ -28,104 +33,546 @@ mkdir -p "$output_directory"
 original="$output_directory/original"
 headers="$output_directory/headers.txt"
 document="$output_directory/document.md"
+structure="$output_directory/document.json"
+quality="$output_directory/quality.json"
 manifest="$output_directory/manifest.json"
 manifest_temporary="$output_directory/manifest.json.tmp"
+docling_config="$output_directory/docling-profile.json"
+
+cleanup() {
+  rm -f "$manifest_temporary" "$docling_config"
+}
+trap cleanup EXIT HUP INT TERM
 rm -f "$manifest" "$manifest_temporary"
 
-curl_metadata=$(
+download() {
+  accept=$1
+  download_url=$2
+  output=$3
+  header_output=$4
   curl -L -sS --fail-with-body \
+    --connect-timeout 30 \
+    --max-time 120 \
     --user-agent "$lynx_user_agent" \
-    --header "Accept: $accept_header" \
-    --dump-header "$headers" \
-    --output "$original" \
+    --header "Accept: $accept" \
+    --dump-header "$header_output" \
+    --output "$output" \
     --write-out '%{json}' \
-    "$url"
-)
-
-content_type=$(printf '%s' "$curl_metadata" | jq -r '.content_type // ""')
-normalized_content_type=$(printf '%s' "$content_type" | tr '[:upper:]' '[:lower:]')
-case "$normalized_content_type" in
-  text/markdown|text/markdown\;*)
-    extraction_profile='server-markdown-direct-v1'
-    cp "$original" "$document"
-    ;;
-  *)
-    extraction_profile='html-to-gfm-no-raw-html-v1'
-    pandoc --from=html --to=gfm-raw_html --wrap=none "$original" >"$document"
-    ;;
-esac
-
-[ -s "$document" ] || {
-  printf '%s\n' 'fetch adapter produced an empty Markdown document' >&2
-  exit 65
+    "$download_url"
 }
 
-mq "$document" '.tree' >/dev/null
+arxiv_id_for_url() {
+  candidate=$(
+    printf '%s' "$1" |
+      sed -nE \
+        's#^https?://(www\.)?arxiv\.org/(abs|pdf|html)/([^?#]+)([?#].*)?$#\3#p'
+  )
+  candidate=${candidate%/}
+  candidate=${candidate%.pdf}
+  if printf '%s' "$candidate" |
+       grep -Eq '^([0-9]{4}\.[0-9]{4,5}|[A-Za-z][A-Za-z0-9.-]*/[0-9]{7})(v[0-9]+)?$'
+  then
+    printf '%s\n' "$candidate"
+  fi
+}
 
-input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
-markdown_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
-configuration_sha256=$(
-  printf '%s\n%s\n%s\n' \
-    "$lynx_user_agent" \
-    "$accept_header" \
-    "$negotiation_profile" |
-    shasum -a 256 |
-    awk '{print $1}'
-)
-curl_version=$(curl --version | sed -n '1{s/"/\\"/g;p;}')
-pandoc_version=$(pandoc --version | sed -n '1{s/"/\\"/g;p;}')
-mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
+without_arxiv_version() {
+  printf '%s' "$1" | sed -E 's/v[0-9]+$//'
+}
 
-jq -n \
-  --arg protocol "sandwalk.fetch-manifest.v1" \
-  --arg adapter "curl-pandoc" \
-  --arg requested_url "$url" \
-  --arg final_url "$(printf '%s' "$curl_metadata" | jq -r '.url_effective')" \
-  --arg input_sha256 "$input_sha256" \
-  --arg markdown_sha256 "$markdown_sha256" \
-  --arg configuration_sha256 "$configuration_sha256" \
-  --arg extraction_profile "$extraction_profile" \
-  --arg request_accept "$accept_header" \
-  --arg curl_version "$curl_version" \
-  --arg pandoc_version "$pandoc_version" \
-  --arg mq_version "$mq_version" \
-  --argjson status "$(printf '%s' "$curl_metadata" | jq '.http_code')" \
-  --argjson redirects "$(printf '%s' "$curl_metadata" | jq '.num_redirects')" \
-  --arg content_type "$content_type" \
-  '{
-    protocol: $protocol,
-    adapter: {
-      name: $adapter,
-      protocol_version: 1,
-      extraction_profile: $extraction_profile,
-      curl_version: $curl_version,
-      pandoc_version: $pandoc_version,
-      mq_version: $mq_version
-    },
-    requested_url: $requested_url,
-    final_url: $final_url,
-    redirect_count: $redirects,
-    http: {
-      status: $status,
-      content_type: $content_type,
-      request_accept: $request_accept,
-      headers_artifact: "headers.txt"
-    },
-    hashes: {
-      input_sha256: $input_sha256,
-      normalized_markdown_sha256: $markdown_sha256,
-      sanitized_configuration_sha256: $configuration_sha256
-    },
-    artifacts: {
-      document: "document.md",
-      original: "original"
-    },
-    queryability_check: {
-      tool: "mq",
-      query: ".tree",
-      ok: true
+resolved_arxiv_id() {
+  requested_id=$1
+  html_path=$2
+  case "$requested_id" in
+    *v[0-9]) printf '%s\n' "$requested_id"; return ;;
+    *v[0-9][0-9]*) printf '%s\n' "$requested_id"; return ;;
+  esac
+  requested_base=$(without_arxiv_version "$requested_id")
+  candidates=$(
+    grep -Eo '/(abs|html|pdf)/[^"?#<> ]+v[0-9]+' "$html_path" 2>/dev/null |
+      sed -E 's#^/(abs|html|pdf)/##' || true
+  )
+  for candidate in $candidates; do
+    if [ "$(without_arxiv_version "$candidate")" = "$requested_base" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf '%s\n' "$requested_id"
+}
+
+write_docling_profile() {
+  printf '%s\n' \
+    '{"protocol":"sandwalk.docling-profile.v1","pipeline":"standard","enable_remote_services":false,"ocr":true,"table_mode":"accurate","generate_parsed_pages":true,"heading_hierarchy":{"enabled":true,"use_bookmarks":true,"use_numbering":true,"use_style":true,"bookmark_match_threshold":0.95,"max_level":6},"enrichments":{"code":false,"formula":false,"picture_classification":false,"picture_description":false,"chart":false}}' \
+    >"$docling_config"
+}
+
+normalize_pdf() {
+  pdf_input=$1
+  write_docling_profile
+  sandwalk-docling-normalize \
+    --source "$pdf_input" \
+    --document "$document" \
+    --structure "$structure" \
+    --quality "$quality" \
+    --config "$docling_config"
+  [ -s "$document" ] || {
+    printf '%s\n' 'Docling produced an empty Markdown document' >&2
+    exit 65
+  }
+  jq -e 'type == "object"' "$structure" >/dev/null
+  jq -e '
+    .protocol == "sandwalk.docling-quality.v1"
+    and (.heading_count | type == "number" and . > 0)
+    and (.top_level_bookmarks.coverage | type == "number")
+  ' "$quality" >/dev/null
+  mq "$document" '.tree' >/dev/null
+}
+
+sha256_file() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+arxiv_id=$(arxiv_id_for_url "$url")
+if [ -n "$arxiv_id" ]; then
+  html_url="https://arxiv.org/html/$arxiv_id"
+  html_headers="$output_directory/html-headers.txt"
+  html_error="$output_directory/html-error.txt"
+  html_metadata=
+  html_downloaded=false
+  if html_metadata=$(
+       download "$html_accept_header" "$html_url" "$original" "$html_headers" \
+         2>"$html_error"
+     )
+  then
+    html_content_type=$(printf '%s' "$html_metadata" | jq -r '.content_type // ""')
+    case "$(printf '%s' "$html_content_type" | tr '[:upper:]' '[:lower:]')" in
+      text/html|text/html\;*) html_downloaded=true ;;
+    esac
+  fi
+  [ -s "$html_error" ] || rm -f "$html_error"
+
+  if [ "$html_downloaded" = true ]; then
+    resolved_id=$(resolved_arxiv_id "$arxiv_id" "$original")
+  else
+    resolved_id=$arxiv_id
+  fi
+  pdf_url="https://arxiv.org/pdf/$resolved_id"
+  pdf_artifact="$output_directory/source.pdf"
+  pdf_headers="$output_directory/pdf-headers.txt"
+  pdf_metadata=$(
+    download "$pdf_accept_header" "$pdf_url" "$pdf_artifact" "$pdf_headers"
+  )
+  [ "$(dd if="$pdf_artifact" bs=5 count=1 2>/dev/null)" = '%PDF-' ] || {
+    printf '%s\n' 'arXiv PDF response is not a PDF document' >&2
+    exit 65
+  }
+
+  html_selected=false
+  latexml_error_count=0
+  if [ "$html_downloaded" = true ]; then
+    mkdir -p "$output_directory/images"
+    adapter_directory=$(
+      CDPATH='' cd "$(dirname "$0")"
+      pwd
+    )
+    filter="$adapter_directory/arxiv-html-filter.lua"
+    if [ ! -f "$filter" ]; then
+      filter="$adapter_directory/sandwalk-arxiv-html-filter.lua"
+    fi
+    [ -f "$filter" ] || {
+      printf '%s\n' 'installed arXiv Pandoc filter was not found' >&2
+      exit 66
     }
-  }' >"$manifest_temporary"
+    if (
+      cd "$output_directory"
+      pandoc \
+        --from=html \
+        --to=gfm-raw_html \
+        --wrap=none \
+        --lua-filter="$filter" \
+        --metadata=arxiv-origin:https://arxiv.org \
+        --metadata=arxiv-base-url:https://arxiv.org/html/ \
+        --extract-media=. \
+        --output=document.md \
+        original
+    )
+    then
+      heading_count=$(grep -Ec '^#{1,6}[[:space:]]' "$document" || true)
+      nonblank_count=$(grep -c '[^[:space:]]' "$document" || true)
+      title_present=false
+      if grep -Eq '^#[[:space:]]|^=+$' "$document"; then
+        title_present=true
+      fi
+      if [ "$title_present" = true ] &&
+         [ "$heading_count" -ge 2 ] &&
+         [ "$nonblank_count" -ge 10 ] &&
+         mq "$document" '.tree' >/dev/null
+      then
+        html_selected=true
+      fi
+    fi
+    latexml_error_count=$(
+      grep -Eoc 'class="[^"]*ltx_(ERROR|fatal)' "$original" || true
+    )
+  fi
+
+  canonical_url="https://arxiv.org/abs/$resolved_id"
+  resolved_html_url="https://arxiv.org/html/$resolved_id"
+  pdf_sha256=$(sha256_file "$pdf_artifact")
+  pdf_content_type=$(printf '%s' "$pdf_metadata" | jq -r '.content_type // ""')
+  pdf_status=$(printf '%s' "$pdf_metadata" | jq '.http_code')
+  pdf_final_url=$(printf '%s' "$pdf_metadata" | jq -r '.url_effective')
+  pdf_redirects=$(printf '%s' "$pdf_metadata" | jq '.num_redirects')
+
+  if [ "$html_selected" = true ]; then
+    extraction_profile=$arxiv_profile
+    input_sha256=$(sha256_file "$original")
+    markdown_sha256=$(sha256_file "$document")
+    filter_sha256=$(sha256_file "$filter")
+    configuration_sha256=$(
+      printf '%s\n%s\n%s\n%s\n' \
+        "$lynx_user_agent" \
+        "$html_accept_header" \
+        "$arxiv_profile" \
+        "$filter_sha256" |
+        shasum -a 256 |
+        awk '{print $1}'
+    )
+    curl_version=$(curl --version | sed -n '1{s/"/\\"/g;p;}')
+    pandoc_version=$(pandoc --version | sed -n '1{s/"/\\"/g;p;}')
+    mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
+    html_status=$(printf '%s' "$html_metadata" | jq '.http_code')
+    html_redirects=$(printf '%s' "$html_metadata" | jq '.num_redirects')
+    jq -n \
+      --arg protocol "sandwalk.fetch-manifest.v1" \
+      --arg adapter "arxiv-html" \
+      --arg requested_url "$url" \
+      --arg final_url "$canonical_url" \
+      --arg arxiv_id "$resolved_id" \
+      --arg html_url "$resolved_html_url" \
+      --arg pdf_url "$pdf_final_url" \
+      --arg input_sha256 "$input_sha256" \
+      --arg pdf_sha256 "$pdf_sha256" \
+      --arg markdown_sha256 "$markdown_sha256" \
+      --arg configuration_sha256 "$configuration_sha256" \
+      --arg filter_sha256 "$filter_sha256" \
+      --arg extraction_profile "$extraction_profile" \
+      --arg curl_version "$curl_version" \
+      --arg pandoc_version "$pandoc_version" \
+      --arg mq_version "$mq_version" \
+      --arg html_content_type "$html_content_type" \
+      --arg pdf_content_type "$pdf_content_type" \
+      --argjson html_status "$html_status" \
+      --argjson html_redirects "$html_redirects" \
+      --argjson pdf_status "$pdf_status" \
+      --argjson pdf_redirects "$pdf_redirects" \
+      --argjson latexml_error_count "$latexml_error_count" \
+      '{
+        protocol: $protocol,
+        adapter: {
+          name: $adapter,
+          protocol_version: 1,
+          extraction_profile: $extraction_profile,
+          curl_version: $curl_version,
+          pandoc_version: $pandoc_version,
+          mq_version: $mq_version,
+          filter_sha256: $filter_sha256
+        },
+        requested_url: $requested_url,
+        final_url: $final_url,
+        document_media_type: "text/markdown",
+        arxiv: {
+          id: $arxiv_id,
+          normalization_source: "html",
+          html_url: $html_url,
+          pdf_url: $pdf_url,
+          latexml_error_count: $latexml_error_count
+        },
+        redirect_count: $html_redirects,
+        http: {
+          status: $html_status,
+          content_type: $html_content_type,
+          request_accept: "text/html",
+          headers_artifact: "html-headers.txt"
+        },
+        pdf_http: {
+          status: $pdf_status,
+          content_type: $pdf_content_type,
+          redirect_count: $pdf_redirects,
+          request_accept: "application/pdf",
+          headers_artifact: "pdf-headers.txt"
+        },
+        hashes: {
+          input_sha256: $input_sha256,
+          pdf_sha256: $pdf_sha256,
+          normalized_document_sha256: $markdown_sha256,
+          sanitized_configuration_sha256: $configuration_sha256
+        },
+        artifacts: {
+          document: "document.md",
+          original: "original",
+          pdf: "source.pdf",
+          images: "images"
+        },
+        queryability_check: {
+          tool: "mq",
+          query: ".tree",
+          ok: true
+        }
+      }' >"$manifest_temporary"
+  else
+    if [ -f "$original" ]; then
+      mv "$original" "$output_directory/html-original"
+    fi
+    rm -rf "$output_directory/images"
+    normalize_pdf "$pdf_artifact"
+    input_sha256=$(sha256_file "$pdf_artifact")
+    markdown_sha256=$(sha256_file "$document")
+    structure_sha256=$(sha256_file "$structure")
+    quality_sha256=$(sha256_file "$quality")
+    configuration_sha256=$(sha256_file "$docling_config")
+    docling_version=$(sandwalk-docling-normalize --version | sed -n '1{s/"/\\"/g;p;}')
+    mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
+    jq -n \
+      --arg protocol "sandwalk.fetch-manifest.v1" \
+      --arg adapter "arxiv-pdf-docling" \
+      --arg requested_url "$url" \
+      --arg final_url "$canonical_url" \
+      --arg arxiv_id "$resolved_id" \
+      --arg html_url "$resolved_html_url" \
+      --arg pdf_url "$pdf_final_url" \
+      --arg input_sha256 "$input_sha256" \
+      --arg pdf_sha256 "$pdf_sha256" \
+      --arg markdown_sha256 "$markdown_sha256" \
+      --arg structure_sha256 "$structure_sha256" \
+      --arg quality_sha256 "$quality_sha256" \
+      --arg configuration_sha256 "$configuration_sha256" \
+      --arg docling_version "$docling_version" \
+      --arg mq_version "$mq_version" \
+      --arg pdf_content_type "$pdf_content_type" \
+      --argjson pdf_status "$pdf_status" \
+      --argjson pdf_redirects "$pdf_redirects" \
+      '{
+        protocol: $protocol,
+        adapter: {
+          name: $adapter,
+          protocol_version: 1,
+          implementation_version: $docling_version,
+          extraction_profile: "standard-native-hierarchy-bookmark-095-v2",
+          mq_version: $mq_version
+        },
+        requested_url: $requested_url,
+        final_url: $final_url,
+        document_media_type: "text/markdown",
+        arxiv: {
+          id: $arxiv_id,
+          normalization_source: "pdf",
+          html_url: $html_url,
+          pdf_url: $pdf_url,
+          fallback_reason: "html-unavailable-or-quality-gate"
+        },
+        redirect_count: $pdf_redirects,
+        http: {
+          status: $pdf_status,
+          content_type: $pdf_content_type,
+          request_accept: "application/pdf",
+          headers_artifact: "pdf-headers.txt"
+        },
+        hashes: {
+          input_sha256: $input_sha256,
+          pdf_sha256: $pdf_sha256,
+          normalized_document_sha256: $markdown_sha256,
+          structure_sha256: $structure_sha256,
+          quality_sha256: $quality_sha256,
+          sanitized_configuration_sha256: $configuration_sha256
+        },
+        artifacts: {
+          document: "document.md",
+          structure: "document.json",
+          quality: "quality.json",
+          original: "source.pdf",
+          pdf: "source.pdf"
+        },
+        queryability_check: {
+          tool: "mq",
+          query: ".tree",
+          ok: true
+        }
+      }' >"$manifest_temporary"
+  fi
+else
+  curl_metadata=$(download "$web_accept_header" "$url" "$original" "$headers")
+  content_type=$(printf '%s' "$curl_metadata" | jq -r '.content_type // ""')
+  normalized_content_type=$(printf '%s' "$content_type" | tr '[:upper:]' '[:lower:]')
+  pdf_magic=false
+  if [ "$(dd if="$original" bs=5 count=1 2>/dev/null)" = '%PDF-' ]; then
+    pdf_magic=true
+  fi
+
+  if [ "$pdf_magic" = true ]; then
+    mv "$original" "$output_directory/source.pdf"
+    original="$output_directory/source.pdf"
+    extraction_profile=$docling_profile
+    normalize_pdf "$original"
+  else
+    case "$normalized_content_type" in
+      text/markdown|text/markdown\;*)
+        extraction_profile='server-markdown-direct-v1'
+        cp "$original" "$document"
+        ;;
+      text/html|text/html\;*|application/xhtml+xml|application/xhtml+xml\;*)
+        extraction_profile='html-to-gfm-no-raw-html-v1'
+        pandoc --from=html --to=gfm-raw_html --wrap=none "$original" >"$document"
+        ;;
+      application/pdf|application/pdf\;*)
+        printf '%s\n' 'PDF response did not contain a PDF document' >&2
+        exit 65
+        ;;
+      *)
+        printf 'unsupported remote content type: %s\n' "$content_type" >&2
+        exit 65
+        ;;
+    esac
+    [ -s "$document" ] || {
+      printf '%s\n' 'fetch adapter produced an empty Markdown document' >&2
+      exit 65
+    }
+    mq "$document" '.tree' >/dev/null
+  fi
+
+  input_sha256=$(sha256_file "$original")
+  markdown_sha256=$(sha256_file "$document")
+  curl_version=$(curl --version | sed -n '1{s/"/\\"/g;p;}')
+  mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
+  final_url=$(printf '%s' "$curl_metadata" | jq -r '.url_effective')
+  status=$(printf '%s' "$curl_metadata" | jq '.http_code')
+  redirects=$(printf '%s' "$curl_metadata" | jq '.num_redirects')
+
+  if [ "$pdf_magic" = true ]; then
+    structure_sha256=$(sha256_file "$structure")
+    quality_sha256=$(sha256_file "$quality")
+    configuration_sha256=$(sha256_file "$docling_config")
+    docling_version=$(sandwalk-docling-normalize --version | sed -n '1{s/"/\\"/g;p;}')
+    jq -n \
+      --arg protocol "sandwalk.fetch-manifest.v1" \
+      --arg adapter "curl-docling" \
+      --arg requested_url "$url" \
+      --arg final_url "$final_url" \
+      --arg input_sha256 "$input_sha256" \
+      --arg markdown_sha256 "$markdown_sha256" \
+      --arg structure_sha256 "$structure_sha256" \
+      --arg quality_sha256 "$quality_sha256" \
+      --arg configuration_sha256 "$configuration_sha256" \
+      --arg extraction_profile "$extraction_profile" \
+      --arg curl_version "$curl_version" \
+      --arg docling_version "$docling_version" \
+      --arg mq_version "$mq_version" \
+      --arg content_type "$content_type" \
+      --arg original_artifact "source.pdf" \
+      --argjson status "$status" \
+      --argjson redirects "$redirects" \
+      '{
+        protocol: $protocol,
+        adapter: {
+          name: $adapter,
+          protocol_version: 1,
+          implementation_version: $docling_version,
+          extraction_profile: $extraction_profile,
+          curl_version: $curl_version,
+          mq_version: $mq_version
+        },
+        requested_url: $requested_url,
+        final_url: $final_url,
+        document_media_type: "text/markdown",
+        redirect_count: $redirects,
+        http: {
+          status: $status,
+          content_type: $content_type,
+          request_accept: "text/markdown, text/html;q=0.9, application/pdf;q=0.8",
+          headers_artifact: "headers.txt"
+        },
+        hashes: {
+          input_sha256: $input_sha256,
+          normalized_document_sha256: $markdown_sha256,
+          structure_sha256: $structure_sha256,
+          quality_sha256: $quality_sha256,
+          sanitized_configuration_sha256: $configuration_sha256
+        },
+        artifacts: {
+          document: "document.md",
+          structure: "document.json",
+          quality: "quality.json",
+          original: $original_artifact
+        },
+        queryability_check: {
+          tool: "mq",
+          query: ".tree",
+          ok: true
+        }
+      }' >"$manifest_temporary"
+  else
+    configuration_sha256=$(
+      printf '%s\n%s\n%s\n' \
+        "$lynx_user_agent" \
+        "$web_accept_header" \
+        "$negotiation_profile" |
+        shasum -a 256 |
+        awk '{print $1}'
+    )
+    pandoc_version=$(pandoc --version | sed -n '1{s/"/\\"/g;p;}')
+    jq -n \
+      --arg protocol "sandwalk.fetch-manifest.v1" \
+      --arg adapter "curl-pandoc" \
+      --arg requested_url "$url" \
+      --arg final_url "$final_url" \
+      --arg input_sha256 "$input_sha256" \
+      --arg markdown_sha256 "$markdown_sha256" \
+      --arg configuration_sha256 "$configuration_sha256" \
+      --arg extraction_profile "$extraction_profile" \
+      --arg curl_version "$curl_version" \
+      --arg pandoc_version "$pandoc_version" \
+      --arg mq_version "$mq_version" \
+      --arg content_type "$content_type" \
+      --argjson status "$status" \
+      --argjson redirects "$redirects" \
+      '{
+        protocol: $protocol,
+        adapter: {
+          name: $adapter,
+          protocol_version: 1,
+          extraction_profile: $extraction_profile,
+          curl_version: $curl_version,
+          pandoc_version: $pandoc_version,
+          mq_version: $mq_version
+        },
+        requested_url: $requested_url,
+        final_url: $final_url,
+        document_media_type: "text/markdown",
+        redirect_count: $redirects,
+        http: {
+          status: $status,
+          content_type: $content_type,
+          request_accept: "text/markdown, text/html;q=0.9, application/pdf;q=0.8",
+          headers_artifact: "headers.txt"
+        },
+        hashes: {
+          input_sha256: $input_sha256,
+          normalized_document_sha256: $markdown_sha256,
+          sanitized_configuration_sha256: $configuration_sha256
+        },
+        artifacts: {
+          document: "document.md",
+          original: "original"
+        },
+        queryability_check: {
+          tool: "mq",
+          query: ".tree",
+          ok: true
+        }
+      }' >"$manifest_temporary"
+  fi
+fi
 
 mv "$manifest_temporary" "$manifest"
 

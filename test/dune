@@ -7,6 +7,16 @@
   %{bin:sandwalk}
   inspect_workspace.exe
   ../adapters/ddgr-search
+  ../adapters/ugrep-search
+  ../adapters/web-fetch
   ../adapters/curl-pandoc-fetch
+  ../adapters/playwright-fetch
+  ../adapters/playwright-render
+  ../adapters/arxiv-html-filter.lua
+  ../adapters/file-fetch
+  ../adapters/docling-fetch
+  ../adapters/youtube-fetch
+  ../adapters/youtube-normalize
+  ../adapters/xberg-fetch
   ../adapters/pandoc-pdf-export
   (source_tree fakes)))

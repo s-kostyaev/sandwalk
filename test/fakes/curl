@@ -2,6 +2,8 @@
 output=
 headers=
 write_out=false
+accept=
+url=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -18,7 +20,10 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --header)
-      [ "$2" = 'Accept: text/markdown, text/html;q=0.9' ]
+      accept=${2#Accept: }
+      shift 2
+      ;;
+    --connect-timeout|--max-time)
       shift 2
       ;;
     --write-out)
@@ -33,12 +38,83 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
+      url=$1
       shift
       ;;
   esac
 done
 
-if [ "${CURL_FAKE_MARKDOWN:-}" = 1 ]; then
+if [ -n "${CURL_TEST_LOG:-}" ]; then
+  printf '%s|%s\n' "$url" "$accept" >>"$CURL_TEST_LOG"
+fi
+
+case "$accept" in
+  'text/markdown, text/html;q=0.9, application/pdf;q=0.8'|\
+  'text/html'|\
+  'application/pdf') ;;
+  *) printf 'unexpected Accept header: %s\n' "$accept" >&2; exit 64 ;;
+esac
+
+if [ "${CURL_FORCE_FAILURE:-}" = 1 ]; then
+  printf '%s\n' 'simulated web transport failure' >&2
+  exit 22
+elif [ "${CURL_FAKE_PDF_FAILURE:-}" = 1 ]; then
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n\r\n' >"$headers"
+  printf '%s\n' 'simulated PDF normalization failure' >&2
+  exit 22
+elif [ "${CURL_FAKE_CHALLENGE:-}" = 1 ]; then
+  cat >"$output" <<'EOF'
+<!doctype html><html><body><h2>Your current User-Agent appears to be from an automated process</h2></body></html>
+EOF
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n' >"$headers"
+  [ "$write_out" = true ] &&
+    printf '%s' '{"url_effective":"https://example.test/challenge","http_code":200,"num_redirects":0,"content_type":"text/html"}'
+elif [ "${CURL_FAKE_DYNAMIC_SHELL:-}" = 1 ]; then
+  cat >"$output" <<'EOF'
+<!doctype html><html><body><div id="root"></div><script src="app.js"></script></body></html>
+EOF
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n' >"$headers"
+  [ "$write_out" = true ] &&
+    printf '%s' '{"url_effective":"https://example.test/application","http_code":200,"num_redirects":0,"content_type":"text/html"}'
+elif [ "${CURL_FAKE_ARXIV:-}" = 1 ]; then
+  case "$url" in
+    https://arxiv.org/html/*)
+      if [ "${CURL_FAKE_ARXIV_HTML_FAILURE:-}" = 1 ]; then
+        printf '%s\n' 'arXiv HTML unavailable' >&2
+        exit 22
+      fi
+      cat >"$output" <<'EOF'
+<!doctype html>
+<html><body><div class="ltx_page_content">
+<h1 class="ltx_title_document">Fetched paper</h1>
+<a href="/abs/2402.07630v3">Abstract</a>
+<h2>Introduction</h2>
+<p>One.</p><p>Two.</p><p>Three.</p><p>Four.</p>
+<p>Five.</p><p>Six.</p><p>Seven.</p><p>Eight.</p>
+</div></body></html>
+EOF
+      printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n' >"$headers"
+      [ "$write_out" = true ] &&
+        printf '%s' '{"url_effective":"https://arxiv.org/html/2402.07630v3","http_code":200,"num_redirects":0,"content_type":"text/html; charset=utf-8"}'
+      ;;
+    https://arxiv.org/pdf/*)
+      if [ "${CURL_FAKE_ARXIV_PDF_FAILURE:-}" = 1 ]; then
+        printf '%s\n' 'arXiv PDF unavailable' >&2
+        exit 22
+      fi
+      printf '%s\n' '%PDF-1.7 fake arXiv PDF' >"$output"
+      printf 'HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n\r\n' >"$headers"
+      [ "$write_out" = true ] &&
+        printf '%s' '{"url_effective":"https://arxiv.org/pdf/2402.07630v3","http_code":200,"num_redirects":0,"content_type":"application/pdf"}'
+      ;;
+    *) printf 'unexpected arXiv URL: %s\n' "$url" >&2; exit 64 ;;
+  esac
+elif [ "${CURL_FAKE_PDF:-}" = 1 ]; then
+  printf '%s\n' '%PDF-1.7 fake remote PDF' >"$output"
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n\r\n' >"$headers"
+  [ "$write_out" = true ] &&
+    printf '%s' '{"url_effective":"https://example.test/paper.pdf","http_code":200,"num_redirects":0,"content_type":"application/pdf"}'
+elif [ "${CURL_FAKE_MARKDOWN:-}" = 1 ]; then
   cat >"$output" <<'EOF'
 ---
 title: Fetched title

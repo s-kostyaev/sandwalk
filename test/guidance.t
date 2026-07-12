@@ -9,7 +9,10 @@
   {"ok":true,"result":{"code":"WORKSPACE_IO_ERROR","explanation":"Sandwalk could not create or update the selected workspace directory.","repair":"Choose a writable `--directory-prefix` or set `SANDWALK_DIRECTORY_PREFIX` to one, then retry."}}
 
   $ sandwalk explain SEARCH_ADAPTER_FAILED
-  {"ok":true,"result":{"code":"SEARCH_ADAPTER_FAILED","explanation":"The search adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify `sandwalk-search-ddgr` and `ddgr` are on PATH, the temporary directory exists, and DuckDuckGo is allowed by the network sandbox."}}
+  {"ok":true,"result":{"code":"SEARCH_ADAPTER_FAILED","explanation":"The search adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify the selected adapter and its search tool (`ddgr` or `ugrep+`) are on PATH and allowed by the filesystem or network sandbox."}}
+
+  $ sandwalk explain FETCH_ADAPTER_FAILED
+  {"ok":true,"result":{"code":"FETCH_ADAPTER_FAILED","explanation":"The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify the selected adapter and its normalizer are on PATH. The default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root."}}
 
   $ sandwalk explain INVALID_WORK_PACKET
   {"ok":true,"result":{"code":"INVALID_WORK_PACKET","explanation":"The current work packet is malformed, unsupported, applied from the wrong path, or has modified fixed context.","repair":"Run `sandwalk continue --slug <slug>` once, edit only `editable`, leave `integrity_md5` unchanged, and run the exact returned `apply` command."}}
@@ -24,7 +27,7 @@
   {"ok":true,"result":{"code":"EXPORT_INPUT_STALE","explanation":"The final Markdown report or bibliography no longer matches the hashes recorded at finalization.","repair":"Do not edit finalized projections. Restore the exact finalized `report.md` and `sources.md` before exporting."}}
 
   $ sandwalk init --slug guidance-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":22}}
+  {"ok":true,"result":{"slug":"guidance-test","phase":"initialized","schema_version":24}}
 
   $ sandwalk next --slug guidance-test --directory-prefix "work spaces"
   {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}

@@ -1,6 +1,6 @@
 ---
 name: deep-research
-description: Conduct durable, source-grounded research with Sandwalk, including planning, parallel claims, immutable web snapshots, exact excerpts, reviewed findings, citation-safe drafting, recovery, and finalization. Use for research tasks that need auditable provenance, interruption recovery, independent evidence review, or a reviewed report rather than an informal web summary.
+description: Conduct durable, source-grounded research with Sandwalk, including planning, parallel claims, immutable web or local-document snapshots, exact excerpts, reviewed findings, citation-safe drafting, recovery, and finalization. Use for research tasks that need auditable provenance, interruption recovery, independent evidence review, or a reviewed report rather than an informal summary.
 ---
 
 # Deep Research
@@ -65,37 +65,61 @@ packet. Sandwalk will durably skip it and derive another action. Never create an
 excerpt or finding from a bot challenge, access-denied page, irrelevant result,
 or content that does not address the packet's research objective and step.
 
-Search packets contain an editable query. Confirm that it names the research
-subject and current step goal; refine it before apply when it is ambiguous.
+Search packets contain an editable query and an initially empty
+`editable.source_root`. Confirm that the query names the research subject and
+current step goal. When the user authorized a local document directory, put
+that readable directory in `source_root`; otherwise leave it empty.
 
 ## Exclusive retrieval
 
 While this skill is active, Sandwalk is the only permitted path for every
-network search and fetch, including reconnaissance. Do not load or invoke
+network or local-document search and fetch, including reconnaissance. Do not load or invoke
 another web-search, browsing, or fetch skill. Do not call `ddgr`, `curl`,
-`wget`, a browser, or an HTTP client directly. These programs may run only
-behind a Sandwalk adapter.
+`wget`, `yt-dlp`, `ug`, `ugrep`, `mq`, Xberg, Docling, a browser, or an HTTP
+client directly. These programs may run only behind a Sandwalk adapter or for
+bounded inspection of already-returned Sandwalk artifact paths.
 
 Use `sandwalk search` to discover persisted hits, `sandwalk fetch` to create
-immutable snapshots, and read only the returned `document.md`. If either
+immutable snapshots, and read only the returned `document_path`. If either
 command fails, diagnose and retry its adapter; never substitute another
-retrieval path.
+retrieval path. The fetch result also declares `document_media_type`. Navigate
+`text/markdown` through `mq` headings. For `text/plain`, locate relevant terms
+with `rg -n`, then read only bounded line ranges around matches. Do not run
+`mq` against plain text or read an entire long transcript into context.
+
+For user-authorized local documents, run `sandwalk search` with exactly one
+`--source-root <directory>`. The root must already be readable inside the
+agent's filesystem sandbox. Sandwalk records it with every hit, defaults to
+the `ugrep+` connector, and later selects the local-file fetch dispatcher for
+`file://` hits. Ordinary text and source files return `text/plain`; rich
+documents are delegated to the structured Docling connector. Remote PDF hits
+use the same structured normalization. For arXiv hits, Sandwalk prefers the
+article HTML for `document.md` and retains the matching versioned `source.pdf`
+for the user; an unusable HTML representation falls back to Docling
+automatically. Inspect the returned primary document according to its declared
+media type; never treat the search snippet as document content.
+
+For YouTube hits, the default constructor uses source chapters when they exist.
+If it returns `text/plain`, the video had no usable source chapter structure:
+search the timestamped transcript with `rg -n` and read bounded ranges. Never
+invent headings, summarize unread transcript regions, or fetch the video,
+audio, or captions outside Sandwalk.
 
 ## Workflow
 
 1. Create one workspace with a short lowercase slug using the required startup
    rules above.
 2. Perform bounded reconnaissance whenever the topic name is unfamiliar or
-   ambiguous. Resolve its identity with Sandwalk search and a fetched
-   `document.md`, never from memory or search snippets, before recording the
+   ambiguous. Resolve its identity with Sandwalk search and a fetched primary
+   document, never from memory or search snippets, before recording the
    objective or sealing the plan.
 3. Record the objective, an append-only step plan, and dependency edges;
    validate and seal the plan. Then enter the continuation loop.
 4. Claim one eligible step. When parallel workers are available, give each
    worker a different claim. Otherwise process steps sequentially.
 5. Search, select relevant hit identifiers from the JSON response, fetch those
-   hits, and read only the necessary portions of immutable `document.md`
-   snapshots.
+   hits, and read only the necessary portions of the returned immutable
+   primary documents.
 6. Create exact excerpts. Write narrow findings, attach excerpts with typed
    relations, seal each finding revision, and review it against its evidence.
    Prefer an independent validation worker; with one worker, perform the review

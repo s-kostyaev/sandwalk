@@ -1,0 +1,217 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+url=$(printf '%s' "$request" | jq -er '.url')
+source_root=$(printf '%s' "$request" | jq -er '.source_root')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+
+[ "$protocol" = "sandwalk.fetch.v1" ] || {
+  printf '%s\n' 'unsupported fetch protocol' >&2
+  exit 64
+}
+
+printf '%s' "$url" | grep -Eq '^file://' || {
+  printf '%s\n' 'xberg fetch requires a file locator' >&2
+  exit 64
+}
+
+[ -d "$source_root" ] || {
+  printf '%s\n' 'local source root must be an existing directory' >&2
+  exit 66
+}
+
+encoded_source_path=${url#file://}
+source_path=$(
+  printf '%b' "$(printf '%s' "$encoded_source_path" | sed 's/%/\\x/g')"
+)
+source_basename=$(basename "$source_path")
+canonical_root=$(realpath "$source_root")
+canonical_source=$(realpath "$source_path")
+
+[ -f "$canonical_source" ] || {
+  printf '%s\n' 'local source must be a regular file' >&2
+  exit 66
+}
+
+case "$canonical_source" in
+  "$canonical_root"/*) ;;
+  *)
+    printf '%s\n' 'local source resolves outside its authorized root' >&2
+    exit 77
+    ;;
+esac
+
+mkdir -p "$output_directory"
+original_directory="$output_directory/original"
+original="$original_directory/$source_basename"
+document="$output_directory/document.md"
+structure="$output_directory/document.json"
+config="$output_directory/xberg-config.json"
+manifest="$output_directory/manifest.json"
+manifest_temporary="$output_directory/manifest.json.tmp"
+rm -f "$manifest" "$manifest_temporary"
+
+# Copy first so extraction and hashes observe one immutable input even if the
+# user's source file changes during adapter execution.
+mkdir -p "$original_directory"
+cp -P "$canonical_source" "$original"
+[ ! -L "$original" ] && [ -f "$original" ] || {
+  printf '%s\n' 'local source changed to an unsafe file during import' >&2
+  exit 77
+}
+
+printf '%s\n' \
+  '{"output_format":"markdown","include_document_structure":true,"pdf_options":{"hierarchy":{"enabled":true,"include_bbox":true}}}' \
+  >"$config"
+
+NO_COLOR=1 xberg --log-level error extract "$original" \
+  --config "$config" \
+  --content-format markdown \
+  --format json \
+  --ocr true \
+  --ocr-backend tesseract \
+  >"$structure"
+
+jq -ej '
+  def extraction_result:
+    if (.result | type) == "object" then
+      .result
+    elif (.results | type) == "array" and (.results | length) == 1 then
+      .results[0]
+    else
+      empty
+    end;
+  extraction_result
+  | select(.document.nodes | type == "array" and length > 0)
+  | .content
+  | select(type == "string" and length > 0)
+' "$structure" >"$document"
+
+heading_nodes=$(
+  jq -r '
+    def extraction_result:
+      if (.result | type) == "object" then
+        .result
+      elif (.results | type) == "array" and (.results | length) == 1 then
+        .results[0]
+      else
+        empty
+      end;
+    [
+      extraction_result.document.nodes[]?
+      | select(
+          .content.node_type == "title"
+          or .content.node_type == "heading"
+        )
+    ]
+    | length
+  ' "$structure"
+)
+has_structured_subheading=$(
+  jq -r '
+    def extraction_result:
+      if (.result | type) == "object" then
+        .result
+      elif (.results | type) == "array" and (.results | length) == 1 then
+        .results[0]
+      else
+        empty
+      end;
+    any(
+      extraction_result.document.nodes[]?;
+      .content.node_type == "heading"
+      and ((.content.level // 1) > 1)
+    )
+  ' "$structure"
+)
+
+if [ "$heading_nodes" -eq 0 ]; then
+  temporary="$document.tmp"
+  {
+    printf '# %s\n\n' "$source_basename"
+    cat "$document"
+  } >"$temporary"
+  mv "$temporary" "$document"
+elif ! grep -Eq '^#{1,6}[[:space:]]' "$document"; then
+  printf '%s\n' 'xberg reported headings but flattened the Markdown output' >&2
+  exit 65
+fi
+
+if [ "$has_structured_subheading" = "true" ] &&
+  ! grep -Eq '^#{2,6}[[:space:]]' "$document"; then
+  printf '%s\n' 'xberg flattened Markdown subheadings' >&2
+  exit 65
+fi
+
+[ -s "$document" ] || {
+  printf '%s\n' 'xberg produced an empty Markdown document' >&2
+  exit 65
+}
+
+mq "$document" '.tree' >/dev/null
+
+input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
+markdown_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
+structure_sha256=$(shasum -a 256 "$structure" | awk '{print $1}')
+configuration_sha256=$(shasum -a 256 "$config" | awk '{print $1}')
+xberg_version=$(xberg version | sed -n '1{s/"/\\"/g;p;}')
+mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
+
+rm -f "$config"
+
+jq -n \
+  --arg protocol "sandwalk.fetch-manifest.v1" \
+  --arg adapter "xberg" \
+  --arg requested_url "$url" \
+  --arg final_url "$url" \
+  --arg source_root "$canonical_root" \
+  --arg source_path "$canonical_source" \
+  --arg source_basename "$source_basename" \
+  --arg input_sha256 "$input_sha256" \
+  --arg markdown_sha256 "$markdown_sha256" \
+  --arg structure_sha256 "$structure_sha256" \
+  --arg configuration_sha256 "$configuration_sha256" \
+  --arg xberg_version "$xberg_version" \
+  --arg mq_version "$mq_version" \
+  '{
+    protocol: $protocol,
+    adapter: {
+      name: $adapter,
+      protocol_version: 1,
+      implementation_version: $xberg_version,
+      extraction_profile: "markdown-hierarchy-tesseract-v1",
+      mq_version: $mq_version
+    },
+    requested_url: $requested_url,
+    final_url: $final_url,
+    document_media_type: "text/markdown",
+    local: {
+      source_root: $source_root,
+      canonical_path: $source_path
+    },
+    hashes: {
+      input_sha256: $input_sha256,
+      normalized_document_sha256: $markdown_sha256,
+      structure_sha256: $structure_sha256,
+      sanitized_configuration_sha256: $configuration_sha256
+    },
+    artifacts: {
+      document: "document.md",
+      structure: "document.json",
+      original: ("original/" + $source_basename)
+    },
+    queryability_check: {
+      tool: "mq",
+      query: ".tree",
+      ok: true
+    }
+  }' >"$manifest_temporary"
+
+mv "$manifest_temporary" "$manifest"
+
+jq -nc \
+  --arg protocol "sandwalk.fetch-result.v1" \
+  --arg manifest "$manifest" \
+  '{protocol: $protocol, manifest: $manifest}'

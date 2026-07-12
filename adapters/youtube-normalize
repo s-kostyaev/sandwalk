@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""Select and normalize one YouTube subtitle track without synthetic headings."""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import re
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+
+WHITESPACE = re.compile(r"\s+")
+INVISIBLE = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]")
+
+
+def arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    select = subcommands.add_parser("select")
+    select.add_argument("--metadata", type=Path, required=True)
+
+    normalize = subcommands.add_parser("normalize")
+    normalize.add_argument("--metadata", type=Path, required=True)
+    normalize.add_argument("--captions", type=Path, required=True)
+    normalize.add_argument("--output-directory", type=Path, required=True)
+    normalize.add_argument("--caption-kind", choices=("manual", "automatic"), required=True)
+    normalize.add_argument("--caption-language", required=True)
+    return parser.parse_args()
+
+
+def load_json(path: Path) -> Any:
+    with path.open(encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def json3_languages(tracks: Any) -> list[str]:
+    if not isinstance(tracks, dict):
+        return []
+    result = []
+    for language, formats in tracks.items():
+        if language == "live_chat" or not isinstance(formats, list):
+            continue
+        if any(
+            isinstance(item, dict) and item.get("ext") == "json3"
+            for item in formats
+        ):
+            result.append(language)
+    return sorted(result)
+
+
+def preferred_language(languages: list[str], preferred: Any) -> str | None:
+    if not languages:
+        return None
+    if isinstance(preferred, str) and preferred:
+        if preferred in languages:
+            return preferred
+        base = preferred.split("-", 1)[0].casefold()
+        matches = [
+            language
+            for language in languages
+            if language.split("-", 1)[0].casefold() == base
+        ]
+        if matches:
+            return matches[0]
+    return None
+
+
+def select_track(metadata: dict[str, Any]) -> tuple[str, str]:
+    preferred = metadata.get("language")
+    manual = json3_languages(metadata.get("subtitles"))
+    selected = preferred_language(manual, preferred)
+    if selected is not None:
+        return "manual", selected
+    if manual:
+        return "manual", manual[0]
+
+    automatic = json3_languages(metadata.get("automatic_captions"))
+    if isinstance(preferred, str) and preferred:
+        preferred_original = (
+            preferred if preferred.endswith("-orig") else f"{preferred}-orig"
+        )
+        if preferred_original in automatic:
+            return "automatic", preferred_original
+        base = preferred.split("-", 1)[0].casefold()
+        matching_originals = [
+            language
+            for language in automatic
+            if language.endswith("-orig")
+            and language.split("-", 1)[0].casefold() == base
+        ]
+        if matching_originals:
+            return "automatic", matching_originals[0]
+        if preferred in automatic:
+            return "automatic", preferred
+    originals = [language for language in automatic if language.endswith("-orig")]
+    if originals:
+        return "automatic", originals[0]
+    if automatic:
+        return "automatic", automatic[0]
+    raise ValueError("video has no JSON3 subtitle track")
+
+
+def clean_text(value: str) -> str:
+    value = html.unescape(value)
+    value = INVISIBLE.sub("", value)
+    return WHITESPACE.sub(" ", value).strip()
+
+
+def cues(captions: dict[str, Any]) -> list[tuple[float, float, str]]:
+    result: list[tuple[float, float, str]] = []
+    for event in captions.get("events", []):
+        if not isinstance(event, dict) or not isinstance(event.get("segs"), list):
+            continue
+        text = clean_text(
+            "".join(
+                segment.get("utf8", "")
+                for segment in event["segs"]
+                if isinstance(segment, dict)
+            )
+        )
+        if not text:
+            continue
+        start = max(float(event.get("tStartMs", 0)) / 1000.0, 0.0)
+        duration = max(float(event.get("dDurationMs", 0)) / 1000.0, 0.0)
+        end = start + duration
+        if result and result[-1][2] == text and start <= result[-1][1] + 0.25:
+            previous = result[-1]
+            result[-1] = previous[0], max(previous[1], end), text
+        else:
+            result.append((start, end, text))
+    if not result:
+        raise ValueError("subtitle track contains no text")
+    return result
+
+
+def join_fragments(fragments: list[str]) -> str:
+    text = " ".join(fragments)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return WHITESPACE.sub(" ", text).strip()
+
+
+def blocks(
+    source_cues: list[tuple[float, float, str]],
+) -> list[tuple[float, float, str]]:
+    result: list[tuple[float, float, str]] = []
+    start = source_cues[0][0]
+    end = source_cues[0][1]
+    fragments: list[str] = []
+    size = 0
+    for cue_start, cue_end, text in source_cues:
+        if fragments and (cue_start - start >= 45.0 or size + len(text) >= 700):
+            result.append((start, end, join_fragments(fragments)))
+            start = cue_start
+            fragments = []
+            size = 0
+        fragments.append(text)
+        size += len(text) + 1
+        end = cue_end
+        if cue_start - start >= 20.0 and text.endswith((".", "?", "!")):
+            result.append((start, end, join_fragments(fragments)))
+            fragments = []
+            size = 0
+    if fragments:
+        result.append((start, end, join_fragments(fragments)))
+    return result
+
+
+def timestamp(seconds: float) -> str:
+    total = max(int(seconds), 0)
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def clean_scalar(value: Any) -> str:
+    return clean_text(value) if isinstance(value, str) else ""
+
+
+def source_chapters(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    duration = float(metadata.get("duration") or 0)
+    chapters: list[dict[str, Any]] = []
+    for chapter in metadata.get("chapters") or []:
+        if not isinstance(chapter, dict):
+            continue
+        title = clean_scalar(chapter.get("title"))
+        try:
+            start = max(float(chapter["start_time"]), 0.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not title:
+            continue
+        chapters.append({"title": title, "start": start, "end": chapter.get("end_time")})
+    chapters.sort(key=lambda item: item["start"])
+    unique: list[dict[str, Any]] = []
+    for chapter in chapters:
+        if unique and chapter["start"] <= unique[-1]["start"]:
+            continue
+        unique.append(chapter)
+    for index, chapter in enumerate(unique):
+        next_start = unique[index + 1]["start"] if index + 1 < len(unique) else duration
+        try:
+            declared_end = float(chapter["end"])
+        except (TypeError, ValueError):
+            declared_end = 0.0
+        chapter["end"] = max(declared_end, next_start, chapter["start"])
+    return unique
+
+
+def deep_link(video_id: str, seconds: float) -> str:
+    return (
+        "https://www.youtube.com/watch?v="
+        f"{quote(video_id, safe='')}&t={max(int(seconds), 0)}s"
+    )
+
+
+def append_block(
+    lines: list[str],
+    mappings: list[dict[str, Any]],
+    index: int,
+    block: tuple[float, float, str],
+    video_id: str,
+    markdown: bool,
+) -> None:
+    start, end, text = block
+    label = timestamp(start)
+    line_start = len(lines) + 1
+    if markdown:
+        lines.append(f"[{label}]({deep_link(video_id, start)}) {text}")
+    else:
+        lines.append(f"[{label}] {text}")
+    line_end = len(lines)
+    lines.append("")
+    mappings.append(
+        {
+            "protocol": "sandwalk.transcript-block.v1",
+            "block": index,
+            "start_seconds": start,
+            "end_seconds": end,
+            "line_start": line_start,
+            "line_end": line_end,
+            "source_url": deep_link(video_id, start),
+        }
+    )
+
+
+def normalize(args: argparse.Namespace) -> dict[str, Any]:
+    metadata = load_json(args.metadata)
+    captions = load_json(args.captions)
+    transcript_blocks = blocks(cues(captions))
+    chapters = source_chapters(metadata)
+
+    video_id = clean_scalar(metadata.get("id"))
+    title = clean_scalar(metadata.get("title")) or video_id
+    if not video_id or not title:
+        raise ValueError("video metadata is missing identity")
+    canonical_url = f"https://www.youtube.com/watch?v={quote(video_id, safe='')}"
+    channel = clean_scalar(metadata.get("channel") or metadata.get("uploader"))
+    upload_date = clean_scalar(metadata.get("upload_date"))
+    duration = float(metadata.get("duration") or transcript_blocks[-1][1])
+
+    args.output_directory.mkdir(parents=True, exist_ok=True)
+    mappings: list[dict[str, Any]] = []
+    if chapters:
+        document_artifact = "document.md"
+        media_type = "text/markdown"
+        lines = [
+            f"# {title.lstrip('#').strip()}",
+            "",
+            f"- Source: [{canonical_url}]({canonical_url})",
+        ]
+        if channel:
+            lines.append(f"- Channel: {channel}")
+        if upload_date:
+            lines.append(f"- Upload date: {upload_date}")
+        lines.extend(
+            [
+                f"- Duration: {timestamp(duration)}",
+                f"- Captions: {args.caption_kind}, {args.caption_language}",
+                "",
+            ]
+        )
+        block_index = 1
+        cursor = 0
+        while (
+            cursor < len(transcript_blocks)
+            and transcript_blocks[cursor][0] < chapters[0]["start"]
+        ):
+            append_block(
+                lines,
+                mappings,
+                block_index,
+                transcript_blocks[cursor],
+                video_id,
+                True,
+            )
+            block_index += 1
+            cursor += 1
+        for chapter_index, chapter in enumerate(chapters):
+            heading = chapter["title"].lstrip("#").strip()
+            lines.extend(
+                [
+                    f"## [{timestamp(chapter['start'])}] {heading}",
+                    "",
+                ]
+            )
+            chapter_end = (
+                chapters[chapter_index + 1]["start"]
+                if chapter_index + 1 < len(chapters)
+                else float("inf")
+            )
+            while (
+                cursor < len(transcript_blocks)
+                and transcript_blocks[cursor][0] < chapter_end
+            ):
+                append_block(
+                    lines,
+                    mappings,
+                    block_index,
+                    transcript_blocks[cursor],
+                    video_id,
+                    True,
+                )
+                block_index += 1
+                cursor += 1
+    else:
+        document_artifact = "transcript.txt"
+        media_type = "text/plain"
+        lines = [f"Title: {title}", f"Source: {canonical_url}"]
+        if channel:
+            lines.append(f"Channel: {channel}")
+        if upload_date:
+            lines.append(f"Upload date: {upload_date}")
+        lines.extend(
+            [
+                f"Duration: {timestamp(duration)}",
+                f"Captions: {args.caption_kind}, {args.caption_language}",
+                "",
+                "Transcript:",
+                "",
+            ]
+        )
+        for index, block in enumerate(transcript_blocks, start=1):
+            append_block(lines, mappings, index, block, video_id, False)
+
+    document = args.output_directory / document_artifact
+    document.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    with (args.output_directory / "blocks.jsonl").open("w", encoding="utf-8") as stream:
+        for mapping in mappings:
+            stream.write(json.dumps(mapping, ensure_ascii=False, separators=(",", ":")))
+            stream.write("\n")
+
+    sanitized = {
+        "protocol": "sandwalk.youtube-metadata.v1",
+        "id": video_id,
+        "title": title,
+        "channel": channel or None,
+        "upload_date": upload_date or None,
+        "duration": duration,
+        "canonical_url": canonical_url,
+        "caption_kind": args.caption_kind,
+        "caption_language": args.caption_language,
+        "chapters": chapters,
+    }
+    (args.output_directory / "metadata.json").write_text(
+        json.dumps(sanitized, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "document_artifact": document_artifact,
+        "document_media_type": media_type,
+        "canonical_url": canonical_url,
+        "chapter_count": len(chapters),
+        "block_count": len(mappings),
+    }
+
+
+def main() -> int:
+    args = arguments()
+    try:
+        if args.command == "select":
+            kind, language = select_track(load_json(args.metadata))
+            print(json.dumps({"kind": kind, "language": language}, separators=(",", ":")))
+        else:
+            print(json.dumps(normalize(args), separators=(",", ":")))
+        return 0
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"YouTube normalization failed: {error}", file=__import__("sys").stderr)
+        return 65
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

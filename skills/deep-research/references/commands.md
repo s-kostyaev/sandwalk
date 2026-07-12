@@ -36,6 +36,8 @@ atomically records one new step and its reason without changing existing steps.
 sandwalk step claim --slug <slug> --step <step>
 sandwalk snapshot promote --slug <slug> --claim <claim_id> <snapshot_id>
 sandwalk search --slug <slug> --claim <claim_id> --query <query> [--limit 10]
+sandwalk search --slug <slug> --claim <claim_id> --query <query> \
+  --source-root <authorized-directory> [--limit 10]
 sandwalk fetch --slug <slug> --claim <claim_id> <hit_id>
 sandwalk excerpt create --slug <slug> --claim <claim_id> \
   --snapshot <snapshot_id> --lines <first:last>
@@ -51,10 +53,45 @@ sandwalk finding review --slug <slug> --claim <claim_id> \
 sandwalk step complete --slug <slug> --claim <claim_id>
 ```
 
-Fetch accepts only a persisted hit ID, not an arbitrary URL. Its default
-connector stores the original response, headers, converted Markdown, hashes,
-and a queryability check. For excerpts, use either `--lines first:last` or
+Use the second search form for local documents. `--source-root` changes the
+default search adapter to `sandwalk-search-ugrep`; the resulting `file://` hit
+changes the default fetch adapter to `sandwalk-fetch-file`. Ordinary text and
+source files return `text/plain`; rich documents are delegated to
+`sandwalk-fetch-docling`. Docling's pinned standard profile runs locally through
+`uv`, restores PDF heading hierarchy, and does not enable remote services or
+LLM enrichments. The directory must be visible to the surrounding sandbox. Do
+not invoke `ugrep+`, Xberg, Docling, or `mq` directly except for bounded
+inspection of already-returned Sandwalk artifact paths. Inspect hierarchical
+`text/markdown` documents with `mq` before selecting excerpt ranges. Use
+`sandwalk fetch ... --adapter sandwalk-fetch-xberg` only as an explicit fast
+alternative for a simple document.
+
+Fetch accepts only a persisted hit ID, not an arbitrary URL. Its result returns
+the immutable primary `document_path` and `document_media_type`; the manifest
+stores the same basename and media type with the original response, headers,
+hashes, and queryability check. Use `mq` to navigate `text/markdown`. For
+`text/plain`, search with `rg -n` and read bounded line ranges around matches.
+For excerpts, use either `--lines first:last` or
 `--text-file path [--occurrence N]`.
+
+The default web adapter first uses the bounded curl connector. It dispatches
+genuine remote PDFs to the same Docling normalizer instead of treating binary
+input as HTML. For a non-PDF transport failure, recognized bot challenge, or
+HTML application shell, it makes exactly one fallback attempt in a fresh,
+non-persistent Playwright context. Browser challenge, login, and paywall results
+are rejected rather than published. The selected manifest records any fallback
+and its reason. For arXiv abstract, HTML, or PDF hits the curl connector prefers
+the structured article HTML for `document.md`, always retains the matching
+exact-version PDF as `source.pdf` for the user, and falls back to that PDF when
+the HTML representation fails its structural gate. Read and cite through the
+returned immutable primary document; do not invoke either representation URL,
+curl, or the browser directly.
+
+YouTube hits select `sandwalk-fetch-youtube` by default. The bundled adapter
+requires `yt-dlp` but downloads only metadata and one caption track. A
+chaptered result is `text/markdown`; an unchaptered result is
+`text/plain` at the returned `transcript.txt` path. Do not invoke `yt-dlp`
+directly.
 
 Use `snapshot promote` when reconnaissance already fetched the needed source.
 It binds the immutable snapshot to the claimed step without fetching it again.

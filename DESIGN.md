@@ -93,6 +93,7 @@ not select an implicit `latest` workspace.
 
 ```console
 sandwalk init --slug <slug> [--directory-prefix <path>]
+sandwalk list [--directory-prefix <path>]
 sandwalk status --slug <slug> [--directory-prefix <path>]
 sandwalk resume --slug <slug> [--directory-prefix <path>]
 sandwalk continue --slug <slug> [--directory-prefix <path>]
@@ -144,6 +145,8 @@ records terms, themes, authoritative domains, and scope boundaries.
 ```console
 sandwalk recon start --slug <slug> --goal-file <path>
 sandwalk search --slug <slug> --query <query> [--claim <claim>]
+sandwalk search --slug <slug> --query <query> --source-root <path> \
+  [--claim <claim>]
 sandwalk fetch --slug <slug> <hit-ref>
 sandwalk recon add-observation --slug <slug> ...
 sandwalk recon finish --slug <slug> --summary-file <path>
@@ -356,8 +359,10 @@ Adapters are executables using a versioned JSON protocol over standard input and
 standard output. Shell command templates are not part of the protocol.
 
 A search adapter returns bounded structured results. Sandwalk mints `hit_...`
-references and records the query, adapter, result position, URL, title, and
-snippet.
+references and records the query, adapter, result position, source locator,
+title, and snippet. The schema-7 `url` column and v1 JSON field retain their
+names for compatibility, but accept HTTP(S) URLs and absolute `file://`
+locators. Schema 23 adds the requested local source root to search provenance.
 
 The bundled ddgr connector accepts:
 
@@ -369,12 +374,20 @@ and returns at most 25 bounded results in a
 `sandwalk.search-results.v1` envelope. It invokes `ddgr --json` without a
 shell command template.
 
+When `--source-root` is present, the default bundled search connector is
+`sandwalk-search-ugrep`. It invokes `ugrep+`, not `ug+`, so user or
+working-directory `.ugrep` files cannot silently change scripted behavior. It
+performs a fixed-string recursive search with stable pathname ordering,
+does not follow directory symlinks, returns at most the requested number of
+files, and emits canonical percent-encoded `file://` locators. Search snippets
+are discovery metadata only and never become evidence.
+
 A fetch adapter receives an output directory controlled by Sandwalk. It writes:
 
 ```text
 required:
-  document.md
   manifest.json
+  one primary text artifact declared by manifest.artifacts.document
 
 optional:
   blocks.jsonl
@@ -382,25 +395,168 @@ optional:
   images/
 ```
 
+The primary artifact is a safe relative basename with media type
+`text/markdown` or `text/plain`. Structured normalizers publish
+`document.md`; genuinely flat sources may publish `transcript.txt`. Sandwalk
+does not create aliases, copies, or hardlinks to force a conventional
+filename. Schema 24 persists the basename and media type with each snapshot so
+continuation and excerpt creation always open the declared artifact. Existing
+snapshots migrate to `document.md` and `text/markdown`.
+
 The bundled web connector accepts a `sandwalk.fetch.v1` request. It uses
-`curl -L` with a Lynx user-agent and requests `text/markdown` with HTML as a
-lower-priority fallback. A response explicitly labeled `text/markdown` becomes
-`document.md` directly. Other responses use the HTML-to-GitHub-flavored
-Markdown fallback with pandoc's raw-HTML extension disabled. The original
-response is retained in both cases, and `mq document.md '.tree'` must succeed
-before `manifest.json` is published. The manifest identifies the selected
-extraction profile as `server-markdown-direct-v1` or
-`html-to-gfm-no-raw-html-v1`.
+`curl -L` with a Lynx user-agent and negotiates Markdown, HTML, and PDF. The
+transport has explicit connection and total-request bounds; the adapter process
+has the same 15-minute outer timeout as a local document fetch because a remote
+PDF may require first-use model acquisition and CPU-only OCR.
+
+The default `sandwalk-fetch-web` connector is a bounded dispatcher. It first
+runs the curl connector because server-provided Markdown, static HTML, and PDFs
+are cheaper and preserve a response closer to the publisher's transport. It
+publishes that result directly when the normalized document contains semantic
+content. For a non-PDF transport failure, an HTML application shell, or a
+recognized bot-challenge document, it makes exactly one fallback attempt with
+`sandwalk-fetch-playwright`. PDF and other binary normalization failures never
+fall back to a browser. The selected manifest records whether fallback occurred
+and its bounded reason. A failed fallback does not publish the curl attempt's
+challenge or application shell as a snapshot.
+
+The Playwright connector executes JavaScript in a fresh, non-persistent Chromium
+context and serializes the rendered DOM after a bounded load-and-settle profile.
+It disables downloads, service workers, browser permissions, dialogs, popups,
+local-file navigation, and requests whose host resolves only to loopback,
+private, link-local, multicast, or otherwise non-global addresses. It does not
+load cookies, credentials, a user profile, stealth plugins, CAPTCHA solvers, or
+proxy configuration. Images, media, and fonts are blocked; scripts, styles, and
+same-page data requests remain available. The renderer applies request-count,
+navigation-time, settle-time, raw-response, and rendered-DOM bounds.
+
+The browser snapshot retains `raw-response.html` when the main response is
+bounded HTML, `rendered-dom.html`, sanitized browser metadata, and the normalized
+`document.md`. Pandoc converts the rendered DOM with raw HTML disabled and `mq`
+remains the final queryability gate. Browser metadata classifies the visible
+result as `content`, `empty`, `bot-challenge`, `login-wall`, `paywall`, or
+`http-error`.
+Only `content` can be published. The manifest records the Playwright and
+Chromium versions, viewport, locale, timezone, wait profile, visible-text size,
+input and rendered-DOM hashes, normalized-document hash, and sanitized
+configuration digest under the
+`playwright-rendered-dom-to-gfm-no-raw-html-v1` extraction profile.
+
+A response explicitly labeled `text/markdown` becomes `document.md` directly.
+HTML uses the HTML-to-GitHub-flavored Markdown fallback with pandoc's raw-HTML
+extension disabled. A response with PDF magic bytes, regardless of a generic or
+incorrect content type, is normalized by the same pinned Docling profile as a
+local PDF. A response labeled as PDF without PDF magic is rejected instead of
+being passed to the HTML reader. Other binary formats remain unsupported until
+their normalizer is explicitly configured. The original response and any
+Docling structure and quality artifacts are retained. `mq document.md '.tree'`
+must succeed before `manifest.json` is published. The manifest identifies the
+selected extraction profile as `server-markdown-direct-v1`,
+`html-to-gfm-no-raw-html-v1`, or
+`standard-native-hierarchy-bookmark-095-v2`.
+
+arXiv is the first site-specific source constructor. For a recognized
+`arxiv.org/abs`, `/html`, or `/pdf` locator, the connector:
+
+1. requests the matching arXiv HTML representation;
+2. resolves an exact article version from the HTML when the hit was
+   unversioned;
+3. always downloads and validates the PDF for that exact version;
+4. isolates the LaTeXML `ltx_page_content` article in Pandoc's AST, resolves
+   relative links, and converts embedded data images into bounded `images/`
+   artifacts; and
+5. publishes the HTML-derived Markdown only when it has a title-sized heading
+   tree, sufficient nonblank content, and passes `mq`.
+
+Pandoc provides the embedded Lua runtime used by the AST filter; Sandwalk does
+not depend on a separately installed Lua interpreter. Remote figure images are
+kept as absolute links rather than silently downloaded. The mandatory
+`source.pdf` artifact is retained for human reading even when HTML supplies
+`document.md`. If HTML is unavailable, malformed, or fails the structural
+quality gate, the already downloaded PDF is normalized through Docling and
+remains available as `source.pdf`. The snapshot manifest records the canonical
+versioned abstract URL, HTML and PDF representation URLs, selected
+normalization source, both relevant hashes, and the fallback reason. Final
+bibliographies therefore cite the stable abstract page rather than an
+implementation-specific representation URL.
+
+YouTube is a second site-specific source constructor. Recognized
+`youtube.com` and `youtu.be` hits select `sandwalk-fetch-youtube`, which uses
+`yt-dlp` to resolve metadata and download exactly one JSON3 caption track
+without downloading video or audio. It prefers a manual track in the video's
+language, then the original automatic track, and rejects videos without usable
+captions. Source-provided chapters become timestamped H2 sections in
+`document.md`; timestamps link to the corresponding playback position. If the
+source has no chapters, the adapter publishes `transcript.txt` as
+`text/plain`, with timestamped bounded paragraphs but no synthetic headings.
+The flat transcript is gated with `rg`, while chaptered Markdown is gated with
+`mq`. Both retain `captions.json3`, sanitized `metadata.json`, and
+`blocks.jsonl` line-to-playback mappings. Sandwalk does not invent fixed-time
+chapters, invoke an embedding model, or transcribe audio.
 
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.
+
+The bundled default local-file fetch connector is `sandwalk-fetch-file`.
+`fetch` selects it for a `file://` hit. The request repeats the source root
+recorded with the search. The adapter canonicalizes both paths, rejects
+non-regular files and symlink/path traversal outside that root, and classifies
+the retained source before publication. Known rich document formats such as PDF,
+RTF, Office, OpenDocument, EPUB, and message files are delegated to
+`sandwalk-fetch-docling` before any byte-level text check, so ASCII-looking
+container formats are never silently treated as plain text. MIME-confirmed
+ordinary text and source files are copied to a `document` primary artifact that
+preserves the source extension when one exists, declared as `text/plain`,
+gated with `rg`, and retain the original file under
+`original/`. Rich local documents copy the source under its original basename
+into the controlled snapshot directory before extraction so normalization and
+hashing observe one input. Adapters pass that retained artifact directly to
+their normalizer; they do not create hardlink aliases merely to recover a
+filename extension. Remote PDF fallbacks likewise normalize the retained
+`source.pdf` directly. Local adapters and the bundled web
+dispatcher receive a 15-minute process timeout because first-use model
+acquisition and CPU-only OCR may exceed the transport's two-minute request
+bound.
+
+The Docling connector runs a pinned `docling==2.110.0` standard pipeline through
+`uv`. It explicitly disables remote services and code, formula, picture,
+description, and chart enrichments. OCR and accurate table reconstruction
+remain enabled. PDF parsed pages are retained while Docling's native heading
+hierarchy pass uses bookmarks, numbering, and font style with a strict `0.95`
+bookmark threshold. The stricter threshold avoids the implementation's `0.92`
+substring-match shortcut while tolerating small OCR differences. The first
+recognized heading becomes the Markdown H1; naturally unstructured input gets
+one filename H1.
+
+The snapshot retains `original`, hierarchical `document.md`, Docling's lossless
+`document.json`, and `quality.json`. Quality metrics include heading levels and
+density, maximum heading length, undecoded formula count, and top-level PDF
+bookmark coverage. When Docling entirely misses a top-level bookmark, the
+adapter restores that authoritative heading immediately before the first
+matched descendant bookmark, or before the next matched top-level bookmark as a
+fallback, and records the restoration in `quality.json`. It never synthesizes
+lower-level headings. The adapter rejects missing headings, implausibly long
+headings, pathological heading density, and less than half of a non-trivial
+top-level bookmark outline matching normalized headings. Remaining partial
+bookmark coverage and undecoded formulas are explicit warnings.
+`mq document.md '.tree'` is the final queryability gate.
+
+`sandwalk-fetch-xberg` remains a bundled explicit fast adapter for simple PDFs
+and other local formats. It runs with an explicit configuration rather than an
+auto-discovered `xberg.toml`, local Tesseract OCR, Markdown output, PDF
+hierarchy and bounding boxes, and document-structure extraction. Its profile
+must not enable VLM or remote enrichment. If Xberg reports title or heading
+nodes but emits no ATX Markdown headings, or reports level-two-or-deeper nodes
+without corresponding Markdown subheadings, the adapter rejects the result
+instead of publishing a flattened document. Choosing a normalizer remains an
+adapter decision, not a core-state distinction.
 
 Sandwalk records:
 
 - retrieval time in UTC;
 - requested and final URLs;
 - redirect chain and HTTP metadata;
-- input and normalized Markdown hashes;
+- input and normalized primary-document hashes;
 - adapter name and adapter protocol version;
 - optional implementation version, extraction profile, and sanitized
   configuration digest.
@@ -411,9 +567,12 @@ silently call an LLM under a profile documented as non-LLM.
 
 ## Sources and snapshots
 
-A source is an internal logical identity, usually a canonical URL. Each fetch
-creates an immutable snapshot with its own retrieval timestamp. Refetching does
-not modify old snapshots or invalidate their excerpts.
+A source is an internal logical identity, usually a canonical URL or canonical
+local file locator. Each fetch creates an immutable snapshot with its own
+retrieval timestamp. Refetching does not modify old snapshots or invalidate
+their excerpts. Local source identity does not imply mutable filesystem
+contents are stable: the copied original and its content hash define the
+snapshot actually used as evidence.
 
 Raw payloads are retained by default with configurable size limits. If a limit
 is exceeded, the snapshot remains usable but records why the raw payload was
@@ -448,14 +607,14 @@ sandwalk excerpt create --slug <slug> --snapshot <snapshot> \
 
 An excerpt records:
 
-- snapshot and Markdown hashes;
+- snapshot and normalized primary-document hashes;
 - line and byte ranges;
 - excerpt text hash;
 - optional source block, page, and bounding-box locators.
 
-Text must occur exactly in the normalized snapshot. Ambiguous matches require
-an occurrence selector. Oversized excerpts are rejected with a compact repair
-instruction. Creating the same excerpt twice is idempotent.
+Text must occur exactly in the normalized primary document. Ambiguous matches
+require an occurrence selector. Oversized excerpts are rejected with a compact
+repair instruction. Creating the same excerpt twice is idempotent.
 
 Line ranges are one-based, inclusive, and retain the source newline after the
 last selected line when one exists. Byte ranges are zero-based with an
@@ -631,10 +790,17 @@ The first bundled exporter is `sandwalk-export-pandoc-pdf`. It invokes Pandoc
 on the finalized report followed by its bibliography and writes
 `exports/report.pdf`. It turns rendered numeric citations such as `[1]` into
 internal links to the corresponding bibliography entries, preserves external
-URL annotations, and enables visible link colors. Pandoc PDF generation also
-requires one of its supported external PDF engines; the bundled exporter uses
-Pandoc's configured default. Additional formats and renderers use the same
-protocol rather than adding renderer logic to the Sandwalk core.
+URL annotations, and enables visible link colors. It uses XeLaTeX with the
+installed serif, sans-serif, and monospaced fonts that support Russian
+Cyrillic, selected through fontconfig and passed to XeLaTeX by file path. This
+makes Unicode text, including Cyrillic, render consistently without assuming a
+particular installed font family. Pandoc PDF generation therefore requires
+XeLaTeX and fontconfig. The exporter assigns equal bounded widths to Markdown
+table columns, so cells wrap within the PDF text area instead of extending past
+the page edge. Tables with five or more columns are rendered in a landscape
+page with a smaller table font so their columns remain readable rather than
+overlapping. Additional formats and renderers use the same protocol rather than
+adding renderer logic to the Sandwalk core.
 
 ## Audit log
 

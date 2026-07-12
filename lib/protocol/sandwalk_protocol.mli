@@ -68,7 +68,12 @@ module Search_adapter : sig
     | Invalid_result
   [@@deriving sexp_of]
 
-  val request : query:string -> limit:int -> Yojson.Safe.t
+  val request
+    :  ?source_root:string
+    -> query:string
+    -> limit:int
+    -> unit
+    -> Yojson.Safe.t
   val results : Yojson.Safe.t -> (result list, error) Result.t
   val url : result -> string
   val title : result -> string
@@ -84,12 +89,22 @@ module Fetch_adapter : sig
     | Queryability_check_failed
   [@@deriving sexp_of]
 
-  val request : url:string -> output_directory:string -> Yojson.Safe.t
+  val request
+    :  ?source_root:string
+    -> url:string
+    -> output_directory:string
+    -> unit
+    -> Yojson.Safe.t
   val manifest : Yojson.Safe.t -> (manifest, error) Result.t
   val validate_manifest : Yojson.Safe.t -> (unit, error) Result.t
   val final_url : manifest -> string
   val input_sha256 : manifest -> string
+  val document_artifact : manifest -> string
+  val document_media_type : manifest -> string
+  val document_sha256 : manifest -> string
   val markdown_sha256 : manifest -> string
+  val structure_artifact : manifest -> string option
+  val structure_sha256 : manifest -> string option
 end
 
 module Export_adapter : sig

@@ -5,6 +5,8 @@ if [ "${1:-}" = "--version" ]; then
 fi
 
 [ "$2" = ".tree" ]
-grep -q '^# Fetched title' "$1"
+grep -Eq '^#{1,6}[[:space:]]' "$1"
 [ "${MQ_FORCE_FAILURE:-0}" = 0 ] || exit 1
-printf '%s|%s\n' "$1" "$2" >>"$MQ_TEST_LOG"
+if [ -n "${MQ_TEST_LOG:-}" ]; then
+  printf '%s|%s\n' "$1" "$2" >>"$MQ_TEST_LOG"
+fi

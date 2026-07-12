@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'docling 2.110.test'
+  exit 0
+fi
+
+source_path=
+document_path=
+structure_path=
+quality_path=
+config_path=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --source) source_path=$2; shift 2 ;;
+    --document) document_path=$2; shift 2 ;;
+    --structure) structure_path=$2; shift 2 ;;
+    --quality) quality_path=$2; shift 2 ;;
+    --config) config_path=$2; shift 2 ;;
+    *) printf 'unexpected docling argument: %s\n' "$1" >&2; exit 64 ;;
+  esac
+done
+
+test -f "$source_path"
+jq -e '
+  .protocol == "sandwalk.docling-profile.v1"
+  and .pipeline == "standard"
+  and .enable_remote_services == false
+  and .heading_hierarchy.enabled == true
+  and .heading_hierarchy.bookmark_match_threshold == 0.95
+  and .enrichments.formula == false
+' "$config_path" >/dev/null
+
+if [ -n "${DOCLING_TEST_LOG:-}" ]; then
+  printf '%s|%s\n' "$source_path" "$config_path" >"$DOCLING_TEST_LOG"
+fi
+
+printf '%s\n' '# Architecture Notes
+
+## Adapter protocol
+
+Typed adapter architecture.' >"$document_path"
+
+printf '%s\n' \
+  '{"schema_name":"DoclingDocument","texts":[{"label":"section_header","level":1,"text":"Architecture Notes"},{"label":"section_header","level":2,"text":"Adapter protocol"},{"label":"text","text":"Typed adapter architecture."}]}' \
+  >"$structure_path"
+
+printf '%s\n' \
+  '{"protocol":"sandwalk.docling-quality.v1","profile":"standard-native-hierarchy-bookmark-095-v2","root_strategy":"promoted-first-heading","restored_top_level_bookmarks":[],"heading_count":2,"heading_levels":{"1":1,"2":1},"maximum_heading_characters":18,"nonblank_line_count":3,"formula_placeholder_count":0,"top_level_bookmarks":{"total":1,"matched":1,"coverage":1.0,"unmatched":[]},"warnings":[]}' \
+  >"$quality_path"

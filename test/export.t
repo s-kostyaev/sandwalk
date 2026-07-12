@@ -7,7 +7,9 @@
 The first export adapter renders the finalized report and bibliography as one
 atomically published PDF.
 
-  $ PANDOC_TEST_LOG="$PWD/pandoc-export.log" PATH="$PWD/fakes:$PATH" \
+  $ PANDOC_TEST_LOG="$PWD/pandoc-export.log" \
+  > PANDOC_TEST_HEADER_LOG="$PWD/unicode-fonts.tex" PATH="$PWD/fakes:$PATH" \
+  > PANDOC_TEST_FILTER_LOG="$PWD/pdf-filter.lua" \
   >   sandwalk export pdf \
   >   --slug export-test --directory-prefix workspace \
   >   --adapter ../adapters/pandoc-pdf-export | \
@@ -17,7 +19,19 @@ atomically published PDF.
   $ head -c 5 workspace/export-test/exports/report.pdf
   %PDF-
 
-  $ grep -E -- '--lua-filter=.*citation-links.lua.*--variable=colorlinks:true.*--variable=linkcolor:blue.*--variable=urlcolor:blue' pandoc-export.log >/dev/null
+The bundled renderer uses XeLaTeX and installed Unicode fonts, so Cyrillic
+report text is rendered rather than being dropped or causing the default PDF
+engine to fail.
+
+  $ grep -E -- '--lua-filter=.*citation-links.lua.*--pdf-engine=xelatex.*--include-in-header=.*unicode-fonts.tex.*--variable=colorlinks:true.*--variable=linkcolor:blue.*--variable=urlcolor:blue' pandoc-export.log >/dev/null
+  $ grep -E '^\\setmainfont\{[^}]+\}\[Path=[^]]+/\]$' unicode-fonts.tex >/dev/null
+  $ grep -E '^\\setsansfont\{[^}]+\}\[Path=[^]]+/\]$' unicode-fonts.tex >/dev/null
+  $ grep -E '^\\setmonofont\{[^}]+\}\[Path=[^]]+/\]$' unicode-fonts.tex >/dev/null
+  $ grep -F '\usepackage{pdflscape}' unicode-fonts.tex >/dev/null
+  $ grep -F 'local function fit_table_columns(table)' pdf-filter.lua >/dev/null
+  $ grep -F 'table.colspecs[index][2] = 1 / column_count' pdf-filter.lua >/dev/null
+  $ grep -F 'local function render_table(table)' pdf-filter.lua >/dev/null
+  $ grep -F 'begin{landscape}' pdf-filter.lua >/dev/null
 
 The exporter request and manifest are versioned contracts.
 

@@ -1,0 +1,277 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "playwright==1.55.0",
+# ]
+# ///
+"""Render one public web page in a bounded, ephemeral Chromium context."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import ipaddress
+import json
+import re
+import socket
+import sys
+from importlib.metadata import version
+from pathlib import Path
+from urllib.parse import urlparse
+
+from playwright.async_api import Browser, Request, Route, async_playwright
+
+
+PROFILE = "playwright-public-web-v1"
+MAX_REQUESTS = 300
+MAX_ARTIFACT_BYTES = 20 * 1024 * 1024
+BLOCKED_RESOURCE_TYPES = {"font", "image", "media"}
+CHALLENGE = re.compile(
+    r"captcha|verify (?:that )?you are (?:a )?human|automated process|"
+    r"unusual traffic|access denied|request (?:was )?blocked|security challenge|"
+    r"checking your browser|just a moment",
+    re.IGNORECASE,
+)
+LOGIN = re.compile(r"sign in to continue|log in to continue|authentication required", re.I)
+PAYWALL = re.compile(
+    r"subscribe to (?:continue|read)|subscription required|purchase this article|"
+    r"institutional access|access through your institution",
+    re.IGNORECASE,
+)
+
+
+def arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", action="store_true")
+    parser.add_argument("--url")
+    parser.add_argument("--rendered-dom", type=Path)
+    parser.add_argument("--raw-response", type=Path)
+    parser.add_argument("--metadata", type=Path)
+    args = parser.parse_args()
+    if args.version:
+        return args
+    missing = [
+        name
+        for name in ("url", "rendered_dom", "raw_response", "metadata")
+        if getattr(args, name) is None
+    ]
+    if missing:
+        parser.error("missing required arguments: " + ", ".join(missing))
+    return args
+
+
+def public_ip(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address).is_global
+    except ValueError:
+        return False
+
+
+async def host_is_public(host: str, cache: dict[str, bool]) -> bool:
+    normalized = host.rstrip(".").casefold()
+    if normalized in cache:
+        return cache[normalized]
+    if normalized == "localhost" or normalized.endswith((".localhost", ".local")):
+        cache[normalized] = False
+        return False
+    try:
+        literal = ipaddress.ip_address(normalized.strip("[]"))
+        result = literal.is_global
+    except ValueError:
+        try:
+            records = await asyncio.to_thread(
+                socket.getaddrinfo, normalized, None, type=socket.SOCK_STREAM
+            )
+        except OSError:
+            result = False
+        else:
+            addresses = {record[4][0] for record in records}
+            result = bool(addresses) and all(public_ip(address) for address in addresses)
+    cache[normalized] = result
+    return result
+
+
+def classify(text: str) -> str:
+    compact = " ".join(text.split())
+    if CHALLENGE.search(compact):
+        return "bot-challenge"
+    if len(compact) < 3_000 and LOGIN.search(compact):
+        return "login-wall"
+    if len(compact) < 5_000 and PAYWALL.search(compact):
+        return "paywall"
+    if len(compact) < 200:
+        return "empty"
+    return "content"
+
+
+def redirect_chain(request: Request) -> list[str]:
+    result: list[str] = []
+    current = request.redirected_from
+    while current is not None:
+        result.append(current.url)
+        current = current.redirected_from
+    result.reverse()
+    return result
+
+
+async def close_popup(page) -> None:
+    await page.close()
+
+
+async def render(args: argparse.Namespace) -> None:
+    parsed = urlparse(args.url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("browser fetch URL must use public HTTP or HTTPS")
+    host_cache: dict[str, bool] = {}
+    if not await host_is_public(parsed.hostname, host_cache):
+        raise ValueError("browser fetch URL does not resolve to a public address")
+
+    async with async_playwright() as manager:
+        try:
+            browser: Browser = await manager.chromium.launch(headless=True)
+        except Exception as error:
+            raise RuntimeError(
+                "Chromium is unavailable; run `uv run --with playwright==1.55.0 "
+                "playwright install chromium`"
+            ) from error
+        chromium_version = browser.version
+        major = chromium_version.split(".", 1)[0]
+        context = await browser.new_context(
+            accept_downloads=False,
+            java_script_enabled=True,
+            locale="en-US",
+            service_workers="block",
+            timezone_id="UTC",
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 "
+                "Safari/537.36"
+            ),
+            viewport={"width": 1440, "height": 900},
+        )
+        await context.clear_permissions()
+        request_count = 0
+
+        async def route_request(route: Route) -> None:
+            nonlocal request_count
+            request_count += 1
+            request = route.request
+            if request_count > MAX_REQUESTS or request.resource_type in BLOCKED_RESOURCE_TYPES:
+                await route.abort()
+                return
+            target = urlparse(request.url)
+            if target.scheme in {"data", "blob", "about"}:
+                await route.continue_()
+                return
+            if target.scheme not in {"http", "https"} or not target.hostname:
+                await route.abort()
+                return
+            if not await host_is_public(target.hostname, host_cache):
+                await route.abort()
+                return
+            await route.continue_()
+
+        await context.route("**/*", route_request)
+        page = await context.new_page()
+        page.on("dialog", lambda dialog: asyncio.create_task(dialog.dismiss()))
+        page.on("popup", lambda popup: asyncio.create_task(close_popup(popup)))
+        response = await page.goto(args.url, wait_until="domcontentloaded", timeout=45_000)
+        if response is None:
+            raise RuntimeError("browser navigation returned no main response")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=5_000)
+        except Exception:
+            pass
+        for position in (900, 1_800, 3_600, 0):
+            await page.evaluate("position => window.scrollTo(0, position)", position)
+            await page.wait_for_timeout(250)
+
+        await page.evaluate(
+            """
+            () => {
+              for (const attribute of ["href", "src", "action"]) {
+                for (const element of document.querySelectorAll(`[${attribute}]`)) {
+                  const value = element.getAttribute(attribute);
+                  if (!value || value.startsWith("#")) continue;
+                  try { element.setAttribute(attribute, new URL(value, document.baseURI).href); }
+                  catch (_) { /* Preserve malformed source values verbatim. */ }
+                }
+              }
+            }
+            """
+        )
+
+        rendered = (await page.content()).encode("utf-8")
+        if not rendered or len(rendered) > MAX_ARTIFACT_BYTES:
+            raise RuntimeError("rendered DOM is empty or exceeds the 20 MiB bound")
+        args.rendered_dom.write_bytes(rendered)
+
+        content_type = (await response.header_value("content-type")) or ""
+        raw_written = False
+        if "html" in content_type.casefold():
+            try:
+                raw = await response.body()
+            except Exception:
+                raw = b""
+            if raw and len(raw) <= MAX_ARTIFACT_BYTES:
+                args.raw_response.write_bytes(raw)
+                raw_written = True
+
+        visible = await page.locator("body").inner_text(timeout=5_000)
+        classification = classify(visible)
+        if response.status == 401:
+            classification = "login-wall"
+        elif response.status == 402:
+            classification = "paywall"
+        elif response.status in {403, 429}:
+            classification = "bot-challenge"
+        elif response.status >= 400:
+            classification = "http-error"
+        metadata = {
+            "protocol": "sandwalk.playwright-render.v1",
+            "profile": PROFILE,
+            "requested_url": args.url,
+            "final_url": page.url,
+            "status": response.status,
+            "content_type": content_type,
+            "redirect_chain": redirect_chain(response.request),
+            "request_count": request_count,
+            "visible_text_characters": len(" ".join(visible.split())),
+            "classification": classification,
+            "raw_response_written": raw_written,
+            "playwright_version": version("playwright"),
+            "chromium_version": chromium_version,
+            "viewport": {"width": 1440, "height": 900},
+            "locale": "en-US",
+            "timezone": "UTC",
+            "wait_profile": "domcontentloaded-networkidle-5s-scroll-v1",
+        }
+        args.metadata.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+        await context.close()
+        await browser.close()
+
+
+async def bounded_render(args: argparse.Namespace) -> None:
+    await asyncio.wait_for(render(args), timeout=60)
+
+
+def main() -> None:
+    args = arguments()
+    if args.version:
+        print(f"playwright {version('playwright')}")
+        return
+    try:
+        asyncio.run(bounded_render(args))
+    except Exception as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(65) from error
+
+
+if __name__ == "__main__":
+    main()

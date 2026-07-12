@@ -13,6 +13,9 @@ fi
 
 output_format=
 output_path=
+header_path=
+filter_path=
+arxiv_filter=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --to=*)
@@ -29,11 +32,25 @@ while [ "$#" -gt 0 ]; do
       shift
       output_path=${1:-}
       ;;
+    --lua-filter=*)
+      arxiv_filter=true
+      filter_path=${1#--lua-filter=}
+      ;;
+    --include-in-header=*)
+      header_path=${1#--include-in-header=}
+      ;;
   esac
   shift
 done
 
-if [ -n "$output_path" ]; then
+[ -z "${PANDOC_TEST_HEADER_LOG:-}" ] ||
+  [ -z "$header_path" ] ||
+  cp "$header_path" "$PANDOC_TEST_HEADER_LOG"
+[ -z "${PANDOC_TEST_FILTER_LOG:-}" ] ||
+  [ -z "$filter_path" ] ||
+  cp "$filter_path" "$PANDOC_TEST_FILTER_LOG"
+
+if [ -n "$output_path" ] && [ "$output_format" != "gfm-raw_html" ]; then
   cat >"$output_path" <<'EOF'
 %PDF-1.7
 fake pandoc pdf
@@ -46,8 +63,34 @@ fi
   exit 64
 }
 
-cat <<'EOF'
-# Fetched title
+if [ "$arxiv_filter" = true ]; then
+  output='# Fetched paper
 
-Queryable body.
-EOF
+## Introduction
+
+One.
+
+Two.
+
+Three.
+
+Four.
+
+Five.
+
+Six.
+
+Seven.
+
+Eight.'
+else
+  output='# Fetched title
+
+Queryable body.'
+fi
+
+if [ -n "$output_path" ]; then
+  printf '%s\n' "$output" >"$output_path"
+else
+  printf '%s\n' "$output"
+fi

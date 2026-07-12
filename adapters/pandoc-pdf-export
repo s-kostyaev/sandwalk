@@ -61,9 +61,67 @@ artifact="$output_directory/report.pdf"
 manifest="$output_directory/manifest.json"
 manifest_temporary="$output_directory/manifest.json.tmp"
 link_filter="$output_directory/citation-links.lua"
-rm -f "$artifact" "$manifest" "$manifest_temporary" "$link_filter"
+font_header="$output_directory/unicode-fonts.tex"
+rm -f "$artifact" "$manifest" "$manifest_temporary" "$link_filter" "$font_header"
+
+command -v fc-match >/dev/null 2>&1 || {
+  printf '%s\n' 'fontconfig (fc-match) is required for Unicode PDF export' >&2
+  exit 69
+}
+
+find_cyrillic_font() {
+  font_path=$(fc-match -f '%{file}' "$1:charset=0410-044f,0401,0451" 2>/dev/null | sed -n '1p')
+  [ -n "$font_path" ] && [ -f "$font_path" ] || {
+    printf '%s\n' "no installed $1 font supports Russian Cyrillic" >&2
+    exit 69
+  }
+  printf '%s\n' "$font_path"
+}
+
+write_font_command() {
+  command=$1
+  font_path=$2
+  font_directory=$(dirname "$font_path")
+  font_file=$(basename "$font_path")
+  printf '\\%s{%s}[Path=%s/]\n' "$command" "$font_file" "$font_directory"
+}
+
+mainfont_path=$(find_cyrillic_font serif)
+sansfont_path=$(find_cyrillic_font sans-serif)
+monofont_path=$(find_cyrillic_font monospace)
+{
+  printf '%s\n' '\usepackage{pdflscape}'
+  write_font_command setmainfont "$mainfont_path"
+  write_font_command setsansfont "$sansfont_path"
+  write_font_command setmonofont "$monofont_path"
+} >"$font_header"
 
 cat >"$link_filter" <<'EOF'
+local function fit_table_columns(table)
+  local column_count = #table.colspecs
+  if column_count == 0 then
+    return table
+  end
+
+  for index = 1, column_count do
+    table.colspecs[index][2] = 1 / column_count
+  end
+  return table
+end
+
+local function render_table(table)
+  table = fit_table_columns(table)
+  if #table.colspecs < 5 then
+    return table
+  end
+
+  return
+    { pandoc.RawBlock('latex', '\\begin{landscape}\\small')
+    , table
+    , pandoc.RawBlock('latex', '\\end{landscape}')
+    }
+end
+
 function Pandoc(document)
   local source_list = nil
   local saw_sources = false
@@ -94,6 +152,9 @@ function Pandoc(document)
   end
 
   return document:walk({
+    Table = function(table)
+      return render_table(table)
+    end,
     Str = function(element)
       local before, number, after =
         element.text:match("^(.-)%[(%d+)%](.*)$")
@@ -125,6 +186,8 @@ EOF
 pandoc \
   --from=gfm \
   --lua-filter="$link_filter" \
+  --pdf-engine=xelatex \
+  --include-in-header="$font_header" \
   --variable=colorlinks:true \
   --variable=linkcolor:blue \
   --variable=urlcolor:blue \
@@ -132,7 +195,7 @@ pandoc \
   "$sources_path" \
   --output="$artifact"
 
-rm -f "$link_filter"
+rm -f "$link_filter" "$font_header"
 
 [ -s "$artifact" ] && [ "$(LC_ALL=C head -c 5 "$artifact")" = "%PDF-" ] || {
   printf '%s\n' 'pandoc did not produce a PDF artifact' >&2

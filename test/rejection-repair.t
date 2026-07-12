@@ -23,7 +23,22 @@ returns to a subject-aware search instead of forcing unusable evidence.
     "action": "search",
       "research_objective": "Fixture step",
       "step_title": "Fixture step"
-    "editable": { "query": "Fixture step — Fixture step" },
+    "editable": { "query": "Fixture step — Fixture step", "source_root": "" },
+
+The packet can select a sandbox-visible local source root without bypassing
+Sandwalk retrieval.
+
+  $ mkdir -p "local documents"
+  $ touch "local documents/Architecture Notes.pdf"
+  $ sed -e 's#"source_root": ""#"source_root": "'"$PWD"'/local documents"#' \
+  >   reject/hit/artifacts/work/current.json > local-search.json
+  $ mv local-search.json reject/hit/artifacts/work/current.json
+  $ PATH="$PWD/fakes:$PATH" sandwalk apply \
+  >   --file reject/hit/artifacts/work/current.json >/dev/null
+  $ sqlite3 reject/hit/database/sandwalk.sqlite3 \
+  >   "SELECT source_root FROM search_queries ORDER BY query_id DESC LIMIT 1;" | \
+  >   sed "s#$PWD#ROOT#"
+  ROOT/local documents
 
 An agent can reject a bad query path and restart search without exhausting all
 of its irrelevant hits. Guidance prefers the newest query.
@@ -115,7 +130,7 @@ rejects the previous evidence for this step.
   >   --file repair/repair-test/artifacts/work/current.json >/dev/null
   $ sandwalk continue --slug repair-test --directory-prefix repair | \
   >   sed -E 's/claim_[0-9a-f]{32}/claim_ID/g'
-  {"ok":true,"result":{"packet":"repair/repair-test/artifacts/work/current.json","loop":"Edit only editable; keep integrity_md5 unchanged; apply the packet; then run continue again.","phase":"researching","action":"create-excerpt","reason":"Inspect the selected normalized snapshot, then create an exact excerpt from a semantically relevant range.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_ID","snapshot":"snap_00000000000000000000000000000001","document_path":"workspace/repair-test/artifacts/snapshots/snap_00000000000000000000000000000001/document.md"},"next":"'sandwalk' 'apply' '--file' 'repair/repair-test/artifacts/work/current.json'"}
+  {"ok":true,"result":{"packet":"repair/repair-test/artifacts/work/current.json","loop":"Edit only editable; keep integrity_md5 unchanged; apply the packet; then run continue again.","phase":"researching","action":"create-excerpt","reason":"Inspect the selected normalized snapshot, then create an exact excerpt from a semantically relevant range.","advisory":true,"alternatives_possible":true,"step":"fixture-step","claim":"claim_ID","snapshot":"snap_00000000000000000000000000000001","document_path":"workspace/repair-test/artifacts/snapshots/snap_00000000000000000000000000000001/document.md","document_media_type":"text/markdown"},"next":"'sandwalk' 'apply' '--file' 'repair/repair-test/artifacts/work/current.json'"}
 
 Released schema 21 migrates candidate rejection and finding repair state.
 
@@ -125,4 +140,4 @@ Released schema 21 migrates candidate rejection and finding repair state.
   $ sandwalk continue --slug legacy21 --directory-prefix legacy21 >/dev/null
   $ sqlite3 legacy21/legacy21/database/sandwalk.sqlite3 \
   >   "SELECT (SELECT COUNT(*) FROM candidate_rejections), (SELECT COUNT(*) FROM finding_repairs), user_version FROM pragma_user_version;"
-  0|0|22
+  0|0|24
