@@ -38,7 +38,9 @@ type is used:
 - `rg` for local plain-text snapshots and flat transcripts.
 - `ugrep+` for local source-root discovery.
 - `ddgr` for the bundled web search adapter.
-- `pandoc` and `curl` for web page/PDF retrieval and PDF export paths.
+- `pandoc` and `curl` for web page/PDF retrieval and PDF export paths. PDF
+  export additionally requires `xelatex` and fontconfig's `fc-match`; the
+  exporter selects installed fonts with Russian Cyrillic support.
 - `yt-dlp` for YouTube caption snapshots.
 
 Docling-based local and PDF normalization also uses the adapter's pinned

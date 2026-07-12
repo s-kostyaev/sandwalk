@@ -13,6 +13,7 @@ fi
 
 output_format=
 output_path=
+header_path=
 arxiv_filter=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -33,9 +34,16 @@ while [ "$#" -gt 0 ]; do
     --lua-filter=*)
       arxiv_filter=true
       ;;
+    --include-in-header=*)
+      header_path=${1#--include-in-header=}
+      ;;
   esac
   shift
 done
+
+[ -z "${PANDOC_TEST_HEADER_LOG:-}" ] ||
+  [ -z "$header_path" ] ||
+  cp "$header_path" "$PANDOC_TEST_HEADER_LOG"
 
 if [ -n "$output_path" ] && [ "$output_format" != "gfm-raw_html" ]; then
   cat >"$output_path" <<'EOF'

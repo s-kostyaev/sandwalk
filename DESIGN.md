@@ -757,10 +757,13 @@ The first bundled exporter is `sandwalk-export-pandoc-pdf`. It invokes Pandoc
 on the finalized report followed by its bibliography and writes
 `exports/report.pdf`. It turns rendered numeric citations such as `[1]` into
 internal links to the corresponding bibliography entries, preserves external
-URL annotations, and enables visible link colors. Pandoc PDF generation also
-requires one of its supported external PDF engines; the bundled exporter uses
-Pandoc's configured default. Additional formats and renderers use the same
-protocol rather than adding renderer logic to the Sandwalk core.
+URL annotations, and enables visible link colors. It uses XeLaTeX with the
+installed serif, sans-serif, and monospaced fonts that support Russian
+Cyrillic, selected through fontconfig and passed to XeLaTeX by file path. This
+makes Unicode text, including Cyrillic, render consistently without assuming a
+particular installed font family. Pandoc PDF generation therefore requires
+XeLaTeX and fontconfig. Additional formats and renderers use the same protocol
+rather than adding renderer logic to the Sandwalk core.
 
 ## Audit log
 
