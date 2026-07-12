@@ -1,7 +1,7 @@
 open! Core
 open! Async
 
-let version = "0.1.0-dev"
+let version = "0.1.0"
 
 let about_command =
   Async.Command.async

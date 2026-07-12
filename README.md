@@ -29,6 +29,21 @@ canonical architecture and invariants.
 The portable agent skill is installed under
 `share/sandwalk/skills/deep-research`.
 
+## Installation
+
+The initial release can be installed from its Git tag with opam:
+
+```console
+opam pin add sandwalk https://github.com/s-kostyaev/sandwalk.git#v0.1.0
+```
+
+Install only the runtime tools needed by the source and export adapters you
+use. The browser fallback additionally needs its matching Chromium runtime:
+
+```console
+uv run --with playwright==1.55.0 playwright install chromium
+```
+
 ## Runtime Tools
 
 Sandwalk itself is built from the OCaml dependencies in `dune-project`, while
@@ -58,7 +73,7 @@ Sandwalk uses OCaml, Dune, and the Jane Street library ecosystem.
 
 ```console
 opam install . --deps-only --with-test
-dune build
+dune build @install
 dune runtest
 dune exec sandwalk -- about
 ```
