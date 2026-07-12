@@ -14,6 +14,7 @@ fi
 output_format=
 output_path=
 header_path=
+filter_path=
 arxiv_filter=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -33,6 +34,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --lua-filter=*)
       arxiv_filter=true
+      filter_path=${1#--lua-filter=}
       ;;
     --include-in-header=*)
       header_path=${1#--include-in-header=}
@@ -44,6 +46,9 @@ done
 [ -z "${PANDOC_TEST_HEADER_LOG:-}" ] ||
   [ -z "$header_path" ] ||
   cp "$header_path" "$PANDOC_TEST_HEADER_LOG"
+[ -z "${PANDOC_TEST_FILTER_LOG:-}" ] ||
+  [ -z "$filter_path" ] ||
+  cp "$filter_path" "$PANDOC_TEST_FILTER_LOG"
 
 if [ -n "$output_path" ] && [ "$output_format" != "gfm-raw_html" ]; then
   cat >"$output_path" <<'EOF'

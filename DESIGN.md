@@ -762,8 +762,10 @@ installed serif, sans-serif, and monospaced fonts that support Russian
 Cyrillic, selected through fontconfig and passed to XeLaTeX by file path. This
 makes Unicode text, including Cyrillic, render consistently without assuming a
 particular installed font family. Pandoc PDF generation therefore requires
-XeLaTeX and fontconfig. Additional formats and renderers use the same protocol
-rather than adding renderer logic to the Sandwalk core.
+XeLaTeX and fontconfig. The exporter assigns equal bounded widths to Markdown
+table columns, so cells wrap within the PDF text area instead of extending past
+the page edge. Additional formats and renderers use the same protocol rather
+than adding renderer logic to the Sandwalk core.
 
 ## Audit log
 

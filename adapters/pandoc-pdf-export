@@ -96,6 +96,18 @@ monofont_path=$(find_cyrillic_font monospace)
 } >"$font_header"
 
 cat >"$link_filter" <<'EOF'
+local function fit_table_columns(table)
+  local column_count = #table.colspecs
+  if column_count == 0 then
+    return table
+  end
+
+  for index = 1, column_count do
+    table.colspecs[index][2] = 1 / column_count
+  end
+  return table
+end
+
 function Pandoc(document)
   local source_list = nil
   local saw_sources = false
@@ -126,6 +138,9 @@ function Pandoc(document)
   end
 
   return document:walk({
+    Table = function(table)
+      return fit_table_columns(table)
+    end,
     Str = function(element)
       local before, number, after =
         element.text:match("^(.-)%[(%d+)%](.*)$")

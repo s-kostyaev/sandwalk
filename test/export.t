@@ -9,6 +9,7 @@ atomically published PDF.
 
   $ PANDOC_TEST_LOG="$PWD/pandoc-export.log" \
   > PANDOC_TEST_HEADER_LOG="$PWD/unicode-fonts.tex" PATH="$PWD/fakes:$PATH" \
+  > PANDOC_TEST_FILTER_LOG="$PWD/pdf-filter.lua" \
   >   sandwalk export pdf \
   >   --slug export-test --directory-prefix workspace \
   >   --adapter ../adapters/pandoc-pdf-export | \
@@ -26,6 +27,8 @@ engine to fail.
   $ grep -E '^\\setmainfont\{[^}]+\}\[Path=[^]]+/\]$' unicode-fonts.tex >/dev/null
   $ grep -E '^\\setsansfont\{[^}]+\}\[Path=[^]]+/\]$' unicode-fonts.tex >/dev/null
   $ grep -E '^\\setmonofont\{[^}]+\}\[Path=[^]]+/\]$' unicode-fonts.tex >/dev/null
+  $ grep -F 'local function fit_table_columns(table)' pdf-filter.lua >/dev/null
+  $ grep -F 'table.colspecs[index][2] = 1 / column_count' pdf-filter.lua >/dev/null
 
 The exporter request and manifest are versioned contracts.
 
