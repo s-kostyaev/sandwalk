@@ -74,13 +74,18 @@ hashes, and queryability check. Use `mq` to navigate `text/markdown`. For
 For excerpts, use either `--lines first:last` or
 `--text-file path [--occurrence N]`.
 
-The default web adapter dispatches genuine remote PDFs to the same Docling
-normalizer instead of treating binary input as HTML. For arXiv abstract, HTML,
-or PDF hits it prefers the structured article HTML for `document.md`, always
-retains the matching exact-version PDF as `source.pdf` for the user, and falls
-back to that PDF when the HTML representation fails its structural gate. Read
-and cite through the returned immutable primary document; do not invoke either
-representation URL directly.
+The default web adapter first uses the bounded curl connector. It dispatches
+genuine remote PDFs to the same Docling normalizer instead of treating binary
+input as HTML. For a non-PDF transport failure, recognized bot challenge, or
+HTML application shell, it makes exactly one fallback attempt in a fresh,
+non-persistent Playwright context. Browser challenge, login, and paywall results
+are rejected rather than published. The selected manifest records any fallback
+and its reason. For arXiv abstract, HTML, or PDF hits the curl connector prefers
+the structured article HTML for `document.md`, always retains the matching
+exact-version PDF as `source.pdf` for the user, and falls back to that PDF when
+the HTML representation fails its structural gate. Read and cite through the
+returned immutable primary document; do not invoke either representation URL,
+curl, or the browser directly.
 
 YouTube hits select `sandwalk-fetch-youtube` by default. The bundled adapter
 requires `yt-dlp` but downloads only metadata and one caption track. A

@@ -69,6 +69,108 @@ The manifest is not published when mq cannot query the Markdown.
 
   $ test ! -e rejected-output/manifest.json
 
+Playwright fetch publishes the rendered DOM, browser metadata, and normalized
+Markdown through the ordinary fetch protocol.
+
+  $ mkdir browser-output
+  $ PLAYWRIGHT_TEST_LOG="$PWD/playwright.log" PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/playwright-fetch <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://example.test/application","output_directory":"browser-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"browser-output/manifest.json"}
+
+  $ jq -r '[.adapter.name, .adapter.extraction_profile, .browser.classification, .artifacts.rendered_dom, .queryability_check.ok] | @tsv' browser-output/manifest.json
+  playwright	playwright-rendered-dom-to-gfm-no-raw-html-v1	content	rendered-dom.html	true
+
+  $ cat playwright.log
+  https://example.test/application
+
+Browser challenge, login, and paywall classifications fail before publishing a
+manifest.
+
+  $ mkdir browser-challenge-output
+  $ PLAYWRIGHT_FAKE_CLASSIFICATION=bot-challenge PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/playwright-fetch >/dev/null <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://example.test/challenge","output_directory":"browser-challenge-output"}
+  > EOF
+  browser result classified as bot-challenge
+  [65]
+
+  $ test ! -e browser-challenge-output/manifest.json
+
+  $ mkdir browser-forbidden-output
+  $ PLAYWRIGHT_FAKE_STATUS=403 PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/playwright-fetch >/dev/null <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://example.test/forbidden","output_directory":"browser-forbidden-output"}
+  > EOF
+  browser result classified as bot-challenge
+  [65]
+
+  $ test ! -e browser-forbidden-output/manifest.json
+
+The default web dispatcher keeps a successful static curl result without
+starting Chromium.
+
+  $ mkdir web-static-output
+  $ PLAYWRIGHT_TEST_LOG="$PWD/static-playwright.log" PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/web-fetch <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://example.test/static","output_directory":"web-static-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"web-static-output/manifest.json"}
+
+  $ jq -r '[.adapter.name, (.fallback // null)] | @tsv' web-static-output/manifest.json
+  curl-pandoc	
+
+  $ test ! -e static-playwright.log
+
+Bot challenges and HTML application shells make exactly one browser fallback
+and record the typed reason in the selected manifest.
+
+  $ mkdir web-challenge-output
+  $ CURL_FAKE_CHALLENGE=1 PLAYWRIGHT_TEST_LOG="$PWD/challenge-playwright.log" \
+  >   PATH="$PWD/fakes:$PATH" ../adapters/web-fetch <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://example.test/challenge","output_directory":"web-challenge-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"web-challenge-output/manifest.json"}
+
+  $ jq -r '[.adapter.name, .fallback.from, .fallback.to, .fallback.reason, .fallback.attempts] | @tsv' web-challenge-output/manifest.json
+  playwright	curl-pandoc	playwright	bot-challenge	2
+
+  $ wc -l < challenge-playwright.log | tr -d ' '
+  1
+
+  $ mkdir web-shell-output
+  $ CURL_FAKE_DYNAMIC_SHELL=1 PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/web-fetch <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://example.test/application","output_directory":"web-shell-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"web-shell-output/manifest.json"}
+
+  $ jq -r '.fallback.reason' web-shell-output/manifest.json
+  html-application-shell
+
+A non-PDF primary adapter failure can fall back, while a PDF failure never
+starts Chromium.
+
+  $ mkdir web-failure-output
+  $ CURL_FORCE_FAILURE=1 PATH="$PWD/fakes:$PATH" ../adapters/web-fetch <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://example.test/article","output_directory":"web-failure-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"web-failure-output/manifest.json"}
+
+  $ jq -r '.fallback.reason' web-failure-output/manifest.json
+  primary-adapter-failed
+
+  $ mkdir web-pdf-failure-output
+  $ CURL_FAKE_PDF_FAILURE=1 PLAYWRIGHT_TEST_LOG="$PWD/pdf-playwright.log" \
+  >   PATH="$PWD/fakes:$PATH" ../adapters/web-fetch >/dev/null <<'EOF'
+  > {"protocol":"sandwalk.fetch.v1","url":"https://example.test/paper.pdf","output_directory":"web-pdf-failure-output"}
+  > EOF
+  simulated PDF normalization failure
+  [65]
+
+  $ test ! -e pdf-playwright.log
+
 YouTube snapshots use source-provided chapters as Markdown structure.
 
   $ mkdir youtube-chapters-output

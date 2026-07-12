@@ -1,0 +1,153 @@
+#!/bin/sh
+set -eu
+
+profile='playwright-rendered-dom-to-gfm-no-raw-html-v1'
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+url=$(printf '%s' "$request" | jq -er '.url')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+
+[ "$protocol" = "sandwalk.fetch.v1" ] || {
+  printf '%s\n' 'unsupported fetch protocol' >&2
+  exit 64
+}
+printf '%s' "$url" | grep -Eq '^https?://' || {
+  printf '%s\n' 'browser fetch URL must use HTTP or HTTPS' >&2
+  exit 64
+}
+[ -n "$output_directory" ] || {
+  printf '%s\n' 'fetch output directory must not be empty' >&2
+  exit 64
+}
+
+mkdir -p "$output_directory"
+rendered="$output_directory/rendered-dom.html"
+raw="$output_directory/raw-response.html"
+metadata="$output_directory/browser-metadata.json"
+document="$output_directory/document.md"
+manifest="$output_directory/manifest.json"
+manifest_temporary="$output_directory/manifest.json.tmp"
+trap 'rm -f "$manifest_temporary"' EXIT HUP INT TERM
+rm -f "$manifest" "$manifest_temporary"
+
+sandwalk-playwright-render \
+  --url "$url" \
+  --rendered-dom "$rendered" \
+  --raw-response "$raw" \
+  --metadata "$metadata"
+
+classification=$(jq -er '.classification' "$metadata")
+status=$(jq -er '.status' "$metadata")
+case "$status" in
+  401) classification=login-wall ;;
+  402) classification=paywall ;;
+  403|429) classification=bot-challenge ;;
+  4??|5??) classification=http-error ;;
+esac
+[ "$classification" = content ] || {
+  printf 'browser result classified as %s\n' "$classification" >&2
+  exit 65
+}
+
+pandoc --from=html --to=gfm-raw_html --wrap=none "$rendered" >"$document"
+[ -s "$document" ] || {
+  printf '%s\n' 'browser fetch produced an empty Markdown document' >&2
+  exit 65
+}
+mq "$document" '.tree' >/dev/null
+
+sha256_file() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+input_artifact='rendered-dom.html'
+[ -s "$raw" ] && input_artifact='raw-response.html'
+input_sha256=$(sha256_file "$output_directory/$input_artifact")
+rendered_sha256=$(sha256_file "$rendered")
+document_sha256=$(sha256_file "$document")
+metadata_sha256=$(sha256_file "$metadata")
+configuration_sha256=$(
+  printf '%s\n%s\n' "$profile" 'public-ephemeral-no-downloads-v1' |
+    shasum -a 256 |
+    awk '{print $1}'
+)
+final_url=$(jq -er '.final_url' "$metadata")
+content_type=$(jq -r '.content_type' "$metadata")
+redirect_count=$(jq '.redirect_chain | length' "$metadata")
+visible_text_characters=$(jq '.visible_text_characters' "$metadata")
+request_count=$(jq '.request_count' "$metadata")
+playwright_version=$(jq -r '.playwright_version' "$metadata")
+chromium_version=$(jq -r '.chromium_version' "$metadata")
+wait_profile=$(jq -r '.wait_profile' "$metadata")
+mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
+pandoc_version=$(pandoc --version | sed -n '1{s/"/\\"/g;p;}')
+
+jq -n \
+  --arg protocol "sandwalk.fetch-manifest.v1" \
+  --arg requested_url "$url" \
+  --arg final_url "$final_url" \
+  --arg content_type "$content_type" \
+  --arg input_artifact "$input_artifact" \
+  --arg input_sha256 "$input_sha256" \
+  --arg rendered_sha256 "$rendered_sha256" \
+  --arg document_sha256 "$document_sha256" \
+  --arg metadata_sha256 "$metadata_sha256" \
+  --arg configuration_sha256 "$configuration_sha256" \
+  --arg profile "$profile" \
+  --arg playwright_version "$playwright_version" \
+  --arg chromium_version "$chromium_version" \
+  --arg pandoc_version "$pandoc_version" \
+  --arg mq_version "$mq_version" \
+  --arg wait_profile "$wait_profile" \
+  --argjson status "$status" \
+  --argjson redirect_count "$redirect_count" \
+  --argjson visible_text_characters "$visible_text_characters" \
+  --argjson request_count "$request_count" \
+  '{
+    protocol: $protocol,
+    adapter: {
+      name: "playwright",
+      protocol_version: 1,
+      implementation_version: $playwright_version,
+      chromium_version: $chromium_version,
+      extraction_profile: $profile,
+      pandoc_version: $pandoc_version,
+      mq_version: $mq_version
+    },
+    requested_url: $requested_url,
+    final_url: $final_url,
+    document_media_type: "text/markdown",
+    redirect_count: $redirect_count,
+    http: {
+      status: $status,
+      content_type: $content_type,
+      request_accept: "browser-navigation"
+    },
+    browser: {
+      classification: "content",
+      visible_text_characters: $visible_text_characters,
+      request_count: $request_count,
+      viewport: {width: 1440, height: 900},
+      locale: "en-US",
+      timezone: "UTC",
+      wait_profile: $wait_profile
+    },
+    hashes: {
+      input_sha256: $input_sha256,
+      rendered_dom_sha256: $rendered_sha256,
+      normalized_document_sha256: $document_sha256,
+      browser_metadata_sha256: $metadata_sha256,
+      sanitized_configuration_sha256: $configuration_sha256
+    },
+    artifacts: ({
+      document: "document.md",
+      rendered_dom: "rendered-dom.html",
+      browser_metadata: "browser-metadata.json",
+      input: $input_artifact
+    } + (if $input_artifact == "raw-response.html" then {raw_response: $input_artifact} else {} end)),
+    queryability_check: {tool: "mq", query: ".tree", ok: true}
+  }' >"$manifest_temporary"
+
+mv "$manifest_temporary" "$manifest"
+jq -nc --arg protocol "sandwalk.fetch-result.v1" --arg manifest "$manifest" \
+  '{protocol: $protocol, manifest: $manifest}'

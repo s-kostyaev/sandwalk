@@ -15,7 +15,10 @@ Docling's structured JSON and quality report.
 Remote PDFs use the same normalization path. arXiv snapshots prefer the
 structured HTML article for agents while always retaining the matching
 versioned PDF for readers, with PDF-to-Docling fallback when HTML fails its
-quality gate. YouTube snapshots use real source chapters when present and
+quality gate. The default web dispatcher makes one bounded Playwright fallback
+for JavaScript application shells, bot challenges, and non-PDF transport
+failures; browser challenge, login, paywall, and HTTP-error pages are rejected.
+YouTube snapshots use real source chapters when present and
 otherwise retain a flat timestamped `transcript.txt`; the latter is never
 disguised as Markdown. The YouTube adapter requires `yt-dlp` and downloads
 captions rather than video or audio. Packet decisions can durably
@@ -41,10 +44,13 @@ type is used:
 - `pandoc` and `curl` for web page/PDF retrieval and PDF export paths. PDF
   export additionally requires `xelatex` and fontconfig's `fc-match`; the
   exporter selects installed fonts with Russian Cyrillic support.
+- `uv` for the pinned Playwright browser fallback. Install its matching
+  Chromium runtime once with
+  `uv run --with playwright==1.55.0 playwright install chromium`.
 - `yt-dlp` for YouTube caption snapshots.
 
-Docling-based local and PDF normalization also uses the adapter's pinned
-Docling profile through `uv`.
+Docling-based local and PDF normalization also uses its pinned profile through
+`uv`.
 
 ## Development
 

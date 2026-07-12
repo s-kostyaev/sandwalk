@@ -92,6 +92,22 @@ source text is preserved as text/plain without going through Docling.
   >   "$file_snapshot/manifest.json"
   file-text	document.el	text/plain
 
+Ordinary remote locators select the bounded web dispatcher by default, which
+can publish a Playwright fallback through the unchanged snapshot protocol.
+
+  $ sqlite3 workspace/fetch-test/database/sandwalk.sqlite3 \
+  >   "INSERT INTO search_hits (hit_ref, query_id, position, url, title, snippet) VALUES ('hit_00000000000000000000000000000006', 1, 3, 'https://example.test/challenge', 'Dynamic fixture', 'Dynamic fixture snippet.');"
+  $ browser_fetch=$(CURL_FAKE_CHALLENGE=1 PATH="$PWD/fakes:$PATH" sandwalk fetch \
+  >   --slug fetch-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   hit_00000000000000000000000000000006)
+  $ printf '%s\n' "$browser_fetch" | sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
+  {"ok":true,"result":{"snapshot":"snap_ID","document_path":"workspace/fetch-test/artifacts/snapshots/snap_ID/document.md","document_media_type":"text/markdown"}}
+
+  $ browser_snapshot=$(dirname "$(printf '%s' "$browser_fetch" | jq -r '.result.document_path')")
+  $ jq -r '[.adapter.name, .fallback.reason] | @tsv' "$browser_snapshot/manifest.json"
+  playwright	bot-challenge
+
 Research fetches fail before invoking an adapter when no claim is supplied.
 
   $ PATH="$PWD/fakes:$PATH" sandwalk fetch \

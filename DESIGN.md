@@ -409,6 +409,39 @@ transport has explicit connection and total-request bounds; the adapter process
 has the same 15-minute outer timeout as a local document fetch because a remote
 PDF may require first-use model acquisition and CPU-only OCR.
 
+The default `sandwalk-fetch-web` connector is a bounded dispatcher. It first
+runs the curl connector because server-provided Markdown, static HTML, and PDFs
+are cheaper and preserve a response closer to the publisher's transport. It
+publishes that result directly when the normalized document contains semantic
+content. For a non-PDF transport failure, an HTML application shell, or a
+recognized bot-challenge document, it makes exactly one fallback attempt with
+`sandwalk-fetch-playwright`. PDF and other binary normalization failures never
+fall back to a browser. The selected manifest records whether fallback occurred
+and its bounded reason. A failed fallback does not publish the curl attempt's
+challenge or application shell as a snapshot.
+
+The Playwright connector executes JavaScript in a fresh, non-persistent Chromium
+context and serializes the rendered DOM after a bounded load-and-settle profile.
+It disables downloads, service workers, browser permissions, dialogs, popups,
+local-file navigation, and requests whose host resolves only to loopback,
+private, link-local, multicast, or otherwise non-global addresses. It does not
+load cookies, credentials, a user profile, stealth plugins, CAPTCHA solvers, or
+proxy configuration. Images, media, and fonts are blocked; scripts, styles, and
+same-page data requests remain available. The renderer applies request-count,
+navigation-time, settle-time, raw-response, and rendered-DOM bounds.
+
+The browser snapshot retains `raw-response.html` when the main response is
+bounded HTML, `rendered-dom.html`, sanitized browser metadata, and the normalized
+`document.md`. Pandoc converts the rendered DOM with raw HTML disabled and `mq`
+remains the final queryability gate. Browser metadata classifies the visible
+result as `content`, `empty`, `bot-challenge`, `login-wall`, `paywall`, or
+`http-error`.
+Only `content` can be published. The manifest records the Playwright and
+Chromium versions, viewport, locale, timezone, wait profile, visible-text size,
+input and rendered-DOM hashes, normalized-document hash, and sanitized
+configuration digest under the
+`playwright-rendered-dom-to-gfm-no-raw-html-v1` extraction profile.
+
 A response explicitly labeled `text/markdown` becomes `document.md` directly.
 HTML uses the HTML-to-GitHub-flavored Markdown fallback with pandoc's raw-HTML
 extension disabled. A response with PDF magic bytes, regardless of a generic or

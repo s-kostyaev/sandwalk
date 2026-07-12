@@ -3,7 +3,10 @@
  (files
   (ddgr-search as sandwalk-search-ddgr)
   (ugrep-search as sandwalk-search-ugrep)
+  (web-fetch as sandwalk-fetch-web)
   (curl-pandoc-fetch as sandwalk-fetch-curl-pandoc)
+  (playwright-fetch as sandwalk-fetch-playwright)
+  (playwright-render as sandwalk-playwright-render)
   (arxiv-html-filter.lua as sandwalk-arxiv-html-filter.lua)
   (file-fetch as sandwalk-fetch-file)
   (docling-fetch as sandwalk-fetch-docling)

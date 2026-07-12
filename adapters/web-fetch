@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+url=$(printf '%s' "$request" | jq -er '.url')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+
+[ "$protocol" = "sandwalk.fetch.v1" ] || {
+  printf '%s\n' 'unsupported fetch protocol' >&2
+  exit 64
+}
+printf '%s' "$url" | grep -Eq '^https?://' || {
+  printf '%s\n' 'web fetch URL must use HTTP or HTTPS' >&2
+  exit 64
+}
+
+mkdir -p "$output_directory"
+curl_attempt="$output_directory/.curl-attempt"
+browser_attempt="$output_directory/.browser-attempt"
+mkdir "$curl_attempt"
+curl_request=$(printf '%s' "$request" | jq --arg output "$curl_attempt" '.output_directory = $output')
+curl_error="$output_directory/.curl-error"
+fallback_reason=
+
+if printf '%s' "$curl_request" | sandwalk-fetch-curl-pandoc >"$output_directory/.curl-result" 2>"$curl_error"
+then
+  document=$(jq -r '.artifacts.document // "document.md"' "$curl_attempt/manifest.json")
+  media_type=$(jq -r '.document_media_type // "text/markdown"' "$curl_attempt/manifest.json")
+  if [ "$media_type" = text/markdown ] &&
+     grep -Eiq 'captcha|verify (that )?you are (a )?human|automated process|unusual traffic|access denied|request (was )?blocked|security challenge|checking your browser|just a moment' \
+       "$curl_attempt/$document" "$curl_attempt/original" 2>/dev/null
+  then
+    fallback_reason=bot-challenge
+  elif [ "$media_type" = text/markdown ] &&
+       grep -Eiq 'enable javascript|javascript (is )?(required|disabled)|turn on javascript' \
+         "$curl_attempt/$document" "$curl_attempt/original" 2>/dev/null
+  then
+    fallback_reason=javascript-required
+  elif [ "$media_type" = text/markdown ] &&
+       grep -Eiq "id=['\"](root|app|__next)['\"][^>]*>[[:space:]]*</" \
+         "$curl_attempt/original" 2>/dev/null
+  then
+    fallback_reason=html-application-shell
+  elif [ "$media_type" = text/markdown ] && [ "$(wc -c <"$curl_attempt/$document")" -lt 2000 ] &&
+       grep -Eiq '<(script|noscript)|id=.?(root|app|__next)' "$curl_attempt/original" 2>/dev/null
+  then
+    fallback_reason=html-application-shell
+  else
+    rm -f "$curl_error" "$output_directory/.curl-result"
+    for artifact in "$curl_attempt"/*; do mv "$artifact" "$output_directory/"; done
+    rmdir "$curl_attempt" "$browser_attempt" 2>/dev/null || true
+    jq -nc --arg protocol "sandwalk.fetch-result.v1" \
+      --arg manifest "$output_directory/manifest.json" \
+      '{protocol: $protocol, manifest: $manifest}'
+    exit 0
+  fi
+else
+  content_type=$(sed -nE 's/^[Cc]ontent-[Tt]ype:[[:space:]]*([^[:space:];]+).*/\1/p' "$curl_attempt/headers.txt" 2>/dev/null | tail -n 1)
+  case "$content_type" in
+    application/pdf) cat "$curl_error" >&2; exit 65 ;;
+  esac
+  case "$url" in
+    *.pdf|*.pdf\?*|*.pdf#*) cat "$curl_error" >&2; exit 65 ;;
+  esac
+  fallback_reason=primary-adapter-failed
+fi
+
+mkdir "$browser_attempt"
+browser_request=$(printf '%s' "$request" | jq --arg output "$browser_attempt" '.output_directory = $output')
+if ! printf '%s' "$browser_request" | sandwalk-fetch-playwright >"$output_directory/.browser-result"
+then
+  rm -f "$output_directory/.browser-result"
+  exit 65
+fi
+
+for artifact in "$browser_attempt"/*; do mv "$artifact" "$output_directory/"; done
+rmdir "$browser_attempt"
+jq --arg reason "$fallback_reason" \
+  '.fallback = {from: "curl-pandoc", to: "playwright", reason: $reason, attempts: 2}' \
+  "$output_directory/manifest.json" >"$output_directory/manifest.json.tmp"
+mv "$output_directory/manifest.json.tmp" "$output_directory/manifest.json"
+rm -rf "$curl_attempt"
+rm -f "$curl_error" "$output_directory/.curl-result" "$output_directory/.browser-result"
+jq -nc --arg protocol "sandwalk.fetch-result.v1" \
+  --arg manifest "$output_directory/manifest.json" \
+  '{protocol: $protocol, manifest: $manifest}'

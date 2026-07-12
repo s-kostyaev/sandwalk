@@ -133,7 +133,7 @@ let explanation = function
   | "FETCH_ADAPTER_FAILED" ->
     Some
       ( "The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON."
-      , "Verify the selected adapter and its normalizer are on PATH; local-file fetches require `sandwalk-fetch-file`, Docling for rich documents, and a sandbox-readable source root." )
+      , "Verify the selected adapter and its normalizer are on PATH. The default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root." )
   | "PLAN_EMPTY" ->
     Some
       ( "The plan has no steps, so it cannot be validated."
@@ -4761,7 +4761,7 @@ let fetch_command =
                        then "sandwalk-fetch-file"
                        else if is_youtube_url url
                        then "sandwalk-fetch-youtube"
-                       else "sandwalk-fetch-curl-pandoc")
+                       else "sandwalk-fetch-web")
                 in
                 let%bind status =
                   In_thread.run (fun () ->
@@ -4903,7 +4903,11 @@ let fetch_command =
                                (if String.is_prefix url ~prefix:"file://"
                                    || is_youtube_url url
                                    || List.mem
-                                        [ "sandwalk-fetch-curl-pandoc"
+                                        [ "sandwalk-fetch-web"
+                                        ; "web-fetch"
+                                        ; "sandwalk-fetch-playwright"
+                                        ; "playwright-fetch"
+                                        ; "sandwalk-fetch-curl-pandoc"
                                         ; "curl-pandoc-fetch"
                                         ]
                                         (Filename.basename adapter)

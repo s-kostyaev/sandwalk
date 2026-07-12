@@ -55,7 +55,28 @@ case "$accept" in
   *) printf 'unexpected Accept header: %s\n' "$accept" >&2; exit 64 ;;
 esac
 
-if [ "${CURL_FAKE_ARXIV:-}" = 1 ]; then
+if [ "${CURL_FORCE_FAILURE:-}" = 1 ]; then
+  printf '%s\n' 'simulated web transport failure' >&2
+  exit 22
+elif [ "${CURL_FAKE_PDF_FAILURE:-}" = 1 ]; then
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n\r\n' >"$headers"
+  printf '%s\n' 'simulated PDF normalization failure' >&2
+  exit 22
+elif [ "${CURL_FAKE_CHALLENGE:-}" = 1 ]; then
+  cat >"$output" <<'EOF'
+<!doctype html><html><body><h2>Your current User-Agent appears to be from an automated process</h2></body></html>
+EOF
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n' >"$headers"
+  [ "$write_out" = true ] &&
+    printf '%s' '{"url_effective":"https://example.test/challenge","http_code":200,"num_redirects":0,"content_type":"text/html"}'
+elif [ "${CURL_FAKE_DYNAMIC_SHELL:-}" = 1 ]; then
+  cat >"$output" <<'EOF'
+<!doctype html><html><body><div id="root"></div><script src="app.js"></script></body></html>
+EOF
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n' >"$headers"
+  [ "$write_out" = true ] &&
+    printf '%s' '{"url_effective":"https://example.test/application","http_code":200,"num_redirects":0,"content_type":"text/html"}'
+elif [ "${CURL_FAKE_ARXIV:-}" = 1 ]; then
   case "$url" in
     https://arxiv.org/html/*)
       if [ "${CURL_FAKE_ARXIV_HTML_FAILURE:-}" = 1 ]; then

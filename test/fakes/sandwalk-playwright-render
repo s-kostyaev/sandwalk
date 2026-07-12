@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'playwright 1.55.test'
+  exit 0
+fi
+
+url=
+rendered=
+raw=
+metadata=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --url) url=$2; shift 2 ;;
+    --rendered-dom) rendered=$2; shift 2 ;;
+    --raw-response) raw=$2; shift 2 ;;
+    --metadata) metadata=$2; shift 2 ;;
+    *) printf 'unexpected playwright argument: %s\n' "$1" >&2; exit 64 ;;
+  esac
+done
+
+[ -z "${PLAYWRIGHT_TEST_LOG:-}" ] || printf '%s\n' "$url" >>"$PLAYWRIGHT_TEST_LOG"
+cat >"$rendered" <<'EOF'
+<!doctype html><html><body><main><h1>Rendered title</h1><p>This content was rendered after JavaScript executed. It contains enough bounded semantic text for deterministic browser adapter contract testing and represents an article rather than a challenge or application shell.</p></main></body></html>
+EOF
+cp "$rendered" "$raw"
+classification=${PLAYWRIGHT_FAKE_CLASSIFICATION:-content}
+status=${PLAYWRIGHT_FAKE_STATUS:-200}
+jq -n \
+  --arg requested_url "$url" \
+  --arg classification "$classification" \
+  --argjson status "$status" \
+  '{
+    protocol: "sandwalk.playwright-render.v1",
+    profile: "playwright-public-web-v1",
+    requested_url: $requested_url,
+    final_url: "https://example.test/rendered",
+    status: $status,
+    content_type: "text/html; charset=utf-8",
+    redirect_chain: [],
+    request_count: 7,
+    visible_text_characters: 220,
+    classification: $classification,
+    raw_response_written: true,
+    playwright_version: "1.55.test",
+    chromium_version: "140.0.test",
+    viewport: {width: 1440, height: 900},
+    locale: "en-US",
+    timezone: "UTC",
+    wait_profile: "domcontentloaded-networkidle-5s-scroll-v1"
+  }' >"$metadata"
