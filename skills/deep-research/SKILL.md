@@ -73,7 +73,7 @@ that readable directory in `source_root`; otherwise leave it empty.
 ## Exclusive retrieval
 
 While this skill is active, Sandwalk is the only permitted path for every
-network or local-document search and fetch, including reconnaissance. Do not load or invoke
+network, local-document, or GNU Info search and fetch, including reconnaissance. Do not load or invoke
 another web-search, browsing, or fetch skill. Do not call `ddgr`, `curl`,
 `wget`, `yt-dlp`, `ug`, `ugrep`, `mq`, Xberg, Docling, a browser, or an HTTP
 client directly. These programs may run only behind a Sandwalk adapter or for
@@ -86,6 +86,15 @@ retrieval path. The fetch result also declares `document_media_type`. Navigate
 `text/markdown` through `mq` headings. For `text/plain`, locate relevant terms
 with `rg -n`, then read only bounded line ranges around matches. Do not run
 `mq` against plain text or read an entire long transcript into context.
+
+For installed GNU Info or active Emacs Info manuals, run `sandwalk search` with
+`--adapter sandwalk-search-texiq`. Use `--source-root <info-directory>` only
+when an explicit Info directory is required; the adapter otherwise searches the
+active Emacs `Info-directory-list` followed by the ordinary Info path. Returned
+`info://texiq/` hits select the matching fetch adapter automatically and become
+exact-node `text/plain` snapshots. Read the returned `document_path` with the
+same bounded `rg -n` workflow as any other plain-text snapshot; do not invoke
+`texiq` directly while this skill is active.
 
 For user-authorized local documents, run `sandwalk search` with exactly one
 `--source-root <directory>`. The root must already be readable inside the

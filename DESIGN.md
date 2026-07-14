@@ -361,8 +361,9 @@ standard output. Shell command templates are not part of the protocol.
 A search adapter returns bounded structured results. Sandwalk mints `hit_...`
 references and records the query, adapter, result position, source locator,
 title, and snippet. The schema-7 `url` column and v1 JSON field retain their
-names for compatibility, but accept HTTP(S) URLs and absolute `file://`
-locators. Schema 23 adds the requested local source root to search provenance.
+names for compatibility, but accept HTTP(S) URLs, absolute `file://` locators,
+and bundled `info://texiq/` node locators. Schema 23 adds the requested local
+source root to search provenance.
 
 The bundled ddgr connector accepts:
 
@@ -373,6 +374,19 @@ The bundled ddgr connector accepts:
 and returns at most 25 bounded results in a
 `sandwalk.search-results.v1` envelope. It invokes `ddgr --json` without a
 shell command template.
+
+The bundled `sandwalk-search-texiq` connector is a local, read-only GNU Info
+source. It invokes `texiq --emacs` through the same bounded search protocol so
+manuals registered only in the active Emacs `Info-directory-list`, including
+package manuals, are discoverable alongside the ordinary Info path. An
+explicit `--source-root` is prepended as an Info directory when supplied.
+Repeated text matches in the same node collapse to one hit. The hit locator
+contains the exact absolute main-file path and exact case-sensitive node name
+as base64 fields under the `info://texiq/` scheme; the snippet remains discovery
+metadata and cannot become evidence.
+Catalog-wide Info search receives a 15-minute outer process bound because a
+large active Emacs catalog is parsed locally and may exceed the ordinary
+30-second search-adapter timeout.
 
 When `--source-root` is present, the default bundled search connector is
 `sandwalk-search-ugrep`. It invokes `ugrep+`, not `ug+`, so user or
@@ -496,6 +510,15 @@ chapters, invoke an embedding model, or transcribe audio.
 
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.
+
+The bundled `sandwalk-fetch-texiq` connector is selected automatically for an
+`info://texiq/` hit. It resolves the locator's exact source path and node name,
+uses `texiq` to extract only that node, and publishes it as a queryable
+`text/plain` `document.txt`. The snapshot retains the selected main Info file
+and `texiq`'s versioned node metadata. It hashes the main file before and after
+extraction and rejects a concurrent change, so the published node text and
+recorded input provenance cannot silently cross source revisions. It never
+contacts the network or invokes an LLM.
 
 The bundled default local-file fetch connector is `sandwalk-fetch-file`.
 `fetch` selects it for a `file://` hit. The request repeats the source root

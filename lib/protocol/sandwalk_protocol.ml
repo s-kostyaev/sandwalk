@@ -238,7 +238,8 @@ module Search_adapter = struct
       if
         (String.is_prefix url ~prefix:"http://"
          || String.is_prefix url ~prefix:"https://"
-         || String.is_prefix url ~prefix:"file://")
+         || String.is_prefix url ~prefix:"file://"
+         || String.is_prefix url ~prefix:"info://texiq/")
         && not (String.is_empty title)
       then Some { url; title; snippet }
       else None
@@ -385,7 +386,8 @@ module Fetch_adapter = struct
               , true )
             when (String.is_prefix final_url ~prefix:"http://"
                   || String.is_prefix final_url ~prefix:"https://"
-                 || String.is_prefix final_url ~prefix:"file://")
+                  || String.is_prefix final_url ~prefix:"file://"
+                  || String.is_prefix final_url ~prefix:"info://texiq/")
                  && sha256 input_sha256
                  && artifact_basename document_artifact
                  && List.mem
@@ -834,6 +836,44 @@ let%expect_test "search adapter responses are versioned and bounded" =
   |> [%sexp_of: (int, Search_adapter.error) Result.t]
   |> print_s;
   [%expect {| (Ok 1) |}]
+;;
+
+let%expect_test "search and fetch protocols accept texiq Info locators" =
+  let locator = "info://texiq/L3RtcC9lbGxhbWEuaW5mbw==#VXNpbmcgQmx1ZXByaW50cw==" in
+  `Assoc
+    [ "protocol", `String "sandwalk.search-results.v1"
+    ; ( "results"
+      , `List
+          [ `Assoc
+              [ "url", `String locator
+              ; "title", `String "ellama — Using Blueprints"
+              ; "snippet", `String "Reusable prompt templates."
+              ]
+          ] )
+    ]
+  |> Search_adapter.results
+  |> Result.map ~f:List.length
+  |> [%sexp_of: (int, Search_adapter.error) Result.t]
+  |> print_s;
+  `Assoc
+    [ "protocol", `String "sandwalk.fetch-manifest.v1"
+    ; "final_url", `String locator
+    ; "document_media_type", `String "text/plain"
+    ; ( "hashes"
+      , `Assoc
+          [ "input_sha256", `String (String.make 64 'a')
+          ; "normalized_document_sha256", `String (String.make 64 'b')
+          ] )
+    ; "artifacts", `Assoc [ "document", `String "document.txt" ]
+    ; "queryability_check", `Assoc [ "ok", `Bool true ]
+    ]
+  |> Fetch_adapter.validate_manifest
+  |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
+  |> print_s;
+  [%expect
+    {|
+    (Ok 1)
+    (Ok ()) |}]
 ;;
 
 let%expect_test "fetch manifests require a successful mq gate" =

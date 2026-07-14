@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+query=$(printf '%s' "$request" | jq -er '.query')
+limit=$(printf '%s' "$request" | jq -er '.limit // 10')
+info_directory=$(printf '%s' "$request" | jq -r '.source_root // ""')
+
+[ "$protocol" = "sandwalk.search.v1" ] || {
+  printf '%s\n' 'unsupported search protocol' >&2
+  exit 64
+}
+
+printf '%s' "$limit" | grep -Eq '^[0-9]+$' || {
+  printf '%s\n' 'search limit must be an integer' >&2
+  exit 64
+}
+
+[ "$limit" -ge 1 ] && [ "$limit" -le 25 ] || {
+  printf '%s\n' 'search limit must be between 1 and 25' >&2
+  exit 64
+}
+
+[ -n "$query" ] && [ "${#query}" -le 2048 ] || {
+  printf '%s\n' 'search query must contain between 1 and 2048 bytes' >&2
+  exit 64
+}
+
+if [ -n "$info_directory" ] && [ ! -d "$info_directory" ]; then
+  printf '%s\n' 'Info source root must be an existing directory' >&2
+  exit 66
+fi
+
+query_json=$(printf '%s' "$query" | jq -Rsa '.')
+selector=".search($query_json)[0:100]"
+
+if [ -n "$info_directory" ]; then
+  raw=$(texiq --emacs --directory "$info_directory" --format json \
+    --max-results 100 dir "$selector")
+else
+  raw=$(texiq --emacs --format json --max-results 100 dir "$selector")
+fi
+
+printf '%s' "$raw" | jq -c \
+  --argjson limit "$limit" \
+  '
+    def locator:
+      "info://texiq/" + (.source_path | @base64) + "#" + (.node | @base64);
+    reduce (
+      (.data // [])[]
+      | select(
+          .kind == "search_match"
+          and (.manual | type == "string" and length > 0)
+          and (.node | type == "string" and length > 0)
+          and (.source_path | type == "string" and startswith("/"))
+        )
+    ) as $match
+      ({seen: {}, results: []};
+       (($match.source_path | @base64) + "#" + ($match.node | @base64)) as $key
+       | ($match | locator) as $locator
+       | if
+           .seen[$key]
+           or (.results | length) >= $limit
+           or ($locator | length) > 2048
+         then .
+         else
+           .seen[$key] = true
+           | .results += [{
+               url: $locator,
+               title: (($match.manual + " — " + $match.node) | .[0:500]),
+               snippet: (($match.snippet // "") | tostring | .[0:1000])
+             }]
+         end)
+    | {
+        protocol: "sandwalk.search-results.v1",
+        adapter: {
+          name: "texiq",
+          protocol_version: 1,
+          search_profile: "emacs-info-node-search-v1"
+        },
+        results: .results
+      }
+  '

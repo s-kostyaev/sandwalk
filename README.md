@@ -5,8 +5,8 @@ research workflows, records source provenance, validates evidence references,
 and renders citations without invoking an LLM.
 
 The initial end-to-end workflow includes workspace recovery, append-only plans,
-durable exclusive claims, web and local-document search, immutable structured
-Markdown or plain-text snapshots, exact excerpts, reviewed findings,
+durable exclusive claims, web, local-document, and GNU Info search, immutable
+structured Markdown or plain-text snapshots, exact excerpts, reviewed findings,
 packet-driven continuation, and citation-safe finalization. Local discovery
 uses `ugrep+`; the bundled local-file connector preserves ordinary source text
 as `text/plain` and delegates rich documents to Docling. The Docling connector
@@ -56,6 +56,9 @@ type is used:
 - `rg` for local plain-text snapshots and flat transcripts.
 - `ugrep+` for local source-root discovery.
 - `ddgr` for the bundled web search adapter.
+- [`texiq`](https://github.com/s-kostyaev/texiq) for local GNU Info and active
+  Emacs Info manuals. Search with `--adapter sandwalk-search-texiq`; matching
+  `info://texiq/` hits select `sandwalk-fetch-texiq` automatically.
 - `pandoc` and `curl` for web page/PDF retrieval and PDF export paths. PDF
   export additionally requires `xelatex` and fontconfig's `fc-match`; the
   exporter selects installed fonts with Russian Cyrillic support.

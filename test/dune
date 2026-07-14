@@ -8,6 +8,7 @@
   inspect_workspace.exe
   ../adapters/ddgr-search
   ../adapters/ugrep-search
+  ../adapters/texiq-search
   ../adapters/web-fetch
   ../adapters/curl-pandoc-fetch
   ../adapters/playwright-fetch
@@ -17,6 +18,7 @@
   ../adapters/docling-fetch
   ../adapters/youtube-fetch
   ../adapters/youtube-normalize
+  ../adapters/texiq-fetch
   ../adapters/xberg-fetch
   ../adapters/pandoc-pdf-export
   (source_tree fakes)))

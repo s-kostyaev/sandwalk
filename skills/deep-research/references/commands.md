@@ -38,6 +38,8 @@ sandwalk snapshot promote --slug <slug> --claim <claim_id> <snapshot_id>
 sandwalk search --slug <slug> --claim <claim_id> --query <query> [--limit 10]
 sandwalk search --slug <slug> --claim <claim_id> --query <query> \
   --source-root <authorized-directory> [--limit 10]
+sandwalk search --slug <slug> --claim <claim_id> --query <query> \
+  --adapter sandwalk-search-texiq [--limit 10]
 sandwalk fetch --slug <slug> --claim <claim_id> <hit_id>
 sandwalk excerpt create --slug <slug> --claim <claim_id> \
   --snapshot <snapshot_id> --lines <first:last>
@@ -65,6 +67,13 @@ inspection of already-returned Sandwalk artifact paths. Inspect hierarchical
 `text/markdown` documents with `mq` before selecting excerpt ranges. Use
 `sandwalk fetch ... --adapter sandwalk-fetch-xberg` only as an explicit fast
 alternative for a simple document.
+
+Use the third search form for installed GNU Info and active Emacs Info manuals.
+The local read-only adapter returns one `info://texiq/` hit per matching node;
+`sandwalk fetch` selects `sandwalk-fetch-texiq` automatically and publishes the
+exact node as `text/plain`. An optional `--source-root <info-directory>`
+prepends an explicit Info directory. Do not invoke `texiq` directly while the
+Sandwalk-exclusive retrieval rules are active.
 
 Fetch accepts only a persisted hit ID, not an arbitrary URL. Its result returns
 the immutable primary `document_path` and `document_media_type`; the manifest

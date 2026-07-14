@@ -129,11 +129,11 @@ let explanation = function
   | "SEARCH_ADAPTER_FAILED" ->
     Some
       ( "The search adapter exited unsuccessfully, timed out, or returned invalid JSON."
-      , "Verify the selected adapter and its search tool (`ddgr` or `ugrep+`) are on PATH and allowed by the filesystem or network sandbox." )
+      , "Verify the selected adapter and its search tool (`ddgr`, `ugrep+`, or `texiq`) are on PATH and allowed by the filesystem or network sandbox." )
   | "FETCH_ADAPTER_FAILED" ->
     Some
       ( "The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON."
-      , "Verify the selected adapter and its normalizer are on PATH. The default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root." )
+      , "Verify the selected adapter and its normalizer are on PATH. Info hits require `texiq`; the default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root." )
   | "PLAN_EMPTY" ->
     Some
       ( "The plan has no steps, so it cannot be validated."
@@ -4757,7 +4757,9 @@ let fetch_command =
                   Option.value
                     adapter
                     ~default:
-                      (if String.is_prefix url ~prefix:"file://"
+                      (if String.is_prefix url ~prefix:"info://texiq/"
+                       then "sandwalk-fetch-texiq"
+                       else if String.is_prefix url ~prefix:"file://"
                        then "sandwalk-fetch-file"
                        else if is_youtube_url url
                        then "sandwalk-fetch-youtube"
@@ -6031,7 +6033,14 @@ let search_command =
                       Sandwalk_runtime.Adapter.run_json
                         ~executable:adapter
                         ~request
-                        ~timeout:(Time_float.Span.of_sec 30.)
+                        ~timeout:
+                          (Time_float.Span.of_sec
+                             (if List.mem
+                                   [ "sandwalk-search-texiq"; "texiq-search" ]
+                                   (Filename.basename adapter)
+                                   ~equal:String.equal
+                              then 900.
+                              else 30.))
                         ~maximum_output_bytes:262_144
                     in
                     (match adapter_output with

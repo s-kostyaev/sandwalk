@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add bundled `texiq` search and fetch adapters for exact GNU Info node
+  snapshots, including active Emacs Info manuals and automatic
+  `info://texiq/` fetch dispatch.
+
 ## 0.1.0 — 2026-07-12
 
 Initial public release of Sandwalk's deterministic research harness.

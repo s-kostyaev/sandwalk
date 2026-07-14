@@ -1,0 +1,162 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+url=$(printf '%s' "$request" | jq -er '.url')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+
+[ "$protocol" = "sandwalk.fetch.v1" ] || {
+  printf '%s\n' 'unsupported fetch protocol' >&2
+  exit 64
+}
+
+case "$url" in
+  info://texiq/*\#*) ;;
+  *)
+    printf '%s\n' 'texiq fetch requires an info://texiq locator' >&2
+    exit 64
+    ;;
+esac
+
+payload=${url#info://texiq/}
+source_base64=${payload%%#*}
+node_base64=${payload#*#}
+[ -n "$source_base64" ] && [ -n "$node_base64" ] || {
+  printf '%s\n' 'texiq locator is incomplete' >&2
+  exit 64
+}
+
+source_path=$(printf '%s' "$source_base64" | base64 --decode) || {
+  printf '%s\n' 'texiq locator has an invalid source path' >&2
+  exit 64
+}
+node=$(printf '%s' "$node_base64" | base64 --decode) || {
+  printf '%s\n' 'texiq locator has an invalid node name' >&2
+  exit 64
+}
+
+case "$source_path" in
+  /*) ;;
+  *)
+    printf '%s\n' 'texiq source path must be absolute' >&2
+    exit 64
+    ;;
+esac
+
+[ -n "$node" ] || {
+  printf '%s\n' 'texiq node name must not be empty' >&2
+  exit 64
+}
+
+canonical_source=$(realpath "$source_path")
+[ -f "$canonical_source" ] || {
+  printf '%s\n' 'texiq source must be a regular Info file' >&2
+  exit 66
+}
+
+mkdir -p "$output_directory"
+original_directory="$output_directory/original"
+source_basename=$(basename "$canonical_source")
+original="$original_directory/$source_basename"
+metadata="$output_directory/node.json"
+document="$output_directory/document.txt"
+manifest="$output_directory/manifest.json"
+manifest_temporary="$output_directory/manifest.json.tmp"
+
+cleanup() {
+  rm -f "$manifest_temporary"
+}
+trap cleanup EXIT HUP INT TERM
+rm -f "$manifest" "$manifest_temporary" "$metadata" "$document"
+mkdir -p "$original_directory"
+
+node_json=$(printf '%s' "$node" | jq -Rsa '.')
+selector=".node($node_json)"
+input_sha256=$(shasum -a 256 "$canonical_source" | awk '{print $1}')
+
+texiq --format json "$canonical_source" "$selector" >"$metadata"
+jq -e \
+  --arg node "$node" \
+  --arg source "$canonical_source" \
+  '.schema_version == 1
+   and .data.kind == "node"
+   and .data.name == $node
+   and .data.source_path == $source' \
+  "$metadata" >/dev/null
+
+texiq --raw-output "$canonical_source" "$selector | .text" >"$document"
+if [ ! -s "$document" ] || ! rg -q '[^[:space:]]' "$document"; then
+  printf '%s\n' 'texiq returned an empty Info node' >&2
+  exit 65
+fi
+
+verified_input_sha256=$(shasum -a 256 "$canonical_source" | awk '{print $1}')
+[ "$input_sha256" = "$verified_input_sha256" ] || {
+  printf '%s\n' 'Info source changed during extraction' >&2
+  exit 75
+}
+cp -P "$canonical_source" "$original"
+[ ! -L "$original" ] && [ -f "$original" ] || {
+  printf '%s\n' 'Info source changed to an unsafe file during import' >&2
+  exit 77
+}
+copied_input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
+[ "$input_sha256" = "$copied_input_sha256" ] || {
+  printf '%s\n' 'Info source changed while its retained copy was published' >&2
+  exit 75
+}
+
+document_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
+metadata_sha256=$(shasum -a 256 "$metadata" | awk '{print $1}')
+texiq_version=$(texiq --version | sed -n '1{s/"/\\"/g;p;}')
+
+jq -n \
+  --arg protocol "sandwalk.fetch-manifest.v1" \
+  --arg requested_url "$url" \
+  --arg final_url "$url" \
+  --arg source_path "$canonical_source" \
+  --arg source_basename "$source_basename" \
+  --arg node "$node" \
+  --arg input_sha256 "$input_sha256" \
+  --arg document_sha256 "$document_sha256" \
+  --arg metadata_sha256 "$metadata_sha256" \
+  --arg texiq_version "$texiq_version" \
+  '{
+    protocol: $protocol,
+    adapter: {
+      name: "texiq",
+      protocol_version: 1,
+      implementation_version: $texiq_version,
+      extraction_profile: "exact-info-node-text-v1"
+    },
+    requested_url: $requested_url,
+    final_url: $final_url,
+    document_media_type: "text/plain",
+    info: {
+      source_path: $source_path,
+      node: $node
+    },
+    hashes: {
+      input_sha256: $input_sha256,
+      normalized_document_sha256: $document_sha256,
+      metadata_sha256: $metadata_sha256
+    },
+    artifacts: {
+      document: "document.txt",
+      metadata: "node.json",
+      original: ("original/" + $source_basename)
+    },
+    queryability_check: {
+      tool: "rg",
+      query: "[^[:space:]]",
+      ok: true
+    }
+  }' >"$manifest_temporary"
+
+mv "$manifest_temporary" "$manifest"
+
+jq -nc \
+  --arg protocol "sandwalk.fetch-result.v1" \
+  --arg manifest "$manifest" \
+  '{protocol: $protocol, manifest: $manifest}'
