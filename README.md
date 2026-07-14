@@ -62,12 +62,16 @@ type is used:
 - [`qmd`](https://github.com/tobi/qmd) for an optional, fully local semantic
   discovery index. Build normalized document or node-per-document Info corpora
   with `sandwalk index build`, then search them with `--source-index`; Sandwalk
-  uses QMD vector search only for discovery and verifies exact retained source
-  artifacts again during fetch. The default Qwen3 embedding model is
-  multilingual and is downloaded to QMD's local model cache on first use.
-  Use `qmd doctor` to diagnose native acceleration. In a sandbox where QMD can
-  detect but cannot initialize Metal/CUDA/Vulkan, set `QMD_FORCE_CPU=1` for
-  index build and search; CPU vector queries can be substantially slower.
+  issues one structured `vec:` query with `--no-rerank`, avoiding QMD's query
+  expansion and reranking models, and verifies exact retained source artifacts
+  again during fetch. Install the tested CLI with
+  `npm install -g @tobilu/qmd@2.5.3`; it requires Node.js 22 or newer. The
+  default multilingual Qwen3 embedding model is downloaded to QMD's local
+  model cache on first use and occupies approximately 610 MiB. QMD selects
+  Metal/CUDA/Vulkan automatically; use `qmd doctor` to verify acceleration.
+  Set `QMD_FORCE_CPU=1` only when acceleration is genuinely unavailable or
+  prohibited by the execution sandbox; CPU queries can be substantially
+  slower.
 - `pandoc` and `curl` for web page/PDF retrieval and PDF export paths. PDF
   export additionally requires `xelatex` and fontconfig's `fc-match`; the
   exporter selects installed fonts with Russian Cyrillic support.

@@ -15,7 +15,7 @@
   {"ok":true,"result":{"code":"FETCH_ADAPTER_FAILED","explanation":"The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify the selected adapter and its normalizer are on PATH. Info hits require `texiq`; semantic hits require an unchanged Sandwalk QMD index; the default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root."}}
 
   $ sandwalk explain INDEX_ADAPTER_FAILED
-  {"ok":true,"result":{"code":"INDEX_ADAPTER_FAILED","explanation":"The local ingest or QMD indexing process exited unsuccessfully or timed out.","repair":"Verify `qmd`, `rg`, `jq`, and the required document normalizers are on PATH. Run `qmd doctor` when model loading or device selection fails; in a GPU-restricted sandbox, retry with `QMD_FORCE_CPU=1`."}}
+  {"ok":true,"result":{"code":"INDEX_ADAPTER_FAILED","explanation":"The local ingest or QMD indexing process exited unsuccessfully or timed out.","repair":"Verify `qmd`, `rg`, `jq`, and the required document normalizers are on PATH. Run `qmd doctor` when model loading or device selection fails; use `QMD_FORCE_CPU=1` only when acceleration is unavailable or prohibited by the sandbox."}}
 
   $ sandwalk explain INVALID_WORK_PACKET
   {"ok":true,"result":{"code":"INVALID_WORK_PACKET","explanation":"The current work packet is malformed, unsupported, applied from the wrong path, or has modified fixed context.","repair":"Run `sandwalk continue --slug <slug>` once, edit only `editable`, leave `integrity_md5` unchanged, and run the exact returned `apply` command."}}

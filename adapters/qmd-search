@@ -33,7 +33,12 @@ jq -e '
   and (.entries | type == "array" and length > 0 and length <= 10000)
 ' "$manifest" >/dev/null
 
-raw=$(cd "$index_root" && qmd vsearch "$query" --json --full-path -n "$limit" -c sandwalk)
+# QMD 2.5.x expands plain `vsearch` queries through its generation model.
+# A typed structured query skips expansion; --no-rerank also avoids loading the
+# reranker, leaving exactly one local embedding lookup.
+semantic_query=$(printf '%s' "$query" | jq -Rrs 'gsub("[\\r\\n\\t]+"; " ") | gsub("\\\""; " ")')
+raw=$(cd "$index_root" && qmd query "vec: $semantic_query" --no-rerank \
+  --json --full-path -n "$limit" -c sandwalk)
 index_id=$(jq -er '.index_id' "$manifest")
 
 printf '%s' "$raw" | jq -c \
@@ -68,7 +73,7 @@ printf '%s' "$raw" | jq -c \
         adapter: {
           name: "qmd",
           protocol_version: 1,
-          search_profile: "pure-vector-local-index-v1"
+          search_profile: "structured-single-vector-no-rerank-v1"
         },
         results: .
       }

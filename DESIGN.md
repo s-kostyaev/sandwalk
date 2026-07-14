@@ -419,13 +419,15 @@ Sandwalk semantic index. The index contains a bounded `manifest.json`, immutable
 per-entry normalized documents and metadata, a Markdown discovery projection,
 and QMD's project-local `.qmd/index.yml` and `.qmd/index.sqlite`. The manifest
 binds every entry to its original `file://` or `info://texiq/` locator and to
-input, normalized-document, and projection hashes. The embedding model is
-explicit and defaults to a pinned multilingual Qwen3 embedding model; changing
-it requires rebuilding the index.
+input, normalized-document, and projection hashes. It records the exact QMD
+implementation version and embedding model. The model defaults to a pinned
+multilingual Qwen3 embedding model; changing it requires rebuilding the index.
 
 `sandwalk search --source-index <path>` selects `sandwalk-search-qmd` by
-default. It runs QMD's pure vector search (`vsearch`) against only the corpus
-declared by the Sandwalk manifest, converts QMD paths to bounded
+default. It runs one typed QMD structured query (`vec: ...`) with
+`--no-rerank` against only the corpus declared by the Sandwalk manifest. This
+skips QMD query expansion and reranking, so search loads only the configured
+embedding model. The adapter converts QMD paths to bounded
 `qmd://<index-id>/<entry-id>` locators, and persists the index directory as
 search provenance. `--source-index` and `--source-root` are mutually exclusive.
 The QMD database and its Markdown projections are discovery caches: snippets,

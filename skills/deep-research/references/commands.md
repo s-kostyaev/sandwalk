@@ -61,8 +61,9 @@ Build an optional reusable index before research with either
 `sandwalk index build --source-root <authorized-directory> --index-directory
 <semantic-index-directory>` or `sandwalk index build --info-manual
 <manual-or-path> [--emacs] --index-directory <semantic-index-directory>`.
-The third search form selects QMD pure-vector discovery over that normalized
-corpus. Fetch verifies the retained entry and unchanged input and restores its
+The third search form runs one typed QMD `vec:` query with `--no-rerank` over
+that normalized corpus, without query expansion or a reranking model. Fetch
+verifies the retained entry and unchanged input and restores its
 original file or Info locator; QMD snippets and Markdown projections are not
 evidence. `--source-root` and `--source-index` are mutually exclusive.
 

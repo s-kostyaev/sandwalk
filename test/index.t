@@ -12,8 +12,8 @@ rich document go through the same existing fetch-normalization boundary.
   >   sed -E -e "s#$PWD#ROOT#g" -e 's/[0-9a-f]{32}/INDEX_ID/g'
   {"ok":true,"result":{"index_directory":"ROOT/document-index","index_id":"INDEX_ID","entries":2,"skipped":0,"embedding_model":"hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"}}
 
-  $ jq -r '[.protocol, .ingest.mode, (.entries | length), (.skipped | length), ([.entries[].document_media_type] | sort | join(","))] | @tsv' document-index/manifest.json
-  sandwalk.semantic-index.v1	documents	2	0	text/markdown,text/plain
+  $ jq -r '[.protocol, .ingest.mode, .backend.implementation_version, .backend.search_mode, (.entries | length), (.skipped | length), ([.entries[].document_media_type] | sort | join(","))] | @tsv' document-index/manifest.json
+  sandwalk.semantic-index.v1	documents	qmd 2.5.3-test	structured-vec-no-rerank	2	0	text/markdown,text/plain
   $ test -s document-index/.qmd/index.sqlite
   $ test "$(find document-index/corpus -name '*.md' | wc -l | tr -d ' ')" = 2
 

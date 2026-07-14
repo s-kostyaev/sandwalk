@@ -137,7 +137,7 @@ let explanation = function
   | "INDEX_ADAPTER_FAILED" ->
     Some
       ( "The local ingest or QMD indexing process exited unsuccessfully or timed out."
-      , "Verify `qmd`, `rg`, `jq`, and the required document normalizers are on PATH. Run `qmd doctor` when model loading or device selection fails; in a GPU-restricted sandbox, retry with `QMD_FORCE_CPU=1`." )
+      , "Verify `qmd`, `rg`, `jq`, and the required document normalizers are on PATH. Run `qmd doctor` when model loading or device selection fails; use `QMD_FORCE_CPU=1` only when acceleration is unavailable or prohibited by the sandbox." )
   | "INDEX_PROTOCOL_ERROR" ->
     Some
       ( "The index adapter did not publish a valid Sandwalk semantic-index manifest."

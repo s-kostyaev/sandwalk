@@ -202,16 +202,24 @@ if [ "$skipped_count" -gt 0 ]; then
 else
   printf '[]\n' >"$staging/skipped.json"
 fi
+qmd_version=$(qmd --version | sed -n '1p')
+[ -n "$qmd_version" ] && [ "${#qmd_version}" -le 200 ] || exit 69
 
 jq -n \
   --arg mode "$mode" \
   --arg embedding_model "$embedding_model" \
+  --arg qmd_version "$qmd_version" \
   --argjson entries "$(cat "$entries_json")" \
   --argjson skipped "$(cat "$staging/skipped.json")" '
     {
       protocol: "sandwalk.semantic-index.v1",
       index_id: "pending",
-      backend: {name:"qmd", search_mode:"vsearch", collection:"sandwalk"},
+      backend: {
+        name:"qmd",
+        implementation_version:$qmd_version,
+        search_mode:"structured-vec-no-rerank",
+        collection:"sandwalk"
+      },
       ingest: {mode:$mode, embedding_model:$embedding_model},
       entries: $entries,
       skipped: $skipped

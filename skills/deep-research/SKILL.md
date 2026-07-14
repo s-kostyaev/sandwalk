@@ -120,15 +120,16 @@ sandwalk index build --info-manual <manual-or-path> [--emacs] \
   --index-directory <index-directory>
 ```
 
-Then use `sandwalk search ... --source-index <index-directory>`. This selects
-QMD pure-vector search. QMD projections and snippets are never evidence;
+Then use `sandwalk search ... --source-index <index-directory>`. This runs one
+typed QMD `vec:` query with `--no-rerank`, so neither query expansion nor a
+reranking model is loaded. QMD projections and snippets are never evidence;
 `sandwalk fetch` verifies the selected entry and unchanged original input, then
 publishes the exact normalized document under its original `file://` or
 `info://texiq/` provenance. Rebuild the index when fetch reports that it is
-stale. If QMD cannot initialize acceleration inside the agent sandbox, diagnose
-with `qmd doctor` and retry Sandwalk with `QMD_FORCE_CPU=1`; expect slower
-queries. Do not invoke QMD search or retrieval directly while this skill is
-active.
+stale. Use `qmd doctor` to verify automatically selected acceleration. Set
+`QMD_FORCE_CPU=1` only when Metal/CUDA/Vulkan is unavailable or prohibited by
+the agent sandbox; expect slower queries. Do not invoke QMD search or retrieval
+directly while this skill is active.
 
 For YouTube hits, the default constructor uses source chapters when they exist.
 If it returns `text/plain`, the video had no usable source chapter structure:

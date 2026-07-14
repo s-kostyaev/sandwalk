@@ -9,7 +9,15 @@ case "${1:-}" in
   embed)
     [ -f .qmd/index.sqlite ]
     ;;
-  vsearch)
+  query)
+    case "${2:-}" in
+      "vec: "*) ;;
+      *) printf '%s\n' 'fake qmd requires one typed vec query' >&2; exit 64 ;;
+    esac
+    case " $* " in
+      *" --no-rerank "*) ;;
+      *) printf '%s\n' 'fake qmd requires --no-rerank' >&2; exit 64 ;;
+    esac
     if [ -n "${QMD_FAKE_MATCH:-}" ]; then
       first=$(rg -l -F "$QMD_FAKE_MATCH" corpus | LC_ALL=C sort | head -1)
     else
@@ -22,7 +30,7 @@ case "${1:-}" in
       '[{docid:"#fixture",score:0.91,file:$file,title:$title,snippet:$snippet}]'
     ;;
   --version)
-    printf '%s\n' 'qmd 2.1.0-test'
+    printf '%s\n' 'qmd 2.5.3-test'
     ;;
   *)
     printf '%s\n' 'unexpected fake qmd command' >&2
