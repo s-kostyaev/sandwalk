@@ -59,6 +59,15 @@ type is used:
 - [`texiq`](https://github.com/s-kostyaev/texiq) for local GNU Info and active
   Emacs Info manuals. Search with `--adapter sandwalk-search-texiq`; matching
   `info://texiq/` hits select `sandwalk-fetch-texiq` automatically.
+- [`qmd`](https://github.com/tobi/qmd) for an optional, fully local semantic
+  discovery index. Build normalized document or node-per-document Info corpora
+  with `sandwalk index build`, then search them with `--source-index`; Sandwalk
+  uses QMD vector search only for discovery and verifies exact retained source
+  artifacts again during fetch. The default Qwen3 embedding model is
+  multilingual and is downloaded to QMD's local model cache on first use.
+  Use `qmd doctor` to diagnose native acceleration. In a sandbox where QMD can
+  detect but cannot initialize Metal/CUDA/Vulkan, set `QMD_FORCE_CPU=1` for
+  index build and search; CPU vector queries can be substantially slower.
 - `pandoc` and `curl` for web page/PDF retrieval and PDF export paths. PDF
   export additionally requires `xelatex` and fontconfig's `fc-match`; the
   exporter selects installed fonts with Russian Cyrillic support.

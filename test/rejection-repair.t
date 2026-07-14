@@ -18,12 +18,14 @@ returns to a subject-aware search instead of forcing unusable evidence.
   $ sandwalk apply --file reject/hit/artifacts/work/current.json
   {"ok":true,"result":{"applied":"fetch","packet":"reject/hit/artifacts/work/current.json"},"next":"'sandwalk' 'continue' '--slug' 'hit' '--directory-prefix' 'reject'"}
   $ sandwalk continue --slug hit --directory-prefix reject >/dev/null
-  $ grep -E '"(action|research_objective|step_title|query)"' \
+  $ grep -E '"(action|research_objective|step_title|query|source_root|source_index)"' \
   >   reject/hit/artifacts/work/current.json
     "action": "search",
       "research_objective": "Fixture step",
       "step_title": "Fixture step"
-    "editable": { "query": "Fixture step — Fixture step", "source_root": "" },
+      "query": "Fixture step — Fixture step",
+      "source_root": "",
+      "source_index": ""
 
 The packet can select a sandbox-visible local source root without bypassing
 Sandwalk retrieval.

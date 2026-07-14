@@ -7,6 +7,21 @@ if [ "${1:-}" = "--version" ]; then
 fi
 
 case " $* " in
+  *" .nodes "*)
+    source=${TEXIQ_FAKE_SOURCE:-$PWD/info-fixture/ellama.info}
+    jq -n --arg source "$source" '{
+      schema_version: 1,
+      data: [{
+        kind: "node",
+        manual: "ellama",
+        name: "Blueprints and Community Prompts",
+        next: "Tools and DLP",
+        prev: "Chat Translation",
+        up: "Commands",
+        source_path: $source
+      }]
+    }'
+    ;;
   *" dir "*)
     source=${TEXIQ_FAKE_SOURCE:-$PWD/info-fixture/ellama.info}
     jq -n --arg source "$source" '{

@@ -65,10 +65,12 @@ packet. Sandwalk will durably skip it and derive another action. Never create an
 excerpt or finding from a bot challenge, access-denied page, irrelevant result,
 or content that does not address the packet's research objective and step.
 
-Search packets contain an editable query and an initially empty
-`editable.source_root`. Confirm that the query names the research subject and
-current step goal. When the user authorized a local document directory, put
-that readable directory in `source_root`; otherwise leave it empty.
+Search packets contain an editable query and initially empty
+`editable.source_root` and `editable.source_index` fields. Confirm that the
+query names the research subject and current step goal. For a one-off lexical
+local search, put the authorized directory in `source_root`. For a previously
+built Sandwalk semantic index, put its directory in `source_index`. Never set
+both.
 
 ## Exclusive retrieval
 
@@ -107,6 +109,26 @@ article HTML for `document.md` and retains the matching versioned `source.pdf`
 for the user; an unusable HTML representation falls back to Docling
 automatically. Inspect the returned primary document according to its declared
 media type; never treat the search snippet as document content.
+
+For repeated or semantic retrieval over local documents or Info manuals, first
+build the discovery cache outside the research workflow with exactly one of:
+
+```console
+sandwalk index build --source-root <authorized-directory> \
+  --index-directory <index-directory>
+sandwalk index build --info-manual <manual-or-path> [--emacs] \
+  --index-directory <index-directory>
+```
+
+Then use `sandwalk search ... --source-index <index-directory>`. This selects
+QMD pure-vector search. QMD projections and snippets are never evidence;
+`sandwalk fetch` verifies the selected entry and unchanged original input, then
+publishes the exact normalized document under its original `file://` or
+`info://texiq/` provenance. Rebuild the index when fetch reports that it is
+stale. If QMD cannot initialize acceleration inside the agent sandbox, diagnose
+with `qmd doctor` and retry Sandwalk with `QMD_FORCE_CPU=1`; expect slower
+queries. Do not invoke QMD search or retrieval directly while this skill is
+active.
 
 For YouTube hits, the default constructor uses source chapters when they exist.
 If it returns `text/plain`, the video had no usable source chapter structure:

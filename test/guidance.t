@@ -9,10 +9,13 @@
   {"ok":true,"result":{"code":"WORKSPACE_IO_ERROR","explanation":"Sandwalk could not create or update the selected workspace directory.","repair":"Choose a writable `--directory-prefix` or set `SANDWALK_DIRECTORY_PREFIX` to one, then retry."}}
 
   $ sandwalk explain SEARCH_ADAPTER_FAILED
-  {"ok":true,"result":{"code":"SEARCH_ADAPTER_FAILED","explanation":"The search adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify the selected adapter and its search tool (`ddgr`, `ugrep+`, or `texiq`) are on PATH and allowed by the filesystem or network sandbox."}}
+  {"ok":true,"result":{"code":"SEARCH_ADAPTER_FAILED","explanation":"The search adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify the selected adapter and its search tool (`ddgr`, `ugrep+`, `texiq`, or `qmd`) are on PATH and allowed by the filesystem or network sandbox."}}
 
   $ sandwalk explain FETCH_ADAPTER_FAILED
-  {"ok":true,"result":{"code":"FETCH_ADAPTER_FAILED","explanation":"The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify the selected adapter and its normalizer are on PATH. Info hits require `texiq`; the default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root."}}
+  {"ok":true,"result":{"code":"FETCH_ADAPTER_FAILED","explanation":"The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON.","repair":"Verify the selected adapter and its normalizer are on PATH. Info hits require `texiq`; semantic hits require an unchanged Sandwalk QMD index; the default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root."}}
+
+  $ sandwalk explain INDEX_ADAPTER_FAILED
+  {"ok":true,"result":{"code":"INDEX_ADAPTER_FAILED","explanation":"The local ingest or QMD indexing process exited unsuccessfully or timed out.","repair":"Verify `qmd`, `rg`, `jq`, and the required document normalizers are on PATH. Run `qmd doctor` when model loading or device selection fails; in a GPU-restricted sandbox, retry with `QMD_FORCE_CPU=1`."}}
 
   $ sandwalk explain INVALID_WORK_PACKET
   {"ok":true,"result":{"code":"INVALID_WORK_PACKET","explanation":"The current work packet is malformed, unsupported, applied from the wrong path, or has modified fixed context.","repair":"Run `sandwalk continue --slug <slug>` once, edit only `editable`, leave `integrity_md5` unchanged, and run the exact returned `apply` command."}}

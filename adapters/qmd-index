@@ -1,0 +1,252 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+mode=$(printf '%s' "$request" | jq -er '.mode')
+index_directory=$(printf '%s' "$request" | jq -er '.index_directory')
+embedding_model=$(printf '%s' "$request" | jq -er '.embedding_model')
+
+[ "$protocol" = "sandwalk.index.v1" ] || {
+  printf '%s\n' 'unsupported index protocol' >&2
+  exit 64
+}
+case "$mode" in documents|info) ;; *) exit 64 ;; esac
+[ -n "$embedding_model" ] && [ "${#embedding_model}" -le 1024 ] || exit 64
+case "$index_directory" in /*) ;; *) printf '%s\n' 'index directory must be absolute' >&2; exit 64 ;; esac
+
+index_parent=$(dirname "$index_directory")
+index_basename=$(basename "$index_directory")
+[ -d "$index_parent" ] || mkdir -p "$index_parent"
+index_parent=$(cd "$index_parent" && pwd -P)
+case "$index_basename" in ''|.|..) exit 64 ;; esac
+index_directory="$index_parent/$index_basename"
+
+if [ -e "$index_directory" ]; then
+  [ -d "$index_directory" ] || exit 73
+  jq -e '.protocol == "sandwalk.semantic-index.v1"' \
+    "$index_directory/manifest.json" >/dev/null || {
+      printf '%s\n' 'refusing to replace a directory not owned by Sandwalk semantic indexing' >&2
+      exit 77
+    }
+fi
+
+staging=$(mktemp -d "$index_parent/.${index_basename}.staging.XXXXXX")
+backup="$index_parent/.${index_basename}.previous.$$"
+published=false
+cleanup() {
+  if [ "$published" = false ]; then rm -rf "$staging"; fi
+  if [ -d "$backup" ] && [ ! -e "$index_directory" ]; then mv "$backup" "$index_directory"; fi
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p "$staging/corpus" "$staging/entries" "$staging/skipped" "$staging/.qmd"
+entry_count=0
+skipped_count=0
+
+record_skip() {
+  skipped_count=$((skipped_count + 1))
+  jq -n --arg source "$1" --arg reason "$2" \
+    '{source:$source, reason:$reason}' >"$staging/skipped/$(printf '%05d' "$skipped_count").json"
+}
+
+add_entry() {
+  locator=$1
+  title=$2
+  normalized=$3
+  entry_id=$(printf '%s' "$locator" | shasum -a 256 | awk '{print substr($1,1,32)}')
+  entry_directory="$staging/entries/$entry_id"
+  [ ! -e "$entry_directory" ] || return 0
+  mkdir -p "$entry_directory"
+  mv "$normalized" "$entry_directory/source"
+  fetch_manifest="$entry_directory/source/manifest.json"
+  jq -e '.protocol == "sandwalk.fetch-manifest.v1" and .queryability_check.ok == true' \
+    "$fetch_manifest" >/dev/null
+
+  document_artifact=$(jq -er '.artifacts.document // "document.md"' "$fetch_manifest")
+  case "$document_artifact" in ''|*/*|.|..) exit 65 ;; esac
+  document="$entry_directory/source/$document_artifact"
+  [ -f "$document" ] && rg -q '[^[:space:]]' "$document"
+  media_type=$(jq -er '.document_media_type // "text/markdown"' "$fetch_manifest")
+  input_sha256=$(jq -er '.hashes.input_sha256' "$fetch_manifest")
+  document_sha256=$(jq -er '.hashes.normalized_document_sha256 // .hashes.normalized_markdown_sha256' "$fetch_manifest")
+  [ "$(shasum -a 256 "$document" | awk '{print $1}')" = "$document_sha256" ]
+
+  projection="$staging/corpus/$entry_id.md"
+  printf '# %s\n\n' "$title" >"$projection"
+  cat "$document" >>"$projection"
+  projection_sha256=$(shasum -a 256 "$projection" | awk '{print $1}')
+  structure_artifact=$(jq -r '.artifacts.structure // ""' "$fetch_manifest")
+  structure_sha256=$(jq -r '.hashes.structure_sha256 // ""' "$fetch_manifest")
+  if [ -n "$structure_artifact" ]; then
+    case "$structure_artifact" in */*|.|..) exit 65 ;; esac
+    [ -f "$entry_directory/source/$structure_artifact" ]
+    [ "$(shasum -a 256 "$entry_directory/source/$structure_artifact" | awk '{print $1}')" = "$structure_sha256" ]
+  fi
+
+  jq -n \
+    --arg id "$entry_id" \
+    --arg title "$title" \
+    --arg source_locator "$locator" \
+    --arg media_type "$media_type" \
+    --arg input_sha256 "$input_sha256" \
+    --arg document_sha256 "$document_sha256" \
+    --arg projection_sha256 "$projection_sha256" \
+    --arg document "entries/$entry_id/source/$document_artifact" \
+    --arg projection "corpus/$entry_id.md" \
+    --arg structure "${structure_artifact:+entries/$entry_id/source/$structure_artifact}" \
+    --arg structure_sha256 "$structure_sha256" '
+      {
+        id: $id,
+        title: $title,
+        source_locator: $source_locator,
+        document_media_type: $media_type,
+        hashes: ({
+          input_sha256: $input_sha256,
+          document_sha256: $document_sha256,
+          projection_sha256: $projection_sha256
+        } + (if $structure == "" then {} else {structure_sha256: $structure_sha256} end)),
+        artifacts: ({
+          document: $document,
+          projection: $projection
+        } + (if $structure == "" then {} else {structure: $structure} end))
+      }
+    ' >"$entry_directory/metadata.json"
+  entry_count=$((entry_count + 1))
+}
+
+if [ "$mode" = documents ]; then
+  source_root=$(printf '%s' "$request" | jq -er '.source_root')
+  [ -d "$source_root" ] || exit 66
+  source_root=$(cd "$source_root" && pwd -P)
+  case "$index_directory" in "$source_root"|"$source_root"/*)
+    printf '%s\n' 'index directory must be outside the ingested source root' >&2
+    exit 64
+  esac
+  find "$source_root" -type f -print0 | perl -0ne 'exit 1 if /\n/' || {
+    printf '%s\n' 'source paths containing newlines are unsupported' >&2
+    exit 65
+  }
+  file_list="$staging/document-files"
+  LC_ALL=C find "$source_root" -type f -print | LC_ALL=C sort >"$file_list"
+  file_count=$(wc -l <"$file_list" | tr -d ' ')
+  [ "$file_count" -le 10000 ] || {
+    printf '%s\n' 'document corpus exceeds the 10000-file bound' >&2
+    exit 65
+  }
+  while IFS= read -r source_path; do
+    [ -n "$source_path" ] || continue
+    size=$(wc -c <"$source_path" | tr -d ' ')
+    if [ "$size" -gt 536870912 ]; then
+      record_skip "$source_path" "input_too_large"
+      continue
+    fi
+    locator=$(jq -nr --arg path "$source_path" '$path | "file://" + (split("/") | map(@uri) | join("/"))')
+    title=$(basename "$source_path")
+    normalized=$(mktemp -d "$staging/.normalize.XXXXXX")
+    fetch_request=$(jq -nc --arg url "$locator" --arg root "$source_root" --arg output "$normalized" \
+      '{protocol:"sandwalk.fetch.v1",url:$url,source_root:$root,output_directory:$output}')
+    if printf '%s' "$fetch_request" | sandwalk-fetch-file >/dev/null; then
+      add_entry "$locator" "$title" "$normalized"
+    else
+      rm -rf "$normalized"
+      record_skip "$source_path" "normalization_failed"
+    fi
+  done <"$file_list"
+else
+  manual=$(printf '%s' "$request" | jq -er '.manual')
+  emacs=$(printf '%s' "$request" | jq -er '.emacs // false')
+  [ -n "$manual" ] && [ "${#manual}" -le 4096 ] || exit 64
+  if [ "$emacs" = true ]; then
+    nodes=$(texiq --emacs --format json "$manual" '.nodes')
+  else
+    nodes=$(texiq --format json "$manual" '.nodes')
+  fi
+  printf '%s' "$nodes" | jq -e '
+    .schema_version == 1 and (.data | type == "array" and length > 0 and length <= 10000)
+    and all(.data[]; .kind == "node" and (.name | type == "string" and length > 0)
+      and (.source_path | type == "string" and startswith("/")))
+  ' >/dev/null
+  node_list="$staging/info-nodes"
+  printf '%s' "$nodes" | jq -cr '.data[] | @base64' >"$node_list"
+  while IFS= read -r encoded_node; do
+    node_json=$(printf '%s' "$encoded_node" | base64 --decode)
+    node=$(printf '%s' "$node_json" | jq -er '.name')
+    source_path=$(printf '%s' "$node_json" | jq -er '.source_path')
+    manual_name=$(printf '%s' "$node_json" | jq -r '.manual // "info"')
+    source_base64=$(printf '%s' "$source_path" | base64 | tr -d '\n')
+    node_base64=$(printf '%s' "$node" | base64 | tr -d '\n')
+    locator="info://texiq/$source_base64#$node_base64"
+    title="$manual_name — $node"
+    normalized=$(mktemp -d "$staging/.normalize.XXXXXX")
+    fetch_request=$(jq -nc --arg url "$locator" --arg output "$normalized" \
+      '{protocol:"sandwalk.fetch.v1",url:$url,output_directory:$output}')
+    if printf '%s' "$fetch_request" | sandwalk-fetch-texiq >/dev/null; then
+      add_entry "$locator" "$title" "$normalized"
+    else
+      rm -rf "$normalized"
+      record_skip "$locator" "normalization_failed"
+    fi
+  done <"$node_list"
+fi
+
+[ "$entry_count" -gt 0 ] || {
+  printf '%s\n' 'ingest produced an empty semantic corpus' >&2
+  exit 65
+}
+
+entries_json="$staging/entries.json"
+jq -s 'sort_by(.id)' "$staging"/entries/*/metadata.json >"$entries_json"
+if [ "$skipped_count" -gt 0 ]; then
+  jq -s '.' "$staging"/skipped/*.json >"$staging/skipped.json"
+else
+  printf '[]\n' >"$staging/skipped.json"
+fi
+
+jq -n \
+  --arg mode "$mode" \
+  --arg embedding_model "$embedding_model" \
+  --argjson entries "$(cat "$entries_json")" \
+  --argjson skipped "$(cat "$staging/skipped.json")" '
+    {
+      protocol: "sandwalk.semantic-index.v1",
+      index_id: "pending",
+      backend: {name:"qmd", search_mode:"vsearch", collection:"sandwalk"},
+      ingest: {mode:$mode, embedding_model:$embedding_model},
+      entries: $entries,
+      skipped: $skipped
+    }
+  ' >"$staging/manifest.pending.json"
+index_id=$(shasum -a 256 "$staging/manifest.pending.json" | awk '{print substr($1,1,32)}')
+jq --arg index_id "$index_id" '.index_id = $index_id' \
+  "$staging/manifest.pending.json" >"$staging/manifest.json"
+rm -f "$staging/manifest.pending.json" "$entries_json" "$staging/skipped.json" \
+  "$staging/document-files" "$staging/info-nodes"
+rmdir "$staging/skipped"
+
+jq -n --arg model "$embedding_model" '
+  {
+    collections: {
+      sandwalk: {
+        path: "./corpus",
+        pattern: "**/*.md",
+        context: {"/":"Sandwalk normalized local source corpus"}
+      }
+    },
+    models: {embed:$model}
+  }
+' >"$staging/.qmd/index.yml"
+
+(cd "$staging" && qmd update >&2 && qmd embed >&2)
+[ -f "$staging/.qmd/index.sqlite" ] || {
+  printf '%s\n' 'qmd did not publish its project-local index' >&2
+  exit 70
+}
+
+if [ -d "$index_directory" ]; then mv "$index_directory" "$backup"; fi
+mv "$staging" "$index_directory"
+published=true
+if [ -d "$backup" ]; then rm -rf "$backup"; fi
+
+jq -nc --arg manifest "$index_directory/manifest.json" \
+  '{protocol:"sandwalk.index-result.v1",manifest:$manifest}'

@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+query=$(printf '%s' "$request" | jq -er '.query')
+limit=$(printf '%s' "$request" | jq -er '.limit // 10')
+index_directory=$(printf '%s' "$request" | jq -er '.source_root')
+
+[ "$protocol" = "sandwalk.search.v1" ] || {
+  printf '%s\n' 'unsupported search protocol' >&2
+  exit 64
+}
+[ -n "$query" ] && [ "${#query}" -le 2048 ] || {
+  printf '%s\n' 'search query must contain between 1 and 2048 bytes' >&2
+  exit 64
+}
+printf '%s' "$limit" | grep -Eq '^[0-9]+$'
+[ "$limit" -ge 1 ] && [ "$limit" -le 25 ] || {
+  printf '%s\n' 'search limit must be between 1 and 25' >&2
+  exit 64
+}
+[ -d "$index_directory" ] || {
+  printf '%s\n' 'semantic index must be an existing directory' >&2
+  exit 66
+}
+
+index_root=$(cd "$index_directory" && pwd -P)
+manifest="$index_root/manifest.json"
+jq -e '
+  .protocol == "sandwalk.semantic-index.v1"
+  and (.index_id | type == "string" and test("^[0-9a-f]{32}$"))
+  and (.entries | type == "array" and length > 0 and length <= 10000)
+' "$manifest" >/dev/null
+
+raw=$(cd "$index_root" && qmd vsearch "$query" --json --full-path -n "$limit" -c sandwalk)
+index_id=$(jq -er '.index_id' "$manifest")
+
+printf '%s' "$raw" | jq -c \
+  --arg root "$index_root" \
+  --arg index_id "$index_id" \
+  --slurpfile manifests "$manifest" \
+  --argjson limit "$limit" '
+    def entry_id:
+      .file as $file
+      | if $file | startswith($root + "/corpus/")
+        then $file | ltrimstr($root + "/corpus/")
+        elif $file | startswith("./corpus/")
+        then $file | sub("^\\./corpus/"; "")
+        elif $file | startswith("corpus/")
+        then $file | sub("^corpus/"; "")
+        else ""
+        end
+      | sub("\\.md$"; "");
+    [ .[]
+      | . as $result
+      | (entry_id) as $id
+      | select($id | test("^[0-9a-f]{32}$"))
+      | ($manifests[0].entries[] | select(.id == $id)) as $entry
+      | {
+          url: ("qmd://" + $index_id + "/" + $id),
+          title: (($entry.title // $result.title // $id) | tostring | .[0:500]),
+          snippet: (($result.snippet // $result.body // "") | tostring | gsub("[\\r\\n\\t]+"; " ") | .[0:1000])
+        }
+    ][0:$limit]
+    | {
+        protocol: "sandwalk.search-results.v1",
+        adapter: {
+          name: "qmd",
+          protocol_version: 1,
+          search_profile: "pure-vector-local-index-v1"
+        },
+        results: .
+      }
+  '

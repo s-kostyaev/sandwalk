@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+  update)
+    mkdir -p .qmd
+    printf '%s\n' 'fake project-local qmd database' >.qmd/index.sqlite
+    ;;
+  embed)
+    [ -f .qmd/index.sqlite ]
+    ;;
+  vsearch)
+    if [ -n "${QMD_FAKE_MATCH:-}" ]; then
+      first=$(rg -l -F "$QMD_FAKE_MATCH" corpus | LC_ALL=C sort | head -1)
+    else
+      first=$(find corpus -type f -name '*.md' -print | LC_ALL=C sort | head -1)
+    fi
+    [ -n "$first" ] || exit 65
+    title=$(sed -n '1{s/^# //;p;}' "$first")
+    snippet=$(sed -n '3,5p' "$first" | tr '\n' ' ')
+    jq -n --arg file "$PWD/$first" --arg title "$title" --arg snippet "$snippet" \
+      '[{docid:"#fixture",score:0.91,file:$file,title:$title,snippet:$snippet}]'
+    ;;
+  --version)
+    printf '%s\n' 'qmd 2.1.0-test'
+    ;;
+  *)
+    printf '%s\n' 'unexpected fake qmd command' >&2
+    exit 64
+    ;;
+esac
