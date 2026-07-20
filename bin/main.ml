@@ -1,7 +1,7 @@
 open! Core
 open! Async
 
-let version = "0.1.0"
+let version = "0.2.0"
 
 let about_command =
   Async.Command.async
@@ -129,11 +129,19 @@ let explanation = function
   | "SEARCH_ADAPTER_FAILED" ->
     Some
       ( "The search adapter exited unsuccessfully, timed out, or returned invalid JSON."
-      , "Verify the selected adapter and its search tool (`ddgr` or `ugrep+`) are on PATH and allowed by the filesystem or network sandbox." )
+      , "Verify the selected adapter and its search tool (`ddgr`, `ugrep+`, `texiq`, or `qmd`) are on PATH and allowed by the filesystem or network sandbox." )
   | "FETCH_ADAPTER_FAILED" ->
     Some
       ( "The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON."
-      , "Verify the selected adapter and its normalizer are on PATH. The default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root." )
+      , "Verify the selected adapter and its normalizer are on PATH. Info hits require `texiq`; semantic hits require an unchanged Sandwalk QMD index; the default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root." )
+  | "INDEX_ADAPTER_FAILED" ->
+    Some
+      ( "The local ingest or QMD indexing process exited unsuccessfully or timed out."
+      , "Verify `qmd`, `rg`, `jq`, and the required document normalizers are on PATH. Run `qmd doctor` when model loading or device selection fails; use `QMD_FORCE_CPU=1` only when acceleration is unavailable or prohibited by the sandbox." )
+  | "INDEX_PROTOCOL_ERROR" ->
+    Some
+      ( "The index adapter did not publish a valid Sandwalk semantic-index manifest."
+      , "Do not edit a partially built index. Fix or replace the index adapter, then rerun `sandwalk index build` for the same target directory." )
   | "PLAN_EMPTY" ->
     Some
       ( "The plan has no steps, so it cannot be validated."
@@ -1080,11 +1088,12 @@ let work_packet
   | "search" ->
     base
       "search"
-      "Refine editable.query into a concise search query that preserves the research subject and current step goal. To search user-authorized local documents, set editable.source_root to their readable directory; otherwise leave it empty. Apply runs Sandwalk search."
+      "Refine editable.query into a concise search query that preserves the research subject and current step goal. Set at most one of editable.source_root for lexical local-document search or editable.source_index for a Sandwalk QMD semantic index; otherwise leave both empty. Apply runs Sandwalk search."
       [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
       ]
       [ "query", `String (default_search_query step_context recommendation)
       ; "source_root", `String ""
+      ; "source_index", `String ""
       ]
   | "fetch" ->
     base
@@ -4757,7 +4766,11 @@ let fetch_command =
                   Option.value
                     adapter
                     ~default:
-                      (if String.is_prefix url ~prefix:"file://"
+                      (if String.is_prefix url ~prefix:"info://texiq/"
+                       then "sandwalk-fetch-texiq"
+                       else if String.is_prefix url ~prefix:"qmd://"
+                       then "sandwalk-fetch-qmd"
+                       else if String.is_prefix url ~prefix:"file://"
                        then "sandwalk-fetch-file"
                        else if is_youtube_url url
                        then "sandwalk-fetch-youtube"
@@ -5807,6 +5820,171 @@ let excerpt_command =
     [ "create", excerpt_create_command ]
 ;;
 
+let default_qmd_embedding_model =
+  "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+;;
+
+let index_build_command =
+  Async.Command.async
+    ~summary:"Normalize local sources and build a project-local QMD vector index."
+    (let%map_open.Command source_root =
+       flag
+         "--source-root"
+         (optional string)
+         ~doc:"PATH Ingest documents recursively from this directory"
+     and info_manual =
+       flag
+         "--info-manual"
+         (optional string)
+         ~doc:"SCOPE Ingest every node from this texiq manual or Info path"
+     and emacs =
+       flag
+         "--emacs"
+         no_arg
+         ~doc:"Resolve the Info manual through the active Emacs Info catalog"
+     and index_directory =
+       flag
+         "--index-directory"
+         (required string)
+         ~doc:"PATH Publish the reusable semantic index here"
+     and embedding_model =
+       flag
+         "--embedding-model"
+         (optional_with_default default_qmd_embedding_model string)
+         ~doc:"MODEL Local GGUF embedding model URI"
+     and adapter =
+       flag
+         "--adapter"
+         (optional_with_default "sandwalk-index-qmd" string)
+         ~doc:"PATH Index adapter executable"
+     in
+     fun () ->
+       match source_root, info_manual with
+       | None, None | Some _, Some _ ->
+         print_failure_and_exit
+           ~code:"INVALID_INDEX_SOURCE"
+           ~message:"Specify exactly one of --source-root or --info-manual."
+       | source_root, info_manual ->
+         if String.is_empty embedding_model || String.length embedding_model > 1_024
+         then
+           print_failure_and_exit
+             ~code:"INVALID_EMBEDDING_MODEL"
+             ~message:"Embedding model must contain between 1 and 1024 bytes."
+         else if
+           String.is_empty index_directory || String.length index_directory > 4_096
+         then
+           print_failure_and_exit
+             ~code:"INVALID_INDEX_DIRECTORY"
+             ~message:"Index directory must contain between 1 and 4096 bytes."
+         else if emacs && Option.is_none info_manual
+         then
+           print_failure_and_exit
+             ~code:"INVALID_INDEX_SOURCE"
+             ~message:"--emacs is valid only with --info-manual."
+         else (
+           let absolute path =
+             if Filename.is_absolute path
+             then path
+             else Filename.concat (Sys_unix.getcwd ()) path
+           in
+           let index_directory = absolute index_directory in
+           let request =
+             match source_root, info_manual with
+             | Some root, None ->
+               Sandwalk_protocol.Index_adapter.request_documents
+                 ~source_root:(absolute root)
+                 ~index_directory
+                 ~embedding_model
+             | None, Some manual ->
+               Sandwalk_protocol.Index_adapter.request_info
+                 ~manual
+                 ~index_directory
+                 ~embedding_model
+                 ~emacs
+             | None, None | Some _, Some _ -> assert false
+           in
+           let%bind output =
+             Sandwalk_runtime.Adapter.run_json
+               ~executable:adapter
+               ~request
+               ~timeout:(Time_float.Span.of_hr 6.)
+               ~maximum_output_bytes:65_536
+           in
+           match output with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"INDEX_ADAPTER_FAILED"
+               ~message:"Semantic index adapter failed."
+           | Ok output ->
+             (match Sandwalk_protocol.Index_adapter.manifest output with
+              | Error _ ->
+                print_failure_and_exit
+                  ~code:"INDEX_PROTOCOL_ERROR"
+                  ~message:"Semantic index adapter returned an invalid response."
+              | Ok manifest_path ->
+                let expected_manifest =
+                  Filename.concat index_directory "manifest.json"
+                in
+                if not (String.equal (Filename.basename manifest_path) "manifest.json")
+                then
+                  print_failure_and_exit
+                    ~code:"INDEX_PROTOCOL_ERROR"
+                    ~message:"Semantic index adapter returned an invalid manifest path."
+                else (
+                  let%bind manifest =
+                    In_thread.run (fun () ->
+                      Or_error.try_with (fun () ->
+                        Yojson.Safe.from_file expected_manifest))
+                  in
+                  match manifest with
+                  | Error _ ->
+                    print_failure_and_exit
+                      ~code:"INDEX_PROTOCOL_ERROR"
+                      ~message:"Semantic index manifest could not be read."
+                  | Ok (`Assoc fields as manifest) ->
+                    let string name =
+                      match List.Assoc.find fields name ~equal:String.equal with
+                      | Some (`String value) -> Some value
+                      | Some _ | None -> None
+                    in
+                    let count name =
+                      match List.Assoc.find fields name ~equal:String.equal with
+                      | Some (`List values) -> Some (List.length values)
+                      | Some _ | None -> None
+                    in
+                    (match string "protocol", string "index_id", count "entries", count "skipped" with
+                     | Some "sandwalk.semantic-index.v1", Some index_id, Some entries, Some skipped
+                       when String.length index_id = 32 && entries > 0 ->
+                       Sandwalk_protocol.Envelope.success
+                         ~result:
+                           (`Assoc
+                              [ "index_directory", `String index_directory
+                              ; "index_id", `String index_id
+                              ; "entries", `Int entries
+                              ; "skipped", `Int skipped
+                              ; "embedding_model", `String embedding_model
+                              ])
+                         ()
+                       |> Sandwalk_protocol.Envelope.render
+                       |> print_endline;
+                       Deferred.unit
+                     | _ ->
+                       ignore manifest;
+                       print_failure_and_exit
+                         ~code:"INDEX_PROTOCOL_ERROR"
+                         ~message:"Semantic index manifest is invalid.")
+                  | Ok _ ->
+                    print_failure_and_exit
+                      ~code:"INDEX_PROTOCOL_ERROR"
+                      ~message:"Semantic index manifest is invalid."))))
+;;
+
+let index_command =
+  Async.Command.group
+    ~summary:"Build reusable local discovery indexes."
+    [ "build", index_build_command ]
+;;
+
 let search_command =
   Async.Command.async
     ~summary:"Run a bounded search adapter and persist provenance-owned hits."
@@ -5824,6 +6002,11 @@ let search_command =
          "--source-root"
          (optional string)
          ~doc:"PATH Restrict local-document search to this directory"
+     and source_index =
+       flag
+         "--source-index"
+         (optional string)
+         ~doc:"PATH Search a Sandwalk-built local semantic index"
      and claim_text =
        flag "--claim" (optional string) ~doc:"CLAIM Active research claim"
      and limit =
@@ -5854,16 +6037,25 @@ let search_command =
            print_failure_and_exit
              ~code:"INVALID_SEARCH_LIMIT"
              ~message:"Search limit must be between 1 and 25."
+         else if Option.is_some source_root && Option.is_some source_index
+         then
+           print_failure_and_exit
+             ~code:"INVALID_SEARCH_SOURCE"
+             ~message:"--source-root and --source-index are mutually exclusive."
          else if
            Option.exists source_root ~f:(fun root ->
+             String.is_empty root || String.length root > 4_096)
+           || Option.exists source_index ~f:(fun root ->
              String.is_empty root || String.length root > 4_096)
          then
            print_failure_and_exit
              ~code:"INVALID_SOURCE_ROOT"
              ~message:"Source root must contain between 1 and 4096 bytes."
          else (
+           let semantic_index = Option.is_some source_index in
            let source_root =
-             Option.map source_root ~f:(fun root ->
+             Option.first_some source_index source_root
+             |> Option.map ~f:(fun root ->
                if Filename.is_absolute root
                then root
                else Filename.concat (Sys_unix.getcwd ()) root)
@@ -5872,7 +6064,9 @@ let search_command =
              Option.value
                adapter
                ~default:
-                 (if Option.is_some source_root
+                 (if semantic_index
+                  then "sandwalk-search-qmd"
+                  else if Option.is_some source_root
                   then "sandwalk-search-ugrep"
                   else "sandwalk-search-ddgr")
            in
@@ -5936,6 +6130,11 @@ let search_command =
                      ; ( "source_root"
                        , Option.value_map
                            source_root
+                           ~default:`Null
+                           ~f:(fun value -> `String value) )
+                     ; ( "source_index"
+                       , Option.value_map
+                           source_index
                            ~default:`Null
                            ~f:(fun value -> `String value) )
                      ; ( "claim"
@@ -6031,7 +6230,18 @@ let search_command =
                       Sandwalk_runtime.Adapter.run_json
                         ~executable:adapter
                         ~request
-                        ~timeout:(Time_float.Span.of_sec 30.)
+                        ~timeout:
+                          (Time_float.Span.of_sec
+                             (if List.mem
+                                   [ "sandwalk-search-texiq"
+                                   ; "texiq-search"
+                                   ; "sandwalk-search-qmd"
+                                   ; "qmd-search"
+                                   ]
+                                   (Filename.basename adapter)
+                                   ~equal:String.equal
+                              then 900.
+                              else 30.))
                         ~maximum_output_bytes:262_144
                     in
                     (match adapter_output with
@@ -9796,8 +10006,17 @@ let apply_command =
                   let source_root =
                     json_string_member "source_root" editable |> String.strip
                   in
+                  let source_index =
+                    json_string_member "source_index" editable |> String.strip
+                  in
                   if String.length source_root > 4_096
                   then failwith "Source root is too long";
+                  if String.length source_index > 4_096
+                  then failwith "Source index is too long";
+                  if
+                    (not (String.is_empty source_root))
+                    && not (String.is_empty source_index)
+                  then failwith "Source root and source index are mutually exclusive";
                   let command =
                     workspace_arguments
                       ([ "search"
@@ -9808,7 +10027,10 @@ let apply_command =
                        ]
                        @
                        if String.is_empty source_root
-                       then []
+                       then
+                         (if String.is_empty source_index
+                          then []
+                          else [ "--source-index"; source_index ])
                        else [ "--source-root"; source_root ])
                   in
                   `Commands [ command ], None
@@ -10429,6 +10651,7 @@ let command =
     ; "finalize", finalize_command
     ; "gc", gc_command
     ; "init", init_command
+    ; "index", index_command
     ; "list", list_command
     ; "next", next_command
     ; "plan", plan_command

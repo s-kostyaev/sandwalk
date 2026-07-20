@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+## 0.2.0 — 2026-07-20
+
+### Local sources
+
+- Add bundled `texiq` search and fetch adapters for exact GNU Info node
+  snapshots, including active Emacs Info manuals and automatic
+  `info://texiq/` fetch dispatch.
+- Add reusable, fully local semantic indexes for normalized documents and GNU
+  Info nodes through the optional QMD runtime. Sandwalk records the exact
+  embedding model and implementation version, performs structured vector-only
+  search without query expansion or reranking, and resolves each hit back to a
+  verified immutable source artifact before it can become evidence.
+
 ## 0.1.0 — 2026-07-12
 
 Initial public release of Sandwalk's deterministic research harness.

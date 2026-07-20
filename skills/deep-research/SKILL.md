@@ -65,15 +65,17 @@ packet. Sandwalk will durably skip it and derive another action. Never create an
 excerpt or finding from a bot challenge, access-denied page, irrelevant result,
 or content that does not address the packet's research objective and step.
 
-Search packets contain an editable query and an initially empty
-`editable.source_root`. Confirm that the query names the research subject and
-current step goal. When the user authorized a local document directory, put
-that readable directory in `source_root`; otherwise leave it empty.
+Search packets contain an editable query and initially empty
+`editable.source_root` and `editable.source_index` fields. Confirm that the
+query names the research subject and current step goal. For a one-off lexical
+local search, put the authorized directory in `source_root`. For a previously
+built Sandwalk semantic index, put its directory in `source_index`. Never set
+both.
 
 ## Exclusive retrieval
 
 While this skill is active, Sandwalk is the only permitted path for every
-network or local-document search and fetch, including reconnaissance. Do not load or invoke
+network, local-document, or GNU Info search and fetch, including reconnaissance. Do not load or invoke
 another web-search, browsing, or fetch skill. Do not call `ddgr`, `curl`,
 `wget`, `yt-dlp`, `ug`, `ugrep`, `mq`, Xberg, Docling, a browser, or an HTTP
 client directly. These programs may run only behind a Sandwalk adapter or for
@@ -87,6 +89,15 @@ retrieval path. The fetch result also declares `document_media_type`. Navigate
 with `rg -n`, then read only bounded line ranges around matches. Do not run
 `mq` against plain text or read an entire long transcript into context.
 
+For installed GNU Info or active Emacs Info manuals, run `sandwalk search` with
+`--adapter sandwalk-search-texiq`. Use `--source-root <info-directory>` only
+when an explicit Info directory is required; the adapter otherwise searches the
+active Emacs `Info-directory-list` followed by the ordinary Info path. Returned
+`info://texiq/` hits select the matching fetch adapter automatically and become
+exact-node `text/plain` snapshots. Read the returned `document_path` with the
+same bounded `rg -n` workflow as any other plain-text snapshot; do not invoke
+`texiq` directly while this skill is active.
+
 For user-authorized local documents, run `sandwalk search` with exactly one
 `--source-root <directory>`. The root must already be readable inside the
 agent's filesystem sandbox. Sandwalk records it with every hit, defaults to
@@ -98,6 +109,27 @@ article HTML for `document.md` and retains the matching versioned `source.pdf`
 for the user; an unusable HTML representation falls back to Docling
 automatically. Inspect the returned primary document according to its declared
 media type; never treat the search snippet as document content.
+
+For repeated or semantic retrieval over local documents or Info manuals, first
+build the discovery cache outside the research workflow with exactly one of:
+
+```console
+sandwalk index build --source-root <authorized-directory> \
+  --index-directory <index-directory>
+sandwalk index build --info-manual <manual-or-path> [--emacs] \
+  --index-directory <index-directory>
+```
+
+Then use `sandwalk search ... --source-index <index-directory>`. This runs one
+typed QMD `vec:` query with `--no-rerank`, so neither query expansion nor a
+reranking model is loaded. QMD projections and snippets are never evidence;
+`sandwalk fetch` verifies the selected entry and unchanged original input, then
+publishes the exact normalized document under its original `file://` or
+`info://texiq/` provenance. Rebuild the index when fetch reports that it is
+stale. Use `qmd doctor` to verify automatically selected acceleration. Set
+`QMD_FORCE_CPU=1` only when Metal/CUDA/Vulkan is unavailable or prohibited by
+the agent sandbox; expect slower queries. Do not invoke QMD search or retrieval
+directly while this skill is active.
 
 For YouTube hits, the default constructor uses source chapters when they exist.
 If it returns `text/plain`, the video had no usable source chapter structure:

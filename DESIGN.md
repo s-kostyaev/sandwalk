@@ -361,8 +361,10 @@ standard output. Shell command templates are not part of the protocol.
 A search adapter returns bounded structured results. Sandwalk mints `hit_...`
 references and records the query, adapter, result position, source locator,
 title, and snippet. The schema-7 `url` column and v1 JSON field retain their
-names for compatibility, but accept HTTP(S) URLs and absolute `file://`
-locators. Schema 23 adds the requested local source root to search provenance.
+names for compatibility, but accept HTTP(S) URLs, absolute `file://` locators,
+bundled `info://texiq/` node locators, and `qmd://` semantic-index entry
+locators. Schema 23 adds the requested local source root to search provenance;
+for a QMD search this field contains the authorized semantic-index directory.
 
 The bundled ddgr connector accepts:
 
@@ -374,6 +376,19 @@ and returns at most 25 bounded results in a
 `sandwalk.search-results.v1` envelope. It invokes `ddgr --json` without a
 shell command template.
 
+The bundled `sandwalk-search-texiq` connector is a local, read-only GNU Info
+source. It invokes `texiq --emacs` through the same bounded search protocol so
+manuals registered only in the active Emacs `Info-directory-list`, including
+package manuals, are discoverable alongside the ordinary Info path. An
+explicit `--source-root` is prepended as an Info directory when supplied.
+Repeated text matches in the same node collapse to one hit. The hit locator
+contains the exact absolute main-file path and exact case-sensitive node name
+as base64 fields under the `info://texiq/` scheme; the snippet remains discovery
+metadata and cannot become evidence.
+Catalog-wide Info search receives a 15-minute outer process bound because a
+large active Emacs catalog is parsed locally and may exceed the ordinary
+30-second search-adapter timeout.
+
 When `--source-root` is present, the default bundled search connector is
 `sandwalk-search-ugrep`. It invokes `ugrep+`, not `ug+`, so user or
 working-directory `.ugrep` files cannot silently change scripted behavior. It
@@ -381,6 +396,50 @@ performs a fixed-string recursive search with stable pathname ordering,
 does not follow directory symlinks, returns at most the requested number of
 files, and emits canonical percent-encoded `file://` locators. Search snippets
 are discovery metadata only and never become evidence.
+
+Sandwalk can build a reusable local semantic discovery index before a research
+workspace exists:
+
+```text
+sandwalk index build --source-root <path> --index-directory <path>
+sandwalk index build --info-manual <scope> --index-directory <path> [--emacs]
+```
+
+The command invokes the versioned `sandwalk-index-qmd` adapter. Document ingest
+walks one authorized directory without following symlinks and normalizes each
+supported regular file through `sandwalk-fetch-file`; therefore plain text and
+the rich formats supported by Docling share the same normalization and retained
+original rules as an ordinary fetch. Info ingest enumerates the selected
+manual's nodes through `texiq` and stores one exact node per entry. Inputs that
+cannot be normalized are reported as skipped entries; an empty corpus fails.
+
+An index is built in a sibling staging directory and is published atomically.
+Replacing an existing directory is allowed only when its manifest identifies a
+Sandwalk semantic index. The index contains a bounded `manifest.json`, immutable
+per-entry normalized documents and metadata, a Markdown discovery projection,
+and QMD's project-local `.qmd/index.yml` and `.qmd/index.sqlite`. The manifest
+binds every entry to its original `file://` or `info://texiq/` locator and to
+input, normalized-document, and projection hashes. It records the exact QMD
+implementation version and embedding model. The model defaults to a pinned
+multilingual Qwen3 embedding model; changing it requires rebuilding the index.
+
+`sandwalk search --source-index <path>` selects `sandwalk-search-qmd` by
+default. It runs one typed QMD structured query (`vec: ...`) with
+`--no-rerank` against only the corpus declared by the Sandwalk manifest. This
+skips QMD query expansion and reranking, so search loads only the configured
+embedding model. The adapter converts QMD paths to bounded
+`qmd://<index-id>/<entry-id>` locators, and persists the index directory as
+search provenance. `--source-index` and `--source-root` are mutually exclusive.
+The QMD database and its Markdown projections are discovery caches: snippets,
+scores, and projection text can never become evidence directly.
+
+Fetching a `qmd://` hit automatically selects `sandwalk-fetch-qmd`. The fetch
+adapter verifies the locator's index identity, entry containment, manifest
+membership, and all retained hashes, then publishes the entry's exact
+normalized document. Its fetch manifest uses the original source locator as
+`final_url`, so snapshot provenance and citations continue to name the source
+file or Info node rather than the discovery cache. A changed source or a stale,
+modified index is rejected and must be rebuilt.
 
 A fetch adapter receives an output directory controlled by Sandwalk. It writes:
 
@@ -496,6 +555,15 @@ chapters, invoke an embedding model, or transcribe audio.
 
 `blocks.jsonl` maps Markdown ranges to original document locators such as PDF
 pages and bounding boxes.
+
+The bundled `sandwalk-fetch-texiq` connector is selected automatically for an
+`info://texiq/` hit. It resolves the locator's exact source path and node name,
+uses `texiq` to extract only that node, and publishes it as a queryable
+`text/plain` `document.txt`. The snapshot retains the selected main Info file
+and `texiq`'s versioned node metadata. It hashes the main file before and after
+extraction and rejects a concurrent change, so the published node text and
+recorded input provenance cannot silently cross source revisions. It never
+contacts the network or invokes an LLM.
 
 The bundled default local-file fetch connector is `sandwalk-fetch-file`.
 `fetch` selects it for a `file://` hit. The request repeats the source root

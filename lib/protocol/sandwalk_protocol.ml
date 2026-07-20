@@ -199,6 +199,48 @@ module Shell_command = struct
   let of_words words = words |> List.map ~f:quote |> String.concat ~sep:" "
 end
 
+module Index_adapter = struct
+  type error =
+    | Invalid_envelope
+    | Unsupported_protocol
+  [@@deriving sexp_of]
+
+  let request_documents ~source_root ~index_directory ~embedding_model =
+    `Assoc
+      [ "protocol", `String "sandwalk.index.v1"
+      ; "mode", `String "documents"
+      ; "source_root", `String source_root
+      ; "index_directory", `String index_directory
+      ; "embedding_model", `String embedding_model
+      ]
+  ;;
+
+  let request_info ~manual ~index_directory ~embedding_model ~emacs =
+    `Assoc
+      [ "protocol", `String "sandwalk.index.v1"
+      ; "mode", `String "info"
+      ; "manual", `String manual
+      ; "index_directory", `String index_directory
+      ; "embedding_model", `String embedding_model
+      ; "emacs", `Bool emacs
+      ]
+  ;;
+
+  let manifest = function
+    | `Assoc fields ->
+      (match List.Assoc.find fields "protocol" ~equal:String.equal with
+       | Some (`String "sandwalk.index-result.v1") ->
+         (match List.Assoc.find fields "manifest" ~equal:String.equal with
+          | Some (`String value)
+            when (not (String.is_empty value)) && String.length value <= 4_096 ->
+            Ok value
+          | Some _ | None -> Error Invalid_envelope)
+       | Some (`String _) -> Error Unsupported_protocol
+       | Some _ | None -> Error Invalid_envelope)
+    | _ -> Error Invalid_envelope
+  ;;
+end
+
 module Search_adapter = struct
   type result =
     { url : string
@@ -238,7 +280,9 @@ module Search_adapter = struct
       if
         (String.is_prefix url ~prefix:"http://"
          || String.is_prefix url ~prefix:"https://"
-         || String.is_prefix url ~prefix:"file://")
+         || String.is_prefix url ~prefix:"file://"
+         || String.is_prefix url ~prefix:"info://texiq/"
+         || String.is_prefix url ~prefix:"qmd://")
         && not (String.is_empty title)
       then Some { url; title; snippet }
       else None
@@ -385,7 +429,9 @@ module Fetch_adapter = struct
               , true )
             when (String.is_prefix final_url ~prefix:"http://"
                   || String.is_prefix final_url ~prefix:"https://"
-                 || String.is_prefix final_url ~prefix:"file://")
+                  || String.is_prefix final_url ~prefix:"file://"
+                  || String.is_prefix final_url ~prefix:"info://texiq/"
+                  || String.is_prefix final_url ~prefix:"qmd://")
                  && sha256 input_sha256
                  && artifact_basename document_artifact
                  && List.mem
@@ -834,6 +880,91 @@ let%expect_test "search adapter responses are versioned and bounded" =
   |> [%sexp_of: (int, Search_adapter.error) Result.t]
   |> print_s;
   [%expect {| (Ok 1) |}]
+;;
+
+let%expect_test "index adapters have explicit document and Info requests" =
+  Index_adapter.request_documents
+    ~source_root:"/tmp/docs"
+    ~index_directory:"/tmp/index"
+    ~embedding_model:"hf:model"
+  |> Yojson.Safe.to_string
+  |> print_endline;
+  Index_adapter.request_info
+    ~manual:"ellama"
+    ~index_directory:"/tmp/info-index"
+    ~embedding_model:"hf:model"
+    ~emacs:true
+  |> Yojson.Safe.to_string
+  |> print_endline;
+  `Assoc
+    [ "protocol", `String "sandwalk.index-result.v1"
+    ; "manifest", `String "/tmp/index/manifest.json"
+    ]
+  |> Index_adapter.manifest
+  |> [%sexp_of: (string, Index_adapter.error) Result.t]
+  |> print_s;
+  [%expect
+    {|
+    {"protocol":"sandwalk.index.v1","mode":"documents","source_root":"/tmp/docs","index_directory":"/tmp/index","embedding_model":"hf:model"}
+    {"protocol":"sandwalk.index.v1","mode":"info","manual":"ellama","index_directory":"/tmp/info-index","embedding_model":"hf:model","emacs":true}
+    (Ok /tmp/index/manifest.json) |}]
+;;
+
+let%expect_test "search protocol accepts semantic index locators" =
+  `Assoc
+    [ "protocol", `String "sandwalk.search-results.v1"
+    ; ( "results"
+      , `List
+          [ `Assoc
+              [ "url", `String "qmd://0123456789abcdef0123456789abcdef/fedcba9876543210fedcba9876543210"
+              ; "title", `String "Indexed document"
+              ; "snippet", `String "Discovery-only text"
+              ]
+          ] )
+    ]
+  |> Search_adapter.results
+  |> Result.map ~f:List.length
+  |> [%sexp_of: (int, Search_adapter.error) Result.t]
+  |> print_s;
+  [%expect {| (Ok 1) |}]
+;;
+
+let%expect_test "search and fetch protocols accept texiq Info locators" =
+  let locator = "info://texiq/L3RtcC9lbGxhbWEuaW5mbw==#VXNpbmcgQmx1ZXByaW50cw==" in
+  `Assoc
+    [ "protocol", `String "sandwalk.search-results.v1"
+    ; ( "results"
+      , `List
+          [ `Assoc
+              [ "url", `String locator
+              ; "title", `String "ellama — Using Blueprints"
+              ; "snippet", `String "Reusable prompt templates."
+              ]
+          ] )
+    ]
+  |> Search_adapter.results
+  |> Result.map ~f:List.length
+  |> [%sexp_of: (int, Search_adapter.error) Result.t]
+  |> print_s;
+  `Assoc
+    [ "protocol", `String "sandwalk.fetch-manifest.v1"
+    ; "final_url", `String locator
+    ; "document_media_type", `String "text/plain"
+    ; ( "hashes"
+      , `Assoc
+          [ "input_sha256", `String (String.make 64 'a')
+          ; "normalized_document_sha256", `String (String.make 64 'b')
+          ] )
+    ; "artifacts", `Assoc [ "document", `String "document.txt" ]
+    ; "queryability_check", `Assoc [ "ok", `Bool true ]
+    ]
+  |> Fetch_adapter.validate_manifest
+  |> [%sexp_of: (unit, Fetch_adapter.error) Result.t]
+  |> print_s;
+  [%expect
+    {|
+    (Ok 1)
+    (Ok ()) |}]
 ;;
 
 let%expect_test "fetch manifests require a successful mq gate" =

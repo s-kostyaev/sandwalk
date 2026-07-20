@@ -3,6 +3,9 @@
  (files
   (ddgr-search as sandwalk-search-ddgr)
   (ugrep-search as sandwalk-search-ugrep)
+  (texiq-search as sandwalk-search-texiq)
+  (qmd-search as sandwalk-search-qmd)
+  (qmd-index as sandwalk-index-qmd)
   (web-fetch as sandwalk-fetch-web)
   (curl-pandoc-fetch as sandwalk-fetch-curl-pandoc)
   (playwright-fetch as sandwalk-fetch-playwright)
@@ -13,5 +16,7 @@
   (docling-normalize as sandwalk-docling-normalize)
   (youtube-fetch as sandwalk-fetch-youtube)
   (youtube-normalize as sandwalk-youtube-normalize)
+  (texiq-fetch as sandwalk-fetch-texiq)
+  (qmd-fetch as sandwalk-fetch-qmd)
   (xberg-fetch as sandwalk-fetch-xberg)
   (pandoc-pdf-export as sandwalk-export-pandoc-pdf)))

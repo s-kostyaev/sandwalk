@@ -5,8 +5,8 @@ research workflows, records source provenance, validates evidence references,
 and renders citations without invoking an LLM.
 
 The initial end-to-end workflow includes workspace recovery, append-only plans,
-durable exclusive claims, web and local-document search, immutable structured
-Markdown or plain-text snapshots, exact excerpts, reviewed findings,
+durable exclusive claims, web, local-document, and GNU Info search, immutable
+structured Markdown or plain-text snapshots, exact excerpts, reviewed findings,
 packet-driven continuation, and citation-safe finalization. Local discovery
 uses `ugrep+`; the bundled local-file connector preserves ordinary source text
 as `text/plain` and delegates rich documents to Docling. The Docling connector
@@ -31,10 +31,10 @@ The portable agent skill is installed under
 
 ## Installation
 
-The initial release can be installed from its Git tag with opam:
+The latest release can be installed from its Git tag with opam:
 
 ```console
-opam pin add sandwalk https://github.com/s-kostyaev/sandwalk.git#v0.1.0
+opam pin add sandwalk https://github.com/s-kostyaev/sandwalk.git#v0.2.0
 ```
 
 Install only the runtime tools needed by the source and export adapters you
@@ -56,6 +56,22 @@ type is used:
 - `rg` for local plain-text snapshots and flat transcripts.
 - `ugrep+` for local source-root discovery.
 - `ddgr` for the bundled web search adapter.
+- [`texiq`](https://github.com/s-kostyaev/texiq) for local GNU Info and active
+  Emacs Info manuals. Search with `--adapter sandwalk-search-texiq`; matching
+  `info://texiq/` hits select `sandwalk-fetch-texiq` automatically.
+- [`qmd`](https://github.com/tobi/qmd) for an optional, fully local semantic
+  discovery index. Build normalized document or node-per-document Info corpora
+  with `sandwalk index build`, then search them with `--source-index`; Sandwalk
+  issues one structured `vec:` query with `--no-rerank`, avoiding QMD's query
+  expansion and reranking models, and verifies exact retained source artifacts
+  again during fetch. Install the tested CLI with
+  `npm install -g @tobilu/qmd@2.5.3`; it requires Node.js 22 or newer. The
+  default multilingual Qwen3 embedding model is downloaded to QMD's local
+  model cache on first use and occupies approximately 610 MiB. QMD selects
+  Metal/CUDA/Vulkan automatically; use `qmd doctor` to verify acceleration.
+  Set `QMD_FORCE_CPU=1` only when acceleration is genuinely unavailable or
+  prohibited by the execution sandbox; CPU queries can be substantially
+  slower.
 - `pandoc` and `curl` for web page/PDF retrieval and PDF export paths. PDF
   export additionally requires `xelatex` and fontconfig's `fc-match`; the
   exporter selects installed fonts with Russian Cyrillic support.

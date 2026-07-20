@@ -38,6 +38,10 @@ sandwalk snapshot promote --slug <slug> --claim <claim_id> <snapshot_id>
 sandwalk search --slug <slug> --claim <claim_id> --query <query> [--limit 10]
 sandwalk search --slug <slug> --claim <claim_id> --query <query> \
   --source-root <authorized-directory> [--limit 10]
+sandwalk search --slug <slug> --claim <claim_id> --query <query> \
+  --source-index <semantic-index-directory> [--limit 10]
+sandwalk search --slug <slug> --claim <claim_id> --query <query> \
+  --adapter sandwalk-search-texiq [--limit 10]
 sandwalk fetch --slug <slug> --claim <claim_id> <hit_id>
 sandwalk excerpt create --slug <slug> --claim <claim_id> \
   --snapshot <snapshot_id> --lines <first:last>
@@ -53,6 +57,16 @@ sandwalk finding review --slug <slug> --claim <claim_id> \
 sandwalk step complete --slug <slug> --claim <claim_id>
 ```
 
+Build an optional reusable index before research with either
+`sandwalk index build --source-root <authorized-directory> --index-directory
+<semantic-index-directory>` or `sandwalk index build --info-manual
+<manual-or-path> [--emacs] --index-directory <semantic-index-directory>`.
+The third search form runs one typed QMD `vec:` query with `--no-rerank` over
+that normalized corpus, without query expansion or a reranking model. Fetch
+verifies the retained entry and unchanged input and restores its
+original file or Info locator; QMD snippets and Markdown projections are not
+evidence. `--source-root` and `--source-index` are mutually exclusive.
+
 Use the second search form for local documents. `--source-root` changes the
 default search adapter to `sandwalk-search-ugrep`; the resulting `file://` hit
 changes the default fetch adapter to `sandwalk-fetch-file`. Ordinary text and
@@ -65,6 +79,13 @@ inspection of already-returned Sandwalk artifact paths. Inspect hierarchical
 `text/markdown` documents with `mq` before selecting excerpt ranges. Use
 `sandwalk fetch ... --adapter sandwalk-fetch-xberg` only as an explicit fast
 alternative for a simple document.
+
+Use the fourth search form for installed GNU Info and active Emacs Info manuals.
+The local read-only adapter returns one `info://texiq/` hit per matching node;
+`sandwalk fetch` selects `sandwalk-fetch-texiq` automatically and publishes the
+exact node as `text/plain`. An optional `--source-root <info-directory>`
+prepends an explicit Info directory. Do not invoke `texiq` directly while the
+Sandwalk-exclusive retrieval rules are active.
 
 Fetch accepts only a persisted hit ID, not an arbitrary URL. Its result returns
 the immutable primary `document_path` and `document_media_type`; the manifest

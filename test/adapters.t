@@ -20,6 +20,43 @@ ddgr diagnostics with an empty result set are adapter failures.
   network unavailable
   [69]
 
+Texiq search collapses repeated matches in one Info node into a provenance-owned
+node locator.
+
+  $ mkdir -p info-fixture
+  $ printf '%s\n' 'Fixture Info source.' > info-fixture/ellama.info
+  $ TEXIQ_FAKE_SOURCE="$PWD/info-fixture/ellama.info" PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/texiq-search <<'EOF' | \
+  >   jq -r '[.adapter.name, (.results | length), .results[0].title, (.results[0].url | startswith("info://texiq/"))] | @tsv'
+  > {"protocol":"sandwalk.search.v1","query":"blueprint","limit":2}
+  > EOF
+  texiq	2	ellama — Blueprints and Community Prompts	true
+
+Texiq fetch extracts only the selected node as plain text and retains its Info
+metadata and source file.
+
+  $ info_url=$(TEXIQ_FAKE_SOURCE="$PWD/info-fixture/ellama.info" \
+  >   PATH="$PWD/fakes:$PATH" ../adapters/texiq-search <<'EOF' | \
+  >   jq -r '.results[0].url'
+  > {"protocol":"sandwalk.search.v1","query":"blueprint","limit":1}
+  > EOF
+  > )
+  $ mkdir texiq-output
+  $ PATH="$PWD/fakes:$PATH" ../adapters/texiq-fetch <<EOF
+  > {"protocol":"sandwalk.fetch.v1","url":"$info_url","output_directory":"texiq-output"}
+  > EOF
+  {"protocol":"sandwalk.fetch-result.v1","manifest":"texiq-output/manifest.json"}
+
+  $ cat texiq-output/document.txt
+  2.9 Blueprints and Community Prompts
+  Blueprints are reusable prompt templates with variables.
+
+  $ jq -r '[.adapter.name, .adapter.extraction_profile, .artifacts.document, .artifacts.metadata, .document_media_type, .queryability_check.tool] | @tsv' \
+  >   texiq-output/manifest.json
+  texiq	exact-info-node-text-v1	document.txt	node.json	text/plain	rg
+
+  $ test -s texiq-output/original/ellama.info
+
   $ mkdir fetch-output
   $ MQ_TEST_LOG="$PWD/mq.log" PATH="$PWD/fakes:$PATH" \
   >   ../adapters/curl-pandoc-fetch <<'EOF'

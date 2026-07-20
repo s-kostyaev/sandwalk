@@ -1,0 +1,134 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+url=$(printf '%s' "$request" | jq -er '.url')
+index_directory=$(printf '%s' "$request" | jq -er '.source_root')
+output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
+
+[ "$protocol" = "sandwalk.fetch.v1" ] || {
+  printf '%s\n' 'unsupported fetch protocol' >&2
+  exit 64
+}
+case "$url" in
+  qmd://*/*) ;;
+  *) printf '%s\n' 'qmd fetch requires a qmd locator' >&2; exit 64 ;;
+esac
+[ -d "$index_directory" ] || {
+  printf '%s\n' 'semantic index must be an existing directory' >&2
+  exit 66
+}
+
+payload=${url#qmd://}
+locator_index_id=${payload%%/*}
+entry_id=${payload#*/}
+printf '%s' "$locator_index_id" | grep -Eq '^[0-9a-f]{32}$'
+printf '%s' "$entry_id" | grep -Eq '^[0-9a-f]{32}$'
+
+index_root=$(cd "$index_directory" && pwd -P)
+index_manifest="$index_root/manifest.json"
+jq -e \
+  --arg index_id "$locator_index_id" \
+  --arg entry_id "$entry_id" '
+    .protocol == "sandwalk.semantic-index.v1"
+    and .index_id == $index_id
+    and ([.entries[] | select(.id == $entry_id)] | length == 1)
+  ' "$index_manifest" >/dev/null
+
+entry=$(jq -cer --arg id "$entry_id" '.entries[] | select(.id == $id)' "$index_manifest")
+original_url=$(printf '%s' "$entry" | jq -er '.source_locator')
+document_relative=$(printf '%s' "$entry" | jq -er '.artifacts.document')
+media_type=$(printf '%s' "$entry" | jq -er '.document_media_type')
+input_sha256=$(printf '%s' "$entry" | jq -er '.hashes.input_sha256')
+document_sha256=$(printf '%s' "$entry" | jq -er '.hashes.document_sha256')
+projection_relative=$(printf '%s' "$entry" | jq -er '.artifacts.projection')
+projection_sha256=$(printf '%s' "$entry" | jq -er '.hashes.projection_sha256')
+structure_relative=$(printf '%s' "$entry" | jq -r '.artifacts.structure // ""')
+structure_sha256=$(printf '%s' "$entry" | jq -r '.hashes.structure_sha256 // ""')
+
+safe_artifact() {
+  case "$1" in
+    entries/"$entry_id"/*) ;;
+    *) printf '%s\n' 'semantic-index artifact escaped its entry' >&2; exit 77 ;;
+  esac
+  case "$1" in *../*|*/..|/*) exit 77 ;; esac
+}
+safe_artifact "$document_relative"
+[ -z "$structure_relative" ] || safe_artifact "$structure_relative"
+case "$projection_relative" in corpus/"$entry_id".md) ;; *) exit 77 ;; esac
+
+document=$(realpath "$index_root/$document_relative")
+projection=$(realpath "$index_root/$projection_relative")
+case "$document" in "$index_root/entries/$entry_id/"*) ;; *) exit 77 ;; esac
+case "$projection" in "$index_root/corpus/"*) ;; *) exit 77 ;; esac
+[ "$(shasum -a 256 "$document" | awk '{print $1}')" = "$document_sha256" ]
+[ "$(shasum -a 256 "$projection" | awk '{print $1}')" = "$projection_sha256" ]
+
+case "$original_url" in
+  file://*) encoded_source=${original_url#file://} ;;
+  info://texiq/*\#*) encoded_source=${original_url#info://texiq/}; encoded_source=${encoded_source%%#*} ;;
+  *) printf '%s\n' 'semantic-index source locator is unsupported' >&2; exit 65 ;;
+esac
+if printf '%s' "$original_url" | grep -q '^file://'; then
+  source_path=$(printf '%b' "$(printf '%s' "$encoded_source" | sed 's/%/\\x/g')")
+else
+  source_path=$(printf '%s' "$encoded_source" | base64 --decode)
+fi
+canonical_source=$(realpath "$source_path")
+[ -f "$canonical_source" ]
+[ "$(shasum -a 256 "$canonical_source" | awk '{print $1}')" = "$input_sha256" ] || {
+  printf '%s\n' 'semantic index is stale; rebuild it before fetching' >&2
+  exit 75
+}
+
+mkdir -p "$output_directory"
+document_basename=$(basename "$document_relative")
+cp "$document" "$output_directory/$document_basename"
+if [ -n "$structure_relative" ]; then
+  structure=$(realpath "$index_root/$structure_relative")
+  [ "$(shasum -a 256 "$structure" | awk '{print $1}')" = "$structure_sha256" ]
+  structure_basename=$(basename "$structure_relative")
+  cp "$structure" "$output_directory/$structure_basename"
+fi
+source_import="$index_root/entries/$entry_id/source/original"
+if [ -d "$source_import" ]; then
+  mkdir -p "$output_directory/original"
+  cp -R "$source_import/." "$output_directory/original/"
+fi
+
+manifest="$output_directory/manifest.json"
+jq -n \
+  --arg requested_url "$url" \
+  --arg final_url "$original_url" \
+  --arg input_sha256 "$input_sha256" \
+  --arg document "$document_basename" \
+  --arg media_type "$media_type" \
+  --arg document_sha256 "$document_sha256" \
+  --arg structure "${structure_basename:-}" \
+  --arg structure_sha256 "$structure_sha256" '
+    {
+      protocol: "sandwalk.fetch-manifest.v1",
+      adapter: {
+        name: "qmd-index",
+        protocol_version: 1,
+        implementation_version: "sandwalk.semantic-index.v1",
+        extraction_profile: "verified-normalized-entry-v1"
+      },
+      requested_url: $requested_url,
+      final_url: $final_url,
+      document_media_type: $media_type,
+      hashes: ({
+        input_sha256: $input_sha256,
+        normalized_document_sha256: $document_sha256
+      } + (if $structure == "" then {} else {structure_sha256: $structure_sha256} end)),
+      artifacts: ({
+        document: $document
+      } + (if $structure == "" then {} else {structure: $structure} end)),
+      queryability_check: {tool: "rg", query: "[^[:space:]]", ok: true}
+    }
+  ' >"$manifest"
+
+rg -q '[^[:space:]]' "$output_directory/$document_basename"
+jq -nc --arg manifest "$manifest" \
+  '{protocol:"sandwalk.fetch-result.v1", manifest:$manifest}'

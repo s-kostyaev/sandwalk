@@ -58,6 +58,28 @@ module Shell_command : sig
   val of_words : string list -> string
 end
 
+module Index_adapter : sig
+  type error =
+    | Invalid_envelope
+    | Unsupported_protocol
+  [@@deriving sexp_of]
+
+  val request_documents
+    :  source_root:string
+    -> index_directory:string
+    -> embedding_model:string
+    -> Yojson.Safe.t
+
+  val request_info
+    :  manual:string
+    -> index_directory:string
+    -> embedding_model:string
+    -> emacs:bool
+    -> Yojson.Safe.t
+
+  val manifest : Yojson.Safe.t -> (string, error) Result.t
+end
+
 module Search_adapter : sig
   type result
 

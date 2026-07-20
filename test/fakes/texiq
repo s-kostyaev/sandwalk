@@ -1,0 +1,90 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' '1.1.0-test'
+  exit 0
+fi
+
+case " $* " in
+  *" .nodes "*)
+    source=${TEXIQ_FAKE_SOURCE:-$PWD/info-fixture/ellama.info}
+    jq -n --arg source "$source" '{
+      schema_version: 1,
+      data: [{
+        kind: "node",
+        manual: "ellama",
+        name: "Blueprints and Community Prompts",
+        next: "Tools and DLP",
+        prev: "Chat Translation",
+        up: "Commands",
+        source_path: $source
+      }]
+    }'
+    ;;
+  *" dir "*)
+    source=${TEXIQ_FAKE_SOURCE:-$PWD/info-fixture/ellama.info}
+    jq -n --arg source "$source" '{
+      schema_version: 1,
+      data: [
+        {
+          kind: "search_match",
+          manual: "ellama",
+          node: "Blueprints and Community Prompts",
+          source_path: $source,
+          byte: 21105,
+          line: 516,
+          column: 5,
+          match: "Blueprint",
+          snippet: "Blueprints and Community Prompts describes reusable prompts."
+        },
+        {
+          kind: "search_match",
+          manual: "ellama",
+          node: "Blueprints and Community Prompts",
+          source_path: $source,
+          byte: 21200,
+          line: 520,
+          column: 3,
+          match: "blueprint",
+          snippet: "A second match in the same node."
+        },
+        {
+          kind: "search_match",
+          manual: "ellama",
+          node: "Using Blueprints",
+          source_path: $source,
+          byte: 30000,
+          line: 700,
+          column: 1,
+          match: "Blueprint",
+          snippet: "Using Blueprints explains execution."
+        }
+      ]
+    }'
+    ;;
+  *" --raw-output "*)
+    printf '%s\n' '2.9 Blueprints and Community Prompts'
+    printf '%s\n' 'Blueprints are reusable prompt templates with variables.'
+    ;;
+  *)
+    source=$3
+    node=$(printf '%s' "$4" | sed -n 's/^\.node("\(.*\)")$/\1/p')
+    jq -n --arg source "$source" --arg node "$node" '{
+      schema_version: 1,
+      data: {
+        kind: "node",
+        manual: "ellama",
+        name: $node,
+        next: "Tools and DLP",
+        prev: "Chat Translation",
+        up: "Commands",
+        start_byte: 20977,
+        end_byte: 21549,
+        start_line: 515,
+        end_line: 525,
+        source_path: $source
+      }
+    }'
+    ;;
+esac
