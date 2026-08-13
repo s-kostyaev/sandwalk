@@ -353,7 +353,7 @@ module File_input = struct
 end
 
 module Adapter = struct
-  let run_json ~executable ~request ~timeout ~maximum_output_bytes =
+  let run_json ~executable ?(env = []) ~request ~timeout ~maximum_output_bytes () =
     Deferred.Or_error.try_with (fun () ->
       let search_path =
         Sys.getenv "PATH"
@@ -362,6 +362,7 @@ module Adapter = struct
       in
       let%bind process =
         Process.create_exn
+          ~env:(`Extend env)
           ~prog_search_path:search_path
           ~stdin:(Yojson.Safe.to_string request)
           ~prog:executable
@@ -383,6 +384,219 @@ module Adapter = struct
       then failwith "Adapter output exceeded its byte limit";
       Yojson.Safe.from_string output.stdout |> Deferred.return)
   ;;
+end
+
+module Searxng = struct
+  type search_guard =
+    { lifecycle : Core_unix.File_descr.t
+    ; activity : Core_unix.File_descr.t
+    ; mutable lifecycle_released : bool
+    ; mutable released : bool
+    }
+
+  type connection =
+    { endpoint : string
+    ; mode : string
+    ; image_digest : string
+    ; profile : string
+    ; config_sha256 : string
+    ; language : string
+    ; safe_search : int
+    }
+
+  let state_directory () =
+    match Sys.getenv "SANDWALK_SEARXNG_STATE_DIRECTORY" with
+    | Some directory -> directory
+    | None ->
+      let home = Sys.getenv "HOME" |> Option.value ~default:"." in
+      (match Sys.getenv "XDG_STATE_HOME" with
+       | Some directory -> Filename.concat directory "sandwalk/searxng"
+       | None ->
+         if String.equal (Core_unix.uname () |> Core_unix.Utsname.sysname) "Darwin"
+         then Filename.concat home "Library/Application Support/sandwalk/state/searxng"
+         else Filename.concat home ".local/state/sandwalk/searxng")
+  ;;
+
+  let open_lock path =
+    Core_unix.openfile
+      path
+      ~mode:[ O_RDWR; O_CREAT; O_CLOEXEC ]
+      ~perm:0o600
+  ;;
+
+  let acquire_search_guard () =
+    Deferred.Or_error.try_with (fun () ->
+      In_thread.run (fun () ->
+        let directory = state_directory () in
+        Core_unix.mkdir_p ~perm:0o700 directory;
+        let lifecycle = open_lock (Filename.concat directory "lifecycle.lock") in
+        let activity = open_lock (Filename.concat directory "activity.lock") in
+        try
+          Core_unix.flock_blocking
+            lifecycle
+            Core_unix.Flock_command.lock_exclusive;
+          Core_unix.flock_blocking
+            activity
+            Core_unix.Flock_command.lock_shared;
+          { lifecycle; activity; lifecycle_released = false; released = false }
+        with
+        | exn ->
+          Core_unix.close lifecycle;
+          Core_unix.close activity;
+          raise exn))
+  ;;
+
+  let release_lifecycle guard =
+    Deferred.Or_error.try_with (fun () ->
+      In_thread.run (fun () ->
+        if not guard.lifecycle_released
+        then (
+          Core_unix.flock
+            guard.lifecycle
+            Core_unix.Flock_command.unlock
+          |> ignore;
+          Core_unix.close guard.lifecycle;
+          guard.lifecycle_released <- true)))
+  ;;
+
+  let release_search_guard guard =
+    Deferred.Or_error.try_with (fun () ->
+      In_thread.run (fun () ->
+        if not guard.released
+        then (
+          if not guard.lifecycle_released
+          then (
+            Core_unix.flock
+              guard.lifecycle
+              Core_unix.Flock_command.unlock
+            |> ignore;
+            Core_unix.close guard.lifecycle;
+            guard.lifecycle_released <- true);
+          Core_unix.flock guard.activity Core_unix.Flock_command.unlock |> ignore;
+          Core_unix.close guard.activity;
+          guard.released <- true)))
+  ;;
+
+  let service
+        ?(environment = [])
+        ~action
+        ~arguments
+        ~locks_held
+        ()
+    =
+    let search_path =
+      Sys.getenv "PATH"
+      |> Option.value ~default:""
+      |> String.split ~on:':'
+    in
+    let environment =
+      if locks_held
+      then ("SANDWALK_SEARXNG_LOCKS_HELD", "1") :: environment
+      else ("SANDWALK_SEARXNG_LOCKS_HELD", "0") :: environment
+    in
+    let%bind started =
+      Deferred.Or_error.try_with (fun () ->
+        let%bind process =
+          Process.create_exn
+            ~env:(`Extend environment)
+            ~prog_search_path:search_path
+            ~prog:"sandwalk-searxng-service"
+            ~args:
+              (action
+               :: "--state-directory"
+               :: state_directory ()
+               :: arguments)
+            ()
+        in
+        Process.collect_output_and_wait process)
+    in
+    match started with
+    | Error _ as error -> Deferred.return error
+    | Ok output ->
+      (match Core_unix.Exit_or_signal.or_error output.exit_status with
+       | Error _ ->
+         let detail =
+           output.stderr
+           |> String.split ~on:'\n'
+           |> List.concat_map ~f:(String.split ~on:' ')
+           |> List.filter ~f:(Fn.non String.is_empty)
+           |> String.concat ~sep:" "
+         in
+         let detail =
+           if String.is_empty detail then "SearXNG service helper failed" else detail
+         in
+         let detail =
+           if String.length detail > 1_000
+           then String.sub detail ~pos:0 ~len:1_000
+           else detail
+         in
+         Deferred.return (Or_error.error_string detail)
+       | Ok () ->
+         Deferred.return
+           (Or_error.try_with (fun () ->
+              if String.length output.stdout > 262_144
+              then failwith "SearXNG service response exceeded its byte limit";
+              let response = Yojson.Safe.from_string output.stdout in
+              match response with
+              | `Assoc fields ->
+                (match
+                   List.Assoc.find fields "protocol" ~equal:String.equal,
+                   List.Assoc.find fields "result" ~equal:String.equal
+                 with
+                 | ( Some (`String "sandwalk.searxng-service-result.v1")
+                   , Some result ) -> result
+                 | _ -> failwith "SearXNG service returned an invalid response")
+              | _ -> failwith "SearXNG service returned an invalid response")))
+  ;;
+
+  let required_string fields name maximum =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`String value)
+      when (not (String.is_empty value)) && String.length value <= maximum ->
+      value
+    | _ -> failwith ("SearXNG service omitted " ^ name)
+  ;;
+
+  let optional_string fields name maximum =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`String value) when String.length value <= maximum -> value
+    | Some `Null | None -> ""
+    | _ -> failwith ("SearXNG service returned an invalid " ^ name)
+  ;;
+
+  let required_int fields name ~minimum ~maximum =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`Int value) when value >= minimum && value <= maximum -> value
+    | _ -> failwith ("SearXNG service omitted " ^ name)
+  ;;
+
+  let prepare ~search_guard:_ =
+    service ~action:"prepare" ~arguments:[] ~locks_held:true ()
+    >>| Or_error.map ~f:(function
+      | `Assoc fields ->
+        { endpoint = required_string fields "endpoint" 2_048
+        ; mode = required_string fields "mode" 64
+        ; image_digest = optional_string fields "image_digest" 128
+        ; profile = required_string fields "profile" 128
+        ; config_sha256 = required_string fields "config_sha256" 64
+        ; language = required_string fields "language" 32
+        ; safe_search = required_int fields "safe_search" ~minimum:0 ~maximum:2
+        }
+      | _ -> failwith "SearXNG service returned an invalid active configuration")
+  ;;
+
+  let touch ~search_guard:_ =
+    service ~action:"touch" ~arguments:[] ~locks_held:true ()
+    >>| Or_error.map ~f:(Fn.const ())
+  ;;
+
+  let endpoint t = t.endpoint
+  let mode t = t.mode
+  let image_digest t = t.image_digest
+  let profile t = t.profile
+  let config_sha256 t = t.config_sha256
+  let language t = t.language
+  let safe_search t = t.safe_search
 end
 
 let default_directory_prefix () =

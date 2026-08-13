@@ -366,15 +366,81 @@ bundled `info://texiq/` node locators, and `qmd://` semantic-index entry
 locators. Schema 23 adds the requested local source root to search provenance;
 for a QMD search this field contains the authorized semantic-index directory.
 
-The bundled ddgr connector accepts:
+The default web search connector is the bundled `sandwalk-search-searxng`
+adapter. It talks to a user-owned SearXNG service through the same versioned
+JSON protocol and never exposes the service's raw response to the agent. The
+service may be managed by Sandwalk or supplied as an external endpoint.
+
+The bundled ddgr connector remains available only as an explicit fallback:
+callers must select it with `--adapter sandwalk-search-ddgr` (or the
+corresponding configuration). A SearXNG failure is an explicit search error;
+Sandwalk never silently falls back to ddgr.
+
+Both connectors accept:
 
 ```json
 {"protocol":"sandwalk.search.v1","query":"typed agents","limit":10}
 ```
 
 and returns at most 25 bounded results in a
-`sandwalk.search-results.v1` envelope. It invokes `ddgr --json` without a
-shell command template.
+`sandwalk.search-results.v1` envelope. The ddgr connector invokes `ddgr --json`
+without a shell command template.
+
+### Managed SearXNG service
+
+The managed service is one per user, shared by all Sandwalk workspaces. It is
+backed by Docker and may also be replaced by an explicitly configured external
+SearXNG endpoint. Managed mode accepts only the local Docker context; remote
+Docker contexts are rejected and must be represented as external endpoints.
+External endpoints do not support authentication in the initial protocol;
+plain HTTP is accepted only for loopback origins and other endpoints require
+HTTPS.
+The service binds a dynamically selected port on loopback only. The exact
+container image is a pinned release reference (including digest); the digest
+is recorded in service state and provenance rather than inferred from a
+mutable tag.
+
+The user-facing lifecycle commands are documented in README and detailed CLI
+help; they are intentionally not part of the agent skill's command loop.
+
+The first managed `sandwalk search` auto-starts the service and pulls the
+missing pinned image. Search does not recreate a running service merely
+because user configuration changed. `status` reports desired and active
+configuration, image, and configuration hashes; searches continue using the
+active profile until an explicit `search-service update` applies the desired
+profile. Service identity checks include ownership labels, the exact container
+ID, user identity, configuration hash, and a generation value, so stale state
+cannot stop an unrelated container.
+
+Managed state is kept in a per-user state directory. Lifecycle operations use
+exact ownership checks and an exclusive lifecycle lock. Searches hold a shared
+activity guard, so independent searches may run in parallel; stop, remove, and
+watchdog shutdown wait for active searches unless an explicit force operation
+is requested. Lock acquisition order is always lifecycle before activity.
+
+When idle shutdown is enabled, one detached watchdog process owns a singleton
+lock and watches the service lease. Its default idle timeout is 900 seconds;
+`0` disables the watchdog. Each completed search extends the lease, and the
+watchdog rechecks the lease, generation, and container identity after taking
+the exclusive locks before issuing `docker stop`. A failed stop is recorded as
+a bounded diagnostic event and is retryable by a later lifecycle command.
+
+Search configuration precedence is, from lowest to highest priority:
+
+```text
+defaults → user configuration → environment → command-line flags
+```
+
+The default profile is the curated `research-v1` profile. Users may enable or
+disable individual engines, use `keep_only` to restrict the
+enabled set, and provide advanced SearXNG YAML settings. The curated profile
+does not imply a fixed engine list in this document; the installed adapter
+version is authoritative. Invalid or conflicting settings fail before a
+search is attempted.
+
+Search provenance records the adapter and protocol versions, endpoint origin,
+active configuration hash, image digest when managed, and sanitized metadata.
+Credentials, environment contents, and other secrets are never recorded.
 
 The bundled `sandwalk-search-texiq` connector is a local, read-only GNU Info
 source. It invokes `texiq --emacs` through the same bounded search protocol so
@@ -975,6 +1041,10 @@ The core skill:
 - uses Sandwalk claims when parallel workers are available;
 - loads detailed command references only when needed;
 - keeps the main skill instructions concise.
+
+The skill invokes ordinary search and fetch commands only. It does not expose
+or recommend `search-service start`, `stop`, `status`, `remove`, or `update`;
+managed-service lifecycle is an explicit user/administrator operation.
 
 On session replacement, the skill runs `continue`, treats the generated current
 packet and durable Sandwalk state as authoritative over chat or controller

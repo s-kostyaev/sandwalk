@@ -1,5 +1,5 @@
   $ sandwalk init --slug typed-harness --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":24}}
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":25}}
 
   $ find workspaces/typed-harness -type d | sort
   workspaces/typed-harness
@@ -15,7 +15,7 @@
 
   $ ./inspect_workspace.exe workspaces/typed-harness/database/sandwalk.sqlite3
   typed-harness|initialized
-  24
+  25
   wal
   ok
 
@@ -23,13 +23,13 @@
          2
 
   $ sandwalk status --slug typed-harness --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":24}}
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":25}}
 
   $ sandwalk init --slug second-workspace --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"second-workspace","phase":"initialized","schema_version":24}}
+  {"ok":true,"result":{"slug":"second-workspace","phase":"initialized","schema_version":25}}
 
   $ sandwalk list --directory-prefix workspaces
-  {"ok":true,"result":{"directory_prefix":"workspaces","workspaces":[{"slug":"second-workspace","phase":"initialized","schema_version":24},{"slug":"typed-harness","phase":"initialized","schema_version":24}]}}
+  {"ok":true,"result":{"directory_prefix":"workspaces","workspaces":[{"slug":"second-workspace","phase":"initialized","schema_version":25},{"slug":"typed-harness","phase":"initialized","schema_version":25}]}}
 
   $ sandwalk list --directory-prefix empty-workspaces
   {"ok":true,"result":{"directory_prefix":"empty-workspaces","workspaces":[]}}
@@ -45,7 +45,7 @@
          6
 
   $ SANDWALK_DIRECTORY_PREFIX=workspaces sandwalk status --slug typed-harness
-  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":24}}
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":25}}
 
   $ sandwalk status --slug missing --directory-prefix workspaces
   {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}

@@ -83,10 +83,43 @@ end
 module Adapter : sig
   val run_json
     :  executable:string
+    -> ?env:(string * string) list
     -> request:Yojson.Safe.t
     -> timeout:Time_float.Span.t
     -> maximum_output_bytes:int
+    -> unit
     -> Yojson.Safe.t Deferred.Or_error.t
+end
+
+module Searxng : sig
+  type search_guard
+  type connection
+
+  val state_directory : unit -> string
+  val acquire_search_guard : unit -> search_guard Deferred.Or_error.t
+  val release_lifecycle : search_guard -> unit Deferred.Or_error.t
+  val release_search_guard : search_guard -> unit Deferred.Or_error.t
+
+  val service
+    :  ?environment:(string * string) list
+    -> action:string
+    -> arguments:string list
+    -> locks_held:bool
+    -> unit
+    -> Yojson.Safe.t Deferred.Or_error.t
+
+  val prepare
+    :  search_guard:search_guard
+    -> connection Deferred.Or_error.t
+
+  val touch : search_guard:search_guard -> unit Deferred.Or_error.t
+  val endpoint : connection -> string
+  val mode : connection -> string
+  val image_digest : connection -> string
+  val profile : connection -> string
+  val config_sha256 : connection -> string
+  val language : connection -> string
+  val safe_search : connection -> int
 end
 
 val default_directory_prefix : unit -> string

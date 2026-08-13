@@ -20,6 +20,34 @@ ddgr diagnostics with an empty result set are adapter failures.
   network unavailable
   [69]
 
+SearXNG search uses the JSON API, filters non-web locators, and returns only
+sanitized active-service metadata.
+
+  $ SANDWALK_SEARXNG_ENDPOINT=http://127.0.0.1:18888 \
+  > SANDWALK_SEARXNG_MODE=managed \
+  > SANDWALK_SEARXNG_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  > SANDWALK_SEARXNG_PROFILE=research-v1 \
+  > SANDWALK_SEARXNG_CONFIG_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  > PATH="$PWD/fakes:$PATH" ../adapters/searxng-search <<'EOF' | \
+  > jq -c '{adapter, results}'
+  > {"protocol":"sandwalk.search.v1","query":"typed agents","limit":2}
+  > EOF
+  {"adapter":{"name":"searxng","protocol_version":1,"search_profile":"research-v1","profile":"research-v1","mode":"managed","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","config_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","endpoint_origin":"http://127.0.0.1:18888","unresponsive_engines":["example-engine"]},"results":[{"url":"https://example.test/searxng","title":"SearXNG result","snippet":"Bounded result content."}]}
+
+The adapter does not fall back when SearXNG fails.
+
+  $ SEARXNG_FAKE_FAILURE=1 \
+  > SANDWALK_SEARXNG_ENDPOINT=http://127.0.0.1:18888 \
+  > SANDWALK_SEARXNG_MODE=managed \
+  > SANDWALK_SEARXNG_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  > SANDWALK_SEARXNG_PROFILE=research-v1 \
+  > SANDWALK_SEARXNG_CONFIG_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  > PATH="$PWD/fakes:$PATH" ../adapters/searxng-search >/dev/null <<'EOF'
+  > {"protocol":"sandwalk.search.v1","query":"typed agents","limit":1}
+  > EOF
+  simulated SearXNG failure
+  [69]
+
 Texiq search collapses repeated matches in one Info node into a provenance-owned
 node locator.
 

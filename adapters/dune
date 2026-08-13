@@ -1,6 +1,8 @@
 (install
  (section bin)
  (files
+  (searxng-search as sandwalk-search-searxng)
+  (searxng-service as sandwalk-searxng-service)
   (ddgr-search as sandwalk-search-ddgr)
   (ugrep-search as sandwalk-search-ugrep)
   (texiq-search as sandwalk-search-texiq)

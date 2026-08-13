@@ -5,10 +5,10 @@ research workflows, records source provenance, validates evidence references,
 and renders citations without invoking an LLM.
 
 The initial end-to-end workflow includes workspace recovery, append-only plans,
-durable exclusive claims, web, local-document, and GNU Info search, immutable
-structured Markdown or plain-text snapshots, exact excerpts, reviewed findings,
-packet-driven continuation, and citation-safe finalization. Local discovery
-uses `ugrep+`; the bundled local-file connector preserves ordinary source text
+durable exclusive claims, SearXNG web search, local-document and GNU Info
+search, immutable structured Markdown or plain-text snapshots, exact excerpts,
+reviewed findings, packet-driven continuation, and citation-safe finalization.
+Local discovery uses `ugrep+`; the bundled local-file connector preserves ordinary source text
 as `text/plain` and delegates rich documents to Docling. The Docling connector
 retains Markdown headings and subheadings for `mq`, the original file, and
 Docling's structured JSON and quality report.
@@ -82,7 +82,12 @@ type is used:
   documents.
 - `rg` for local plain-text snapshots and flat transcripts.
 - `ugrep+` for local source-root discovery.
-- `ddgr` for the bundled web search adapter.
+- Docker for the default managed SearXNG web-search service. Sandwalk uses one
+  per-user service on a loopback-only random port and can also use an explicitly
+  configured external SearXNG endpoint.
+- Python 3.10 or newer for the SearXNG service lifecycle helper and watchdog.
+- `ddgr` for the explicit fallback web-search adapter. Sandwalk does not fall
+  back to ddgr automatically when SearXNG fails.
 - [`texiq`](https://github.com/s-kostyaev/texiq) for local GNU Info and active
   Emacs Info manuals. Search with `--adapter sandwalk-search-texiq`; matching
   `info://texiq/` hits select `sandwalk-fetch-texiq` automatically.
@@ -112,6 +117,69 @@ type is used:
 
 Docling-based local and PDF normalization also uses its pinned profile through
 `uv`.
+
+## Web search service
+
+SearXNG is Sandwalk's default web-search adapter. The first managed search
+starts the per-user Docker service and pulls its missing pinned image; the
+service is shared across workspaces. Managed mode uses only the local Docker
+context, binds on loopback, and records the image digest and sanitized endpoint
+metadata in search provenance. An external SearXNG endpoint can be selected
+explicitly instead.
+
+Service lifecycle is explicit and user-facing:
+
+```console
+sandwalk search-service start
+sandwalk search-service stop
+sandwalk search-service status
+sandwalk search-service remove
+sandwalk search-service update
+```
+
+On Linux the user configuration is `~/.config/sandwalk/searxng.json`; on
+macOS it is `~/Library/Application Support/sandwalk/searxng.json`. Override
+that path with `SANDWALK_SEARXNG_CONFIG`. A minimal customized configuration
+is:
+
+```json
+{
+  "schema": "sandwalk.searxng-config.v1",
+  "mode": "managed",
+  "idle_timeout_seconds": 900,
+  "search": { "language": "all", "safe_search": 0 },
+  "engines": {
+    "profile": "research-v1",
+    "enable": ["arxiv"],
+    "disable": [],
+    "keep_only": null
+  }
+}
+```
+
+For an existing service outside Sandwalk, use HTTPS unless it is on loopback:
+
+```console
+sandwalk search-service start \
+  --mode external --endpoint https://search.example.org
+```
+
+External authentication is intentionally not supported in the first version.
+The main environment overrides are `SANDWALK_SEARXNG_MODE`,
+`SANDWALK_SEARXNG_URL`, `SANDWALK_SEARXNG_IDLE_TIMEOUT`,
+`SANDWALK_SEARXNG_HOST_PORT`, `SANDWALK_SEARXNG_LANGUAGE`, and
+`SANDWALK_SEARXNG_SAFE_SEARCH`; see `sandwalk search-service start -help` for
+the matching flags and advanced settings. `stop` and `remove` normally wait
+for active searches; their `--force` flag may interrupt them.
+
+The default `research-v1` profile supports user engine `enable`/`disable`,
+`keep_only`, and advanced YAML configuration. Configuration precedence is
+defaults, user config, environment, then command-line flags. Changes create
+desired-vs-active drift; an existing service continues using its active
+profile until `search-service update` is requested. Idle shutdown uses one
+detached watchdog with a 900-second default timeout; setting it to `0`
+disables the watchdog. Parallel searches share an activity guard while
+lifecycle operations take ownership locks.
 
 ## Development
 

@@ -88,6 +88,7 @@ module Search_adapter : sig
     | Unsupported_protocol
     | Too_many_results
     | Invalid_result
+    | Invalid_adapter_metadata
   [@@deriving sexp_of]
 
   val request
@@ -97,6 +98,7 @@ module Search_adapter : sig
     -> unit
     -> Yojson.Safe.t
   val results : Yojson.Safe.t -> (result list, error) Result.t
+  val adapter_metadata : Yojson.Safe.t -> (Yojson.Safe.t, error) Result.t
   val url : result -> string
   val title : result -> string
   val snippet : result -> string

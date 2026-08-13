@@ -129,7 +129,11 @@ let explanation = function
   | "SEARCH_ADAPTER_FAILED" ->
     Some
       ( "The search adapter exited unsuccessfully, timed out, or returned invalid JSON."
-      , "Verify the selected adapter and its search tool (`ddgr`, `ugrep+`, `texiq`, or `qmd`) are on PATH and allowed by the filesystem or network sandbox." )
+      , "Verify the selected adapter and its search tool (`SearXNG`, `ddgr`, `ugrep+`, `texiq`, or `qmd`) are available and allowed by the filesystem or network sandbox." )
+  | "SEARCH_SERVICE_FAILED" ->
+    Some
+      ( "The managed or external SearXNG service could not be prepared safely."
+      , "Run `sandwalk search-service status` for the effective configuration. For managed mode, verify that Docker uses a local context; use `sandwalk search-service start` for detailed diagnostics." )
   | "FETCH_ADAPTER_FAILED" ->
     Some
       ( "The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON."
@@ -4928,6 +4932,7 @@ let fetch_command =
                                 then 900.
                                 else 120.))
                           ~maximum_output_bytes:65_536
+                          ()
                       in
                       (match adapter_output with
                        | Error _ ->
@@ -5909,6 +5914,7 @@ let index_build_command =
                ~request
                ~timeout:(Time_float.Span.of_hr 6.)
                ~maximum_output_bytes:65_536
+               ()
            in
            match output with
            | Error _ ->
@@ -5983,6 +5989,239 @@ let index_command =
   Async.Command.group
     ~summary:"Build reusable local discovery indexes."
     [ "build", index_build_command ]
+;;
+
+let is_managed_searxng_adapter adapter =
+  List.mem
+    [ "sandwalk-search-searxng"; "searxng-search" ]
+    (Filename.basename adapter)
+    ~equal:String.equal
+;;
+
+let run_search_adapter ~adapter ~request ~timeout =
+  if not (is_managed_searxng_adapter adapter)
+  then
+    Sandwalk_runtime.Adapter.run_json
+      ~executable:adapter
+      ~request
+      ~timeout
+      ~maximum_output_bytes:262_144
+      ()
+    >>| Result.map_error ~f:(Fn.const `Adapter)
+  else (
+    let%bind acquired = Sandwalk_runtime.Searxng.acquire_search_guard () in
+    match acquired with
+    | Error _ -> Deferred.return (Error `Service)
+    | Ok guard ->
+      let release () =
+        Sandwalk_runtime.Searxng.release_search_guard guard
+        >>| Fn.const ()
+      in
+      let%bind prepared =
+        Sandwalk_runtime.Searxng.prepare ~search_guard:guard
+      in
+      (match prepared with
+       | Error _ ->
+         let%map () = release () in
+         Error `Service
+       | Ok connection ->
+         let%bind lifecycle_released =
+           Sandwalk_runtime.Searxng.release_lifecycle guard
+         in
+         (match lifecycle_released with
+          | Error _ ->
+            let%map () = release () in
+            Error `Service
+          | Ok () ->
+            let env =
+              [ "SANDWALK_SEARXNG_ENDPOINT", Sandwalk_runtime.Searxng.endpoint connection
+              ; "SANDWALK_SEARXNG_MODE", Sandwalk_runtime.Searxng.mode connection
+              ; ( "SANDWALK_SEARXNG_IMAGE_DIGEST"
+                , Sandwalk_runtime.Searxng.image_digest connection )
+              ; "SANDWALK_SEARXNG_PROFILE", Sandwalk_runtime.Searxng.profile connection
+              ; ( "SANDWALK_SEARXNG_CONFIG_SHA256"
+                , Sandwalk_runtime.Searxng.config_sha256 connection )
+              ; "SANDWALK_SEARXNG_LANGUAGE", Sandwalk_runtime.Searxng.language connection
+              ; ( "SANDWALK_SEARXNG_SAFE_SEARCH"
+                , Int.to_string (Sandwalk_runtime.Searxng.safe_search connection) )
+              ]
+            in
+            let%bind output =
+              Sandwalk_runtime.Adapter.run_json
+                ~executable:adapter
+                ~env
+                ~request
+                ~timeout
+                ~maximum_output_bytes:262_144
+                ()
+            in
+            (match output with
+             | Error _ ->
+               let%map () = release () in
+               Error `Adapter
+             | Ok output ->
+               let%bind touched =
+                 Sandwalk_runtime.Searxng.touch ~search_guard:guard
+               in
+               let%bind () = release () in
+               (match touched with
+                | Error _ -> Deferred.return (Error `Service)
+                | Ok () -> Deferred.return (Ok output))))))
+;;
+
+let run_searxng_service ~action ~arguments =
+  let%bind result =
+    Sandwalk_runtime.Searxng.service
+      ~action
+      ~arguments
+      ~locks_held:false
+      ()
+  in
+  match result with
+  | Error error ->
+    let detail =
+      Error.to_string_hum error
+      |> String.split ~on:'\n'
+      |> List.concat_map ~f:(String.split ~on:' ')
+      |> List.filter ~f:(Fn.non String.is_empty)
+      |> String.concat ~sep:" "
+    in
+    let detail =
+      if String.length detail > 1_000 then String.sub detail ~pos:0 ~len:1_000 else detail
+    in
+    print_failure_and_exit
+      ~code:"SEARCH_SERVICE_FAILED"
+      ~message:("SearXNG service command failed: " ^ detail)
+  | Ok result ->
+    Sandwalk_protocol.Envelope.success ~result ()
+    |> Sandwalk_protocol.Envelope.render
+    |> print_endline;
+    Deferred.unit
+;;
+
+let searxng_configuration_command ~action ~summary =
+  Async.Command.async
+    ~summary
+    (let%map_open.Command mode =
+       flag
+         "--mode"
+         (optional string)
+         ~doc:"MODE managed or external"
+     and endpoint =
+       flag
+         "--endpoint"
+         (optional string)
+         ~doc:"URL External SearXNG HTTP(S) origin"
+     and idle_timeout =
+       flag
+         "--idle-timeout"
+         (optional int)
+         ~doc:"SECONDS Stop managed service after idle time; 0 disables"
+     and host_port =
+       flag
+         "--host-port"
+         (optional int)
+         ~doc:"PORT Fixed managed loopback port instead of a random port"
+     and image =
+       flag
+         "--image"
+         (optional string)
+         ~doc:"IMAGE Immutable SearXNG image reference including digest"
+     and settings_file =
+       flag
+         "--settings-file"
+         (optional string)
+         ~doc:"PATH Advanced SearXNG settings.yml override"
+     and language =
+       flag
+         "--language"
+         (optional string)
+         ~doc:"LANGUAGE Default SearXNG search language"
+     and safe_search =
+       flag
+         "--safe-search"
+         (optional int)
+         ~doc:"LEVEL SearXNG safe-search level 0, 1, or 2"
+     and engine_enable =
+       flag
+         "--engine-enable"
+         (listed string)
+         ~doc:"ENGINE Enable an engine; repeatable"
+     and engine_disable =
+       flag
+         "--engine-disable"
+         (listed string)
+         ~doc:"ENGINE Disable an engine; repeatable"
+     and engine_keep_only =
+       flag
+         "--engine-keep-only"
+         (listed string)
+         ~doc:"ENGINE Keep only this engine; repeatable"
+     in
+     fun () ->
+       let option name = Option.map ~f:(fun value -> [ name; value ]) in
+       let integer name =
+         Option.map ~f:(fun value -> [ name; Int.to_string value ])
+       in
+       let repeated name values =
+         List.concat_map values ~f:(fun value -> [ name; value ])
+       in
+       List.concat
+         (List.filter_opt
+            [ option "--mode" mode
+            ; option "--endpoint" endpoint
+            ; integer "--idle-timeout" idle_timeout
+            ; integer "--host-port" host_port
+            ; option "--image" image
+            ; option "--settings-file" settings_file
+            ; option "--language" language
+            ; integer "--safe-search" safe_search
+            ])
+       @ repeated "--engine-enable" engine_enable
+       @ repeated "--engine-disable" engine_disable
+       @ repeated "--engine-keep-only" engine_keep_only
+       |> fun arguments -> run_searxng_service ~action ~arguments)
+;;
+
+let searxng_lifecycle_command ~action ~summary =
+  Async.Command.async
+    ~summary
+    (let%map_open.Command force =
+       flag
+         "--force"
+         no_arg
+         ~doc:"Stop without waiting for active searches"
+     in
+     fun () ->
+       run_searxng_service
+         ~action
+         ~arguments:(if force then [ "--force" ] else []))
+;;
+
+let search_service_command =
+  Async.Command.group
+    ~summary:"Manage the optional per-user SearXNG search service."
+    [ ( "start"
+      , searxng_configuration_command
+          ~action:"start"
+          ~summary:"Start or validate the configured SearXNG service." )
+    ; ( "status"
+      , searxng_configuration_command
+          ~action:"status"
+          ~summary:"Show desired and active SearXNG service state." )
+    ; ( "stop"
+      , searxng_lifecycle_command
+          ~action:"stop"
+          ~summary:"Stop Sandwalk's managed SearXNG container." )
+    ; ( "remove"
+      , searxng_lifecycle_command
+          ~action:"remove"
+          ~summary:"Stop and remove only Sandwalk's owned SearXNG container." )
+    ; ( "update"
+      , searxng_configuration_command
+          ~action:"update"
+          ~summary:"Apply desired SearXNG configuration and pinned image." )
+    ]
 ;;
 
 let search_command =
@@ -6068,7 +6307,7 @@ let search_command =
                   then "sandwalk-search-qmd"
                   else if Option.is_some source_root
                   then "sandwalk-search-ugrep"
-                  else "sandwalk-search-ddgr")
+                  else "sandwalk-search-searxng")
            in
            let claim_id =
              match claim_text with
@@ -6227,8 +6466,8 @@ let search_command =
                         ()
                     in
                     let%bind adapter_output =
-                      Sandwalk_runtime.Adapter.run_json
-                        ~executable:adapter
+                      run_search_adapter
+                        ~adapter
                         ~request
                         ~timeout:
                           (Time_float.Span.of_sec
@@ -6242,22 +6481,27 @@ let search_command =
                                    ~equal:String.equal
                               then 900.
                               else 30.))
-                        ~maximum_output_bytes:262_144
                     in
                     (match adapter_output with
-                     | Error _ ->
+                     | Error `Service ->
+                       fail_with_audit
+                         ~code:"SEARCH_SERVICE_FAILED"
+                         ~message:"SearXNG service preparation failed."
+                     | Error `Adapter ->
                        fail_with_audit
                          ~code:"SEARCH_ADAPTER_FAILED"
                          ~message:"Search adapter failed."
                      | Ok adapter_output ->
                        (match
-                          Sandwalk_protocol.Search_adapter.results adapter_output
+                          ( Sandwalk_protocol.Search_adapter.results adapter_output
+                          , Sandwalk_protocol.Search_adapter.adapter_metadata
+                              adapter_output )
                         with
-                        | Error _ ->
+                        | Error _, _ | _, Error _ ->
                           fail_with_audit
                             ~code:"SEARCH_PROTOCOL_ERROR"
                             ~message:"Search adapter returned an invalid response."
-                        | Ok results ->
+                        | Ok results, Ok adapter_metadata ->
                           let%bind hit_ids =
                             In_thread.run (fun () ->
                               List.map results ~f:(fun _ ->
@@ -6281,6 +6525,7 @@ let search_command =
                                 ~claim_id
                                 ~query
                                 ~adapter
+                                ~adapter_metadata
                                 ~source_root
                                 ~hits
                                 ~now:
@@ -9087,7 +9332,8 @@ let export_pdf_command =
                          ~executable:adapter
                          ~request
                          ~timeout:(Time_float.Span.of_sec 120.)
-                         ~maximum_output_bytes:65_536
+                        ~maximum_output_bytes:65_536
+                        ()
                      in
                      (match adapter_output with
                       | Error _ ->
@@ -10658,6 +10904,7 @@ let command =
     ; "recon", recon_command
     ; "resume", resume_command
     ; "search", search_command
+    ; "search-service", search_service_command
     ; "snapshot", snapshot_command
     ; "status", status_command
     ; "step", step_command

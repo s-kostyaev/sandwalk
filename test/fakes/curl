@@ -3,6 +3,9 @@ output=
 headers=
 write_out=false
 accept=
+content_type=
+search_query=
+search_format=
 url=
 
 while [ "$#" -gt 0 ]; do
@@ -23,6 +26,17 @@ while [ "$#" -gt 0 ]; do
       accept=${2#Accept: }
       shift 2
       ;;
+    -H)
+      content_type=${2#Content-Type: }
+      shift 2
+      ;;
+    --data-urlencode)
+      case "$2" in
+        q=*) search_query=${2#q=} ;;
+        format=*) search_format=${2#format=} ;;
+      esac
+      shift 2
+      ;;
     --connect-timeout|--max-time)
       shift 2
       ;;
@@ -30,7 +44,7 @@ while [ "$#" -gt 0 ]; do
       write_out=true
       shift 2
       ;;
-    -L|-sS|--fail-with-body)
+    -L|-sS|--fail-with-body|--silent|--show-error)
       shift
       ;;
     --version)
@@ -43,6 +57,26 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$content_type" = 'application/x-www-form-urlencoded' ]; then
+  [ "$search_format" = json ] || {
+    printf '%s\n' 'expected SearXNG JSON format' >&2
+    exit 64
+  }
+  if [ "${SEARXNG_FAKE_FAILURE:-}" = 1 ]; then
+    printf '%s\n' 'simulated SearXNG failure' >&2
+    exit 22
+  fi
+  jq -nc --arg query "$search_query" '{
+    query: $query,
+    results: [
+      {url: "https://example.test/searxng", title: "SearXNG result", content: "Bounded result content."},
+      {url: "file:///not-allowed", title: "Local result", content: "Must be filtered."}
+    ],
+    unresponsive_engines: [["example-engine", "timeout"]]
+  }'
+  exit 0
+fi
 
 if [ -n "${CURL_TEST_LOG:-}" ]; then
   printf '%s|%s\n' "$url" "$accept" >>"$CURL_TEST_LOG"

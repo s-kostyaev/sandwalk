@@ -253,6 +253,7 @@ module Search_adapter = struct
     | Unsupported_protocol
     | Too_many_results
     | Invalid_result
+    | Invalid_adapter_metadata
   [@@deriving sexp_of]
 
   let request ?source_root ~query ~limit () =
@@ -304,6 +305,123 @@ module Search_adapter = struct
        | Some (`String _) -> Error Unsupported_protocol
        | Some _ | None -> Error Invalid_envelope)
     | _ -> Error Invalid_envelope
+  ;;
+
+  let adapter_metadata = function
+    | `Assoc fields ->
+      (match List.Assoc.find fields "adapter" ~equal:String.equal with
+       | Some (`Assoc adapter) ->
+         let string name maximum = string_field adapter name maximum in
+         let integer name =
+           match List.Assoc.find adapter name ~equal:String.equal with
+           | Some (`Int value) when value >= 1 && value <= 1_000 -> Some value
+           | _ -> None
+         in
+         let optional_string name maximum validate =
+           match List.Assoc.find adapter name ~equal:String.equal with
+           | None -> Some None
+           | Some (`String value)
+             when String.length value <= maximum && validate value ->
+             Some (Some value)
+           | _ -> None
+         in
+         let identifier value =
+           (not (String.is_empty value))
+           && String.for_all value ~f:(function
+             | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '.' | '_' | '-' -> true
+             | _ -> false)
+         in
+         let adapter_name value =
+           (not (String.is_empty value))
+           && not
+                (String.exists value ~f:(function
+                  | '\000' .. '\031' | '\127' -> true
+                  | _ -> false))
+         in
+         let lowercase_hex value =
+           String.for_all value ~f:(function
+             | '0' .. '9' | 'a' .. 'f' -> true
+             | _ -> false)
+         in
+         let digest value =
+           String.is_prefix value ~prefix:"sha256:"
+           && String.length value = 71
+           && lowercase_hex (String.drop_prefix value 7)
+         in
+         let sha256 value = String.length value = 64 && lowercase_hex value in
+         let origin value =
+           let suffix =
+             if String.is_prefix value ~prefix:"http://"
+             then Some (String.drop_prefix value 7)
+             else if String.is_prefix value ~prefix:"https://"
+             then Some (String.drop_prefix value 8)
+             else None
+           in
+           Option.exists suffix ~f:(fun suffix ->
+             (not (String.is_empty suffix)) && not (String.mem suffix '/'))
+           && not
+                (String.exists value ~f:(function
+                  | '@' | '?' | '#' | ' ' | '\t' | '\r' | '\n' -> true
+                  | _ -> false))
+         in
+         let unresponsive =
+           match
+             List.Assoc.find adapter "unresponsive_engines" ~equal:String.equal
+           with
+           | None -> Some []
+           | Some (`List values) when List.length values <= 25 ->
+             List.map values ~f:(function
+               | `String value when String.length value <= 100 -> Some value
+               | _ -> None)
+             |> Option.all
+           | _ -> None
+         in
+         (match
+            string "name" 100,
+            integer "protocol_version",
+            optional_string "search_profile" 128 identifier,
+            optional_string "mode" 64 identifier,
+            optional_string "image_digest" 128 (fun value ->
+              String.is_empty value || digest value),
+            optional_string "config_sha256" 64 (fun value ->
+              String.is_empty value || sha256 value),
+            optional_string "endpoint_origin" 2_048 origin,
+            unresponsive
+          with
+          | ( Some name
+            , Some protocol_version
+            , Some search_profile
+            , Some mode
+            , Some image_digest
+            , Some config_sha256
+            , Some endpoint_origin
+            , Some unresponsive_engines ) when adapter_name name ->
+            Ok
+              (`Assoc
+                 (List.filter_opt
+                    [ Some ("name", `String name)
+                    ; Some ("protocol_version", `Int protocol_version)
+                    ; Option.map search_profile ~f:(fun value ->
+                        "search_profile", `String value)
+                    ; Option.map mode ~f:(fun value -> "mode", `String value)
+                    ; Option.map image_digest ~f:(fun value ->
+                        "image_digest", `String value)
+                    ; Option.map config_sha256 ~f:(fun value ->
+                        "config_sha256", `String value)
+                    ; Option.map endpoint_origin ~f:(fun value ->
+                        "endpoint_origin", `String value)
+                    ; (if List.is_empty unresponsive_engines
+                       then None
+                       else
+                         Some
+                           ( "unresponsive_engines"
+                           , `List
+                               (List.map unresponsive_engines ~f:(fun value ->
+                                  `String value)) ))
+                    ]))
+          | _ -> Error Invalid_adapter_metadata)
+       | _ -> Error Invalid_adapter_metadata)
+    | _ -> Error Invalid_adapter_metadata
   ;;
 
   let url t = t.url
@@ -927,6 +1045,22 @@ let%expect_test "search protocol accepts semantic index locators" =
   |> [%sexp_of: (int, Search_adapter.error) Result.t]
   |> print_s;
   [%expect {| (Ok 1) |}]
+;;
+
+let%test_unit "search provenance never accepts credential-bearing origins" =
+  Quickcheck.test String.quickcheck_generator ~f:(fun secret ->
+    let response =
+      `Assoc
+        [ ( "adapter"
+          , `Assoc
+              [ "name", `String "searxng"
+              ; "protocol_version", `Int 1
+              ; ( "endpoint_origin"
+                , `String ("https://user:" ^ secret ^ "@example.test") )
+              ] )
+        ]
+    in
+    assert (Result.is_error (Search_adapter.adapter_metadata response)))
 ;;
 
 let%expect_test "search and fetch protocols accept texiq Info locators" =

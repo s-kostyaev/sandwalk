@@ -125,4 +125,4 @@ Mechanical gates use the same packet/apply loop.
   {"ok":true,"result":{"applied":"run-command","packet":"workspace/continue-test/artifacts/work/current.json"},"next":"'sandwalk' 'continue' '--slug' 'continue-test' '--directory-prefix' 'workspace'"}
 
   $ sandwalk status --slug continue-test --directory-prefix workspace
-  {"ok":true,"result":{"slug":"continue-test","phase":"evidence-review","schema_version":24}}
+  {"ok":true,"result":{"slug":"continue-test","phase":"evidence-review","schema_version":25}}

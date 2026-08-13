@@ -26,7 +26,7 @@ Create a released-schema v7 workspace with an owned hit and fetch through v8.
 
   $ ./inspect_workspace.exe workspace/fetch-test/database/sandwalk.sqlite3
   fetch-test|researching
-  24
+  25
   wal
   ok
 
