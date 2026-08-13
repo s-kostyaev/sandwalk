@@ -110,6 +110,15 @@ for the user; an unusable HTML representation falls back to Docling
 automatically. Inspect the returned primary document according to its declared
 media type; never treat the search snippet as document content.
 
+The explicit `sandwalk-fetch-xberg` alternative targets the Xberg v1 CLI and
+is intended for simple local documents where its lower operational cost is
+useful. Its bundled profile disables result caching, layout-to-Markdown,
+layout-dependent reading-order rewriting, VLM, and remote enrichment. It
+retains Xberg's structured JSON plus quality metrics and rejects structured
+tables that disappear from Markdown. Keep Docling as the default for complex
+PDF or rich-document hierarchy unless a broader reviewed corpus establishes a
+new default.
+
 For repeated or semantic retrieval over local documents or Info manuals, first
 build the discovery cache outside the research workflow with exactly one of:
 

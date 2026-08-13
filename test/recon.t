@@ -1,5 +1,5 @@
   $ sandwalk init --slug recon-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"recon-test","phase":"initialized","schema_version":24}}
+  {"ok":true,"result":{"slug":"recon-test","phase":"initialized","schema_version":25}}
   $ printf 'Map the small topic before planning.' > goal.md
 
   $ sandwalk recon start \

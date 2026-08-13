@@ -6,7 +6,10 @@
  (deps
   %{bin:sandwalk}
   inspect_workspace.exe
+  check_searxng_service.py
   ../adapters/ddgr-search
+  ../adapters/searxng-search
+  ../adapters/searxng-service
   ../adapters/ugrep-search
   ../adapters/texiq-search
   ../adapters/qmd-index

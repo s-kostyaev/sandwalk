@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+action=${1:-}
+case "$action" in
+  prepare | start | update)
+    printf '%s\n' '{"protocol":"sandwalk.searxng-service-result.v1","result":{"schema":"sandwalk.searxng-service.v1","mode":"managed","endpoint":"http://127.0.0.1:18888","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","profile":"research-v1","config_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","language":"all","safe_search":0,"desired_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","generation":1}}'
+    ;;
+  touch)
+    printf '%s\n' '{"protocol":"sandwalk.searxng-service-result.v1","result":{"touched":true,"generation":1}}'
+    ;;
+  status)
+    printf '%s\n' '{"protocol":"sandwalk.searxng-service-result.v1","result":{"mode":"managed","configuration_drift":false,"active":null}}'
+    ;;
+  stop | remove)
+    printf '%s\n' '{"protocol":"sandwalk.searxng-service-result.v1","result":{"stopped":false,"removed":false}}'
+    ;;
+  *)
+    printf '%s\n' 'unsupported fake SearXNG service action' >&2
+    exit 64
+    ;;
+esac

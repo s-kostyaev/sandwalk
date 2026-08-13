@@ -72,15 +72,46 @@ Create a released-schema v6 workspace with an active claim and search through v7
   >   "$(dirname "$info_document")/manifest.json"
   texiq	Blueprints and Community Prompts	node.json
 
+Web search defaults to the managed SearXNG connector without exposing service
+lifecycle commands to the research workflow.
+
+  $ PATH="$PWD/fakes:$PATH" SANDWALK_SEARXNG_STATE_DIRECTORY="$PWD/searx-state" \
+  > sandwalk search --slug search-test --directory-prefix workspace \
+  > --claim claim_00000000000000000000000000000001 \
+  > --query "default metasearch" --limit 1 | \
+  > sed -E 's/hit_[0-9a-f]{32}/hit_ID/g'
+  {"ok":true,"result":{"count":1,"hits":[{"hit":"hit_ID","url":"https://example.test/primary","title":"Primary result","snippet":"A deterministic search result."}]}}
+
   $ ./inspect_workspace.exe --inspect-search-roots workspace/search-test/database/sandwalk.sqlite3 | \
   >   sed "s#$PWD#ROOT#"
   ../adapters/ddgr-search|NULL
   ../adapters/ugrep-search|ROOT/local documents
   ../adapters/texiq-search|NULL
+  sandwalk-search-searxng|NULL
+
+  $ ./inspect_workspace.exe --inspect-search-metadata workspace/search-test/database/sandwalk.sqlite3
+  {"name":"ddgr","protocol_version":1}
+  {"name":"ugrep+","protocol_version":1,"search_profile":"fixed-string-recursive-sorted-v1"}
+  {"name":"texiq","protocol_version":1,"search_profile":"emacs-info-node-search-v1"}
+  {"name":"searxng","protocol_version":1,"search_profile":"research-v1","mode":"managed","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","config_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","endpoint_origin":"http://127.0.0.1:18888"}
+
+Credential-bearing or otherwise non-origin adapter metadata is rejected before
+the query is recorded.
+
+  $ PATH="$PWD/fakes:$PATH" sandwalk search \
+  >   --slug search-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --query "unsafe provenance" --limit 1 \
+  >   --adapter "$PWD/fakes/sandwalk-search-invalid-metadata"
+  {"ok":false,"error":{"code":"SEARCH_PROTOCOL_ERROR","message":"Search adapter returned an invalid response."}}
+  [1]
+  $ sqlite3 workspace/search-test/database/sandwalk.sqlite3 \
+  >   'SELECT COUNT(*) FROM search_queries;'
+  4
 
   $ ./inspect_workspace.exe workspace/search-test/database/sandwalk.sqlite3
   search-test|researching
-  24
+  25
   wal
   ok
 
@@ -90,3 +121,19 @@ Create a released-schema v6 workspace with an active claim and search through v7
   >   --adapter ../adapters/ddgr-search
   {"ok":false,"error":{"code":"SEARCH_REQUIRES_CLAIM","message":"Research search requires an active claim."},"next":"'sandwalk' 'next' '--slug' 'search-test' '--directory-prefix' 'workspace'"}
   [1]
+
+The released v24 schema migrates existing search rows to bounded empty adapter
+metadata before recording sanitized metadata for new searches.
+
+  $ mkdir -p legacy-v24/database legacy-v24/logs legacy-v24/exports \
+  >   legacy-v24/artifacts/temporary legacy-v24/artifacts/work \
+  >   legacy-v24/artifacts/resume
+  $ ./inspect_workspace.exe --create-v24 \
+  >   legacy-v24/database/sandwalk.sqlite3 legacy-v24
+  $ sandwalk resume --slug legacy-v24 --directory-prefix . >/dev/null
+  $ ./inspect_workspace.exe --inspect-search-metadata \
+  >   legacy-v24/database/sandwalk.sqlite3
+  {}
+  {}
+  $ ./inspect_workspace.exe legacy-v24/database/sandwalk.sqlite3 | sed -n '2p'
+  25

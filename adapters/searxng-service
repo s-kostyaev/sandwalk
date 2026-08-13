@@ -1,0 +1,1028 @@
+#!/usr/bin/env python3
+"""Per-user SearXNG lifecycle helper for the Sandwalk CLI.
+
+The public command remains ``sandwalk search-service``.  This installed helper
+keeps Docker and watchdog mechanics outside the pure domain libraries and
+communicates with the CLI through bounded JSON.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import secrets
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Iterator
+
+
+SCHEMA = "sandwalk.searxng-config.v1"
+STATE_SCHEMA = "sandwalk.searxng-service.v1"
+LEASE_SCHEMA = "sandwalk.searxng-lease.v1"
+PINNED_IMAGE = (
+    "ghcr.io/searxng/searxng:2026.7.28-c01178d03@"
+    "sha256:5d6d903ab82afa56ee32792d477f36bc63d3e5ca04fcb6947e28a5cfd987fad3"
+)
+PROFILE = "research-v1"
+CURATED_ENGINES = ["arxiv", "brave", "crossref", "duckduckgo", "github", "wikipedia"]
+CONTAINER_PREFIX = "sandwalk-searxng"
+MAX_CONFIG_BYTES = 262_144
+
+
+class ServiceError(RuntimeError):
+    pass
+
+
+def home() -> Path:
+    return Path(os.environ.get("HOME", ".")).resolve()
+
+
+def config_directory() -> Path:
+    explicit = os.environ.get("SANDWALK_CONFIG_DIRECTORY")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg).expanduser().resolve() / "sandwalk"
+    if sys.platform == "darwin":
+        return home() / "Library" / "Application Support" / "sandwalk"
+    return home() / ".config" / "sandwalk"
+
+
+def default_state_directory() -> Path:
+    explicit = os.environ.get("SANDWALK_SEARXNG_STATE_DIRECTORY")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg:
+        return Path(xdg).expanduser().resolve() / "sandwalk" / "searxng"
+    if sys.platform == "darwin":
+        return home() / "Library" / "Application Support" / "sandwalk" / "state" / "searxng"
+    return home() / ".local" / "state" / "sandwalk" / "searxng"
+
+
+def read_json(path: Path, *, optional: bool = False) -> dict[str, Any] | None:
+    if optional and not path.exists():
+        return None
+    try:
+        if path.stat().st_size > MAX_CONFIG_BYTES:
+            raise ServiceError(f"JSON file exceeds {MAX_CONFIG_BYTES} bytes: {path}")
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ServiceError(f"cannot read JSON file {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise ServiceError(f"JSON file must contain an object: {path}")
+    return value
+
+
+def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}.{secrets.token_hex(4)}")
+    data = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        os.write(descriptor, data.encode("utf-8"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+
+
+def atomic_text(path: Path, value: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}.{secrets.token_hex(4)}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        os.write(descriptor, value.encode("utf-8"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def parse_int(name: str, value: Any, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise ServiceError(f"{name} must be an integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as error:
+        raise ServiceError(f"{name} must be an integer") from error
+    if result < minimum or result > maximum:
+        raise ServiceError(f"{name} must be between {minimum} and {maximum}")
+    return result
+
+
+def parse_endpoint(value: Any, *, external: bool) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 2_048
+        or any(character.isspace() for character in value)
+    ):
+        raise ServiceError("SearXNG endpoint is required")
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ServiceError("SearXNG endpoint must be an HTTP(S) origin")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ServiceError("SearXNG endpoint must not contain credentials, query, or fragment")
+    if parsed.path not in {"", "/"}:
+        raise ServiceError("SearXNG endpoint must be an origin without a path")
+    if external and parsed.scheme == "http" and parsed.hostname not in {
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    }:
+        raise ServiceError("external HTTP endpoints are allowed only on loopback")
+    try:
+        parsed_port = parsed.port
+    except ValueError as error:
+        raise ServiceError("SearXNG endpoint port is invalid") from error
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    port = f":{parsed_port}" if parsed_port else ""
+    return f"{parsed.scheme}://{host}{port}"
+
+
+def string_list(name: str, value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ServiceError(f"{name} must be an array of engine names")
+    result = []
+    for item in value:
+        item = " ".join(item.split())
+        if not item or len(item) > 100 or any(character in item for character in "\r\n"):
+            raise ServiceError(f"invalid engine name in {name}")
+        if item not in result:
+            result.append(item)
+    return result
+
+
+def user_config_path() -> Path:
+    explicit = os.environ.get("SANDWALK_SEARXNG_CONFIG")
+    return (
+        Path(explicit).expanduser().resolve()
+        if explicit
+        else config_directory() / "searxng.json"
+    )
+
+
+def desired_config(arguments: argparse.Namespace) -> dict[str, Any]:
+    path = user_config_path()
+    raw = read_json(path, optional=True) or {}
+    if raw and raw.get("schema") != SCHEMA:
+        raise ServiceError(f"unsupported SearXNG config schema in {path}")
+    search = raw.get("search") or {}
+    engines = raw.get("engines") or {}
+    if not isinstance(search, dict) or not isinstance(engines, dict):
+        raise ServiceError("search and engines config entries must be objects")
+
+    env = os.environ
+    mode = (
+        arguments.mode
+        or env.get("SANDWALK_SEARXNG_MODE")
+        or raw.get("mode")
+        or "managed"
+    )
+    if mode not in {"managed", "external"}:
+        raise ServiceError("SearXNG mode must be managed or external")
+    endpoint_value = (
+        arguments.endpoint
+        or env.get("SANDWALK_SEARXNG_URL")
+        or raw.get("endpoint")
+    )
+    endpoint = (
+        parse_endpoint(endpoint_value, external=True)
+        if mode == "external"
+        else None
+    )
+    timeout_value = (
+        arguments.idle_timeout
+        if arguments.idle_timeout is not None
+        else env.get("SANDWALK_SEARXNG_IDLE_TIMEOUT", raw.get("idle_timeout_seconds", 900))
+    )
+    idle_timeout = parse_int("idle timeout", timeout_value, 0, 86_400)
+    port_value = (
+        arguments.host_port
+        if arguments.host_port is not None
+        else env.get("SANDWALK_SEARXNG_HOST_PORT", raw.get("host_port"))
+    )
+    host_port = None if port_value in {None, ""} else parse_int("host port", port_value, 1, 65_535)
+    image = (
+        arguments.image
+        or env.get("SANDWALK_SEARXNG_IMAGE")
+        or raw.get("image")
+        or PINNED_IMAGE
+    )
+    if not isinstance(image, str) or "@sha256:" not in image:
+        raise ServiceError("managed SearXNG image must include an immutable sha256 digest")
+    settings_value = (
+        arguments.settings_file
+        or env.get("SANDWALK_SEARXNG_SETTINGS")
+        or raw.get("settings_file")
+    )
+    settings_file = None
+    if settings_value:
+        settings_file = str(Path(settings_value).expanduser().resolve())
+        settings_path = Path(settings_file)
+        if not settings_path.is_file() or settings_path.stat().st_size > MAX_CONFIG_BYTES:
+            raise ServiceError("custom settings file is missing or too large")
+
+    enable = string_list("engines.enable", engines.get("enable"))
+    disable = string_list("engines.disable", engines.get("disable"))
+    keep_only_raw = engines.get("keep_only")
+    keep_only = None if keep_only_raw is None else string_list("engines.keep_only", keep_only_raw)
+    if arguments.engine_enable:
+        enable = string_list("--engine-enable", arguments.engine_enable)
+    if arguments.engine_disable:
+        disable = string_list("--engine-disable", arguments.engine_disable)
+    if arguments.engine_keep_only:
+        keep_only = string_list("--engine-keep-only", arguments.engine_keep_only)
+    if set(enable) & set(disable):
+        raise ServiceError("an engine cannot be both enabled and disabled")
+    if keep_only is not None and not keep_only:
+        raise ServiceError("engines.keep_only must contain at least one engine")
+    if keep_only is not None and not set(enable).issubset(set(keep_only)):
+        raise ServiceError("enabled engines must also appear in engines.keep_only")
+    if settings_file and (enable or disable or keep_only is not None):
+        raise ServiceError("custom settings cannot be combined with engine-list overrides")
+    if mode == "external" and settings_file:
+        raise ServiceError("custom settings apply only to the managed SearXNG service")
+
+    language = arguments.language or env.get("SANDWALK_SEARXNG_LANGUAGE") or search.get("language", "all")
+    if not isinstance(language, str) or not language or len(language) > 32:
+        raise ServiceError("search language is invalid")
+    safe_value = (
+        arguments.safe_search
+        if arguments.safe_search is not None
+        else env.get("SANDWALK_SEARXNG_SAFE_SEARCH", search.get("safe_search", 0))
+    )
+    safe_search = parse_int("safe search", safe_value, 0, 2)
+    profile = engines.get("profile", PROFILE)
+    if profile not in {PROFILE, "upstream-defaults"}:
+        raise ServiceError("engine profile must be research-v1 or upstream-defaults")
+
+    result = {
+        "schema": SCHEMA,
+        "mode": mode,
+        "endpoint": endpoint,
+        "idle_timeout_seconds": idle_timeout,
+        "host_port": host_port,
+        "image": image,
+        "search": {"language": language, "safe_search": safe_search},
+        "engines": {
+            "profile": profile,
+            "enable": enable,
+            "disable": disable,
+            "keep_only": keep_only,
+        },
+        "settings_file": settings_file,
+    }
+    encoded = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    result["desired_sha256"] = sha256_text(encoded)
+    result["config_path"] = str(path)
+    return result
+
+
+def yaml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def generated_settings(config: dict[str, Any], secret: str) -> str:
+    engines = config["engines"]
+    keep_only = engines["keep_only"]
+    if keep_only is None and engines["profile"] == PROFILE:
+        keep_only = CURATED_ENGINES
+    lines: list[str]
+    if keep_only is None:
+        lines = ["use_default_settings: true"]
+    else:
+        lines = ["use_default_settings:", "  engines:", "    keep_only:"]
+        lines.extend(f"      - {yaml_string(item)}" for item in keep_only)
+    lines.extend(
+        [
+            "general:",
+            "  debug: false",
+            "  instance_name: \"Sandwalk SearXNG\"",
+            "  enable_metrics: false",
+            "search:",
+            f"  safe_search: {config['search']['safe_search']}",
+            f"  default_lang: {yaml_string(config['search']['language'])}",
+            "  autocomplete: \"\"",
+            "  favicon_resolver: \"\"",
+            "  formats:",
+            "    - html",
+            "    - json",
+            "server:",
+            f"  secret_key: {yaml_string(secret)}",
+            "  limiter: false",
+            "  public_instance: false",
+            "  image_proxy: false",
+        ]
+    )
+    engine_states: dict[str, bool] = {}
+    for name in keep_only or []:
+        engine_states[name] = False
+    for name in engines["enable"]:
+        engine_states[name] = False
+    for name in engines["disable"]:
+        engine_states[name] = True
+    if engine_states:
+        lines.append("engines:")
+        for name, disabled in engine_states.items():
+            lines.extend(
+                [
+                    f"  - name: {yaml_string(name)}",
+                    f"    disabled: {str(disabled).lower()}",
+                ]
+            )
+    return "\n".join(lines) + "\n"
+
+
+def materialize_settings(state_directory: Path, config: dict[str, Any]) -> tuple[Path, str]:
+    if config["settings_file"]:
+        source = Path(config["settings_file"])
+        content = source.read_text(encoding="utf-8")
+    else:
+        secret_path = state_directory / "secret"
+        if secret_path.exists():
+            secret = secret_path.read_text(encoding="ascii").strip()
+        else:
+            secret = secrets.token_urlsafe(48)
+            atomic_text(secret_path, secret + "\n")
+        content = generated_settings(config, secret)
+    digest = sha256_text(content)
+    directory = state_directory / "configs" / digest
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = directory / "settings.yml"
+    if not path.exists():
+        atomic_text(path, content, mode=0o600)
+    return path, digest
+
+
+def run(command: list[str], *, timeout: int = 60, check: bool = True) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ServiceError(f"command failed: {command[0]}: {error}") from error
+    if check and result.returncode != 0:
+        detail = " ".join(result.stderr.split())[:1000]
+        raise ServiceError(f"command failed: {' '.join(command[:3])}: {detail}")
+    return result
+
+
+def docker(*arguments: str, timeout: int = 60, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return run(["docker", *arguments], timeout=timeout, check=check)
+
+
+def verify_local_docker() -> None:
+    override = os.environ.get("DOCKER_HOST", "").strip()
+    if override and not (override.startswith("unix://") or override.startswith("npipe://")):
+        raise ServiceError("managed SearXNG requires a local Docker endpoint")
+    result = docker("context", "inspect", "--format", '{{(index .Endpoints "docker").Host}}')
+    endpoint = result.stdout.strip()
+    if not (endpoint.startswith("unix://") or endpoint.startswith("npipe://")):
+        raise ServiceError("managed SearXNG requires a local Docker context")
+
+
+def container_name() -> str:
+    return f"{CONTAINER_PREFIX}-{os.getuid()}"
+
+
+def inspect_container(name_or_id: str) -> dict[str, Any] | None:
+    result = docker("container", "inspect", name_or_id, check=False)
+    if result.returncode != 0:
+        return None
+    try:
+        values = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ServiceError("Docker returned invalid container inspection JSON") from error
+    return values[0] if isinstance(values, list) and len(values) == 1 else None
+
+
+def require_owned(container: dict[str, Any]) -> None:
+    labels = container.get("Config", {}).get("Labels") or {}
+    if labels.get("io.sandwalk.service") != "searxng" or labels.get("io.sandwalk.uid") != str(os.getuid()):
+        raise ServiceError("refusing to manage a container not owned by this Sandwalk user")
+
+
+def require_state_container(state: dict[str, Any], container: dict[str, Any]) -> None:
+    require_owned(container)
+    labels = container.get("Config", {}).get("Labels") or {}
+    if container.get("Id") != state.get("container_id"):
+        raise ServiceError("managed container identity does not match durable state")
+    if labels.get("io.sandwalk.config-sha256") != state.get("config_sha256"):
+        raise ServiceError("managed container configuration does not match durable state")
+
+
+def image_digest(container: dict[str, Any]) -> str:
+    image_id = container.get("Image", "")
+    return image_id if isinstance(image_id, str) and image_id.startswith("sha256:") else ""
+
+
+def mapped_port(container: dict[str, Any]) -> int:
+    bindings = container.get("NetworkSettings", {}).get("Ports", {}).get("8080/tcp") or []
+    if len(bindings) != 1 or bindings[0].get("HostIp") not in {"127.0.0.1", "::1"}:
+        raise ServiceError("managed SearXNG does not have one loopback port binding")
+    return parse_int("Docker host port", bindings[0].get("HostPort"), 1, 65_535)
+
+
+def http_json(url: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise ServiceError(f"SearXNG returned HTTP {response.status}")
+            body = response.read(1_048_577)
+    except (OSError, urllib.error.URLError) as error:
+        raise ServiceError(f"SearXNG endpoint is unavailable: {error}") from error
+    if len(body) > 1_048_576:
+        raise ServiceError("SearXNG response exceeds 1 MiB")
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise ServiceError("SearXNG endpoint did not return JSON") from error
+    if not isinstance(value, dict):
+        raise ServiceError("SearXNG endpoint returned an invalid JSON envelope")
+    return value
+
+
+def validate_endpoint(endpoint: str, *, attempts: int = 1) -> None:
+    last_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            with urllib.request.urlopen(endpoint + "/healthz", timeout=3) as response:
+                if response.status != 200:
+                    raise ServiceError("SearXNG health check failed")
+            config = http_json(endpoint + "/config", timeout=5)
+            if not isinstance(config.get("engines"), list):
+                raise ServiceError("SearXNG /config response is invalid")
+            return
+        except (ServiceError, OSError, urllib.error.URLError) as error:
+            last_error = ServiceError(f"SearXNG endpoint is unavailable: {error}")
+            time.sleep(0.5)
+    raise ServiceError(str(last_error or "SearXNG readiness check failed"))
+
+
+@contextlib.contextmanager
+def file_lock(path: Path, operation: int) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, operation)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
+def lifecycle_locks(state_directory: Path, *, activity: bool) -> Iterator[None]:
+    externally_held = os.environ.get("SANDWALK_SEARXNG_LOCKS_HELD") == "1"
+    if externally_held:
+        yield
+        return
+    with file_lock(state_directory / "lifecycle.lock", fcntl.LOCK_EX):
+        if activity:
+            with file_lock(state_directory / "activity.lock", fcntl.LOCK_EX):
+                yield
+        else:
+            yield
+
+
+def state_path(state_directory: Path) -> Path:
+    return state_directory / "service.json"
+
+
+def load_state(state_directory: Path) -> dict[str, Any] | None:
+    value = read_json(state_path(state_directory), optional=True)
+    if value and value.get("schema") != STATE_SCHEMA:
+        raise ServiceError("unsupported managed-service state schema")
+    return value
+
+
+def container_is_running(container: dict[str, Any]) -> bool:
+    return container.get("State", {}).get("Running") is True
+
+
+def spawn_watchdog(state_directory: Path, timeout: int) -> None:
+    if timeout == 0:
+        return
+    command = [sys.executable, str(Path(__file__).resolve()), "_watchdog", "--state-directory", str(state_directory)]
+    subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
+def update_lease(state_directory: Path, state: dict[str, Any], timeout: int) -> None:
+    if timeout == 0 or state.get("mode") != "managed":
+        return
+    with file_lock(state_directory / "lease.lock", fcntl.LOCK_EX):
+        existing = read_json(state_directory / "lease.json", optional=True) or {}
+        deadline = max(float(existing.get("deadline_unix", 0)), time.time() + timeout)
+        atomic_json(
+            state_directory / "lease.json",
+            {
+                "schema": LEASE_SCHEMA,
+                "generation": state["generation"],
+                "container_id": state["container_id"],
+                "deadline_unix": deadline,
+                "idle_timeout_seconds": timeout,
+            },
+        )
+    spawn_watchdog(state_directory, timeout)
+
+
+def active_result(state_directory: Path, state: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any]:
+    result = dict(state)
+    result.update(
+        {
+            "active_desired_sha256": state.get("desired_sha256"),
+            "desired_sha256": desired["desired_sha256"],
+            "configuration_drift": state.get("desired_sha256") != desired["desired_sha256"],
+            "state_directory": str(state_directory),
+        }
+    )
+    return result
+
+
+def create_managed_container(
+    state_directory: Path,
+    config: dict[str, Any],
+    *,
+    name: str,
+    generation: int,
+) -> dict[str, Any]:
+    verify_local_docker()
+    if docker("image", "inspect", config["image"], check=False).returncode != 0:
+        docker("image", "pull", config["image"], timeout=900)
+    settings_path, config_sha256 = materialize_settings(state_directory, config)
+    port = config["host_port"]
+    binding = f"127.0.0.1:{port}:8080" if port else "127.0.0.1::8080"
+    created = docker(
+        "container",
+        "create",
+        "--name",
+        name,
+        "--label",
+        "io.sandwalk.service=searxng",
+        "--label",
+        f"io.sandwalk.uid={os.getuid()}",
+        "--label",
+        f"io.sandwalk.config-sha256={config_sha256}",
+        "--restart",
+        "no",
+        "-p",
+        binding,
+        "-v",
+        f"{settings_path}:/etc/searxng/settings.yml:ro",
+        config["image"],
+    )
+    container_id = created.stdout.strip()
+    if not container_id:
+        raise ServiceError("Docker did not return a container identifier")
+    try:
+        docker("container", "start", container_id)
+        container = inspect_container(container_id)
+        if not container:
+            raise ServiceError("created SearXNG container cannot be inspected")
+        port = mapped_port(container)
+        endpoint = f"http://127.0.0.1:{port}"
+        validate_endpoint(endpoint, attempts=60)
+        return {
+            "schema": STATE_SCHEMA,
+            "mode": "managed",
+            "container_id": container_id,
+            "container_name": name,
+            "endpoint": endpoint,
+            "image": config["image"],
+            "image_digest": image_digest(container),
+            "profile": (
+                "custom-settings-v1"
+                if config["settings_file"]
+                else config["engines"]["profile"]
+            ),
+            "language": config["search"]["language"],
+            "safe_search": config["search"]["safe_search"],
+            "config_sha256": config_sha256,
+            "desired_sha256": config["desired_sha256"],
+            "generation": generation,
+            "host_port": port,
+            "idle_timeout_seconds": config["idle_timeout_seconds"],
+        }
+    except Exception:
+        docker("container", "stop", container_id, check=False)
+        docker("container", "rm", container_id, check=False)
+        raise
+
+
+def start_managed(state_directory: Path, config: dict[str, Any], *, replace: bool) -> dict[str, Any]:
+    if replace:
+        raise ServiceError("managed replacement requires the transactional update path")
+    verify_local_docker()
+    current = load_state(state_directory)
+    existing = inspect_container(container_name())
+    if existing:
+        require_owned(existing)
+    if existing is None:
+        generation = int((current or {}).get("generation", 0)) + 1
+        state = create_managed_container(
+            state_directory,
+            config,
+            name=container_name(),
+            generation=generation,
+        )
+        atomic_json(state_path(state_directory), state)
+        return state
+    container = existing
+    if not current:
+        raise ServiceError("owned SearXNG container exists without Sandwalk service state; remove it manually")
+    require_state_container(current, container)
+    if not container_is_running(container):
+        docker("container", "start", container["Id"])
+        container = inspect_container(container["Id"])
+        if not container:
+            raise ServiceError("started SearXNG container cannot be inspected")
+    port = mapped_port(container)
+    endpoint = f"http://127.0.0.1:{port}"
+    validate_endpoint(endpoint, attempts=60)
+    current["container_id"] = container["Id"]
+    current["endpoint"] = endpoint
+    current["host_port"] = port
+    current["image_digest"] = image_digest(container)
+    atomic_json(state_path(state_directory), current)
+    return current
+
+
+def apply_desired(state_directory: Path, desired: dict[str, Any], *, replace: bool) -> dict[str, Any]:
+    if desired["mode"] == "external":
+        validate_endpoint(desired["endpoint"], attempts=1)
+        previous = load_state(state_directory) or {}
+        state = {
+            "schema": STATE_SCHEMA,
+            "mode": "external",
+            "endpoint": desired["endpoint"],
+            "image": "",
+            "image_digest": "",
+            "profile": "external-v1",
+            "language": desired["search"]["language"],
+            "safe_search": desired["search"]["safe_search"],
+            "config_sha256": desired["desired_sha256"],
+            "desired_sha256": desired["desired_sha256"],
+            "generation": int(previous.get("generation", 0)) + 1,
+            "idle_timeout_seconds": 0,
+        }
+        atomic_json(state_path(state_directory), state)
+        return state
+    return start_managed(state_directory, desired, replace=replace)
+
+
+def prepare(state_directory: Path, desired: dict[str, Any]) -> dict[str, Any]:
+    with lifecycle_locks(state_directory, activity=False):
+        active = load_state(state_directory)
+        if active and active.get("mode") == "external":
+            validate_endpoint(active["endpoint"], attempts=1)
+        elif active and active.get("mode") == "managed":
+            active = start_managed(state_directory, desired, replace=False)
+        else:
+            active = apply_desired(state_directory, desired, replace=False)
+        timeout = int(active.get("idle_timeout_seconds", desired["idle_timeout_seconds"]))
+        update_lease(state_directory, active, timeout)
+        return active_result(state_directory, active, desired)
+
+
+def touch(state_directory: Path) -> dict[str, Any]:
+    state = load_state(state_directory)
+    if not state:
+        raise ServiceError("SearXNG service has no active state")
+    timeout = int(state.get("idle_timeout_seconds", 0))
+    update_lease(state_directory, state, timeout)
+    return {"touched": timeout > 0, "generation": state["generation"]}
+
+
+def status(state_directory: Path, desired: dict[str, Any]) -> dict[str, Any]:
+    state = load_state(state_directory)
+    active: dict[str, Any] | None = None
+    if state:
+        active = dict(state)
+        if state["mode"] == "managed":
+            verify_local_docker()
+            container = inspect_container(state["container_id"])
+            if container:
+                require_state_container(state, container)
+            active["container_status"] = (
+                container.get("State", {}).get("Status", "missing") if container else "missing"
+            )
+        else:
+            try:
+                validate_endpoint(state["endpoint"], attempts=1)
+                active["endpoint_status"] = "healthy"
+            except ServiceError:
+                active["endpoint_status"] = "unavailable"
+    lease = read_json(state_directory / "lease.json", optional=True)
+    return {
+        "mode": desired["mode"],
+        "desired": desired,
+        "active": active,
+        "configuration_drift": bool(state and state.get("desired_sha256") != desired["desired_sha256"]),
+        "lease": lease,
+        "state_directory": str(state_directory),
+    }
+
+
+def stop_service(state_directory: Path, *, force: bool) -> dict[str, Any]:
+    with lifecycle_locks(state_directory, activity=not force):
+        state = load_state(state_directory)
+        if not state:
+            return {"stopped": False, "reason": "not-configured"}
+        if state["mode"] != "managed":
+            raise ServiceError("external SearXNG endpoints are not managed by Sandwalk")
+        verify_local_docker()
+        container = inspect_container(state["container_id"])
+        if not container:
+            (state_directory / "lease.json").unlink(missing_ok=True)
+            return {"stopped": False, "reason": "container-missing"}
+        require_state_container(state, container)
+        if container_is_running(container):
+            docker("container", "stop", container["Id"], timeout=60)
+            stopped = True
+        else:
+            stopped = False
+        (state_directory / "lease.json").unlink(missing_ok=True)
+        return {"stopped": stopped, "container_id": container["Id"]}
+
+
+def remove_service(state_directory: Path, *, force: bool) -> dict[str, Any]:
+    with lifecycle_locks(state_directory, activity=not force):
+        state = load_state(state_directory)
+        if not state:
+            return {"removed": False, "reason": "not-configured"}
+        if state["mode"] == "managed":
+            verify_local_docker()
+            container = inspect_container(state["container_id"])
+            if container:
+                require_state_container(state, container)
+                if container_is_running(container):
+                    docker("container", "stop", container["Id"], timeout=60)
+                docker("container", "rm", container["Id"])
+        state_path(state_directory).unlink(missing_ok=True)
+        (state_directory / "lease.json").unlink(missing_ok=True)
+        return {"removed": True, "mode": state["mode"]}
+
+
+def update_service(state_directory: Path, desired: dict[str, Any]) -> dict[str, Any]:
+    with lifecycle_locks(state_directory, activity=True):
+        previous = load_state(state_directory)
+        if previous and previous.get("mode") == "managed":
+            verify_local_docker()
+        previous_container = (
+            inspect_container(previous["container_id"])
+            if previous and previous.get("mode") == "managed"
+            else None
+        )
+        if previous_container:
+            require_state_container(previous, previous_container)
+        if desired["mode"] == "external":
+            # Validate the replacement before changing the running managed service.
+            validate_endpoint(desired["endpoint"], attempts=1)
+            if previous_container:
+                if container_is_running(previous_container):
+                    docker("container", "stop", previous_container["Id"], timeout=60)
+                docker("container", "rm", previous_container["Id"])
+            active = apply_desired(state_directory, desired, replace=False)
+        elif previous_container:
+            generation = int(previous.get("generation", 0)) + 1
+            candidate_name = f"{container_name()}-candidate-{generation}"
+            stale_candidate = inspect_container(candidate_name)
+            if stale_candidate:
+                require_owned(stale_candidate)
+                if container_is_running(stale_candidate):
+                    docker("container", "stop", stale_candidate["Id"], timeout=60)
+                docker("container", "rm", stale_candidate["Id"])
+            rollback_name = f"{container_name()}-rollback-{generation}"
+            previous_was_running = container_is_running(previous_container)
+            stopped_for_port = bool(
+                previous_was_running
+                and desired.get("host_port") is not None
+                and desired.get("host_port") == previous.get("host_port")
+            )
+            candidate: dict[str, Any] | None = None
+            try:
+                # A fixed host port cannot be validated alongside the old
+                # container on that same port. Keep the old container intact
+                # and restart it on any candidate failure.
+                if stopped_for_port:
+                    docker("container", "stop", previous_container["Id"], timeout=60)
+                candidate = create_managed_container(
+                    state_directory,
+                    desired,
+                    name=candidate_name,
+                    generation=generation,
+                )
+                if previous_was_running and not stopped_for_port:
+                    docker("container", "stop", previous_container["Id"], timeout=60)
+                docker("container", "rename", previous_container["Id"], rollback_name)
+                docker("container", "rename", candidate["container_id"], container_name())
+                candidate["container_name"] = container_name()
+                atomic_json(state_path(state_directory), candidate)
+                docker("container", "rm", previous_container["Id"], check=False)
+                active = candidate
+            except Exception:
+                current_candidate = (
+                    inspect_container(candidate["container_id"])
+                    if candidate is not None
+                    else None
+                )
+                if current_candidate:
+                    if container_is_running(current_candidate):
+                        docker("container", "stop", current_candidate["Id"], check=False)
+                    docker("container", "rm", current_candidate["Id"], check=False)
+                rollback = inspect_container(previous_container["Id"])
+                if rollback:
+                    docker("container", "rename", rollback["Id"], container_name(), check=False)
+                    if previous_was_running:
+                        docker("container", "start", rollback["Id"], check=False)
+                if previous:
+                    atomic_json(state_path(state_directory), previous)
+                raise
+        else:
+            active = apply_desired(state_directory, desired, replace=False)
+        update_lease(state_directory, active, int(active.get("idle_timeout_seconds", 0)))
+        result = active_result(state_directory, active, desired)
+        result["updated"] = True
+        return result
+
+
+def append_watchdog_event(state_directory: Path, outcome: str, detail: str = "") -> None:
+    event = json.dumps(
+        {"time_unix": time.time(), "outcome": outcome, "detail": detail[:1000]},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    path = state_directory / "watchdog-events.jsonl"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(descriptor, (event + "\n").encode("utf-8"))
+    finally:
+        os.close(descriptor)
+
+
+def append_service_event(
+    state_directory: Path, action: str, outcome: str, detail: str = ""
+) -> None:
+    event = json.dumps(
+        {
+            "time_unix": time.time(),
+            "action": action,
+            "outcome": outcome,
+            "detail": detail[:1000],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    path = state_directory / "service-events.jsonl"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(descriptor, (event + "\n").encode("utf-8"))
+    finally:
+        os.close(descriptor)
+
+
+def watchdog(state_directory: Path) -> int:
+    state_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(state_directory / "watchdog.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        return 0
+    atomic_json(state_directory / "watchdog.json", {"pid": os.getpid()})
+    try:
+        while True:
+            lease = read_json(state_directory / "lease.json", optional=True)
+            if not lease or lease.get("schema") != LEASE_SCHEMA:
+                return 0
+            remaining = float(lease["deadline_unix"]) - time.time()
+            if remaining > 0:
+                time.sleep(min(remaining, 5.0))
+                continue
+            with file_lock(state_directory / "lifecycle.lock", fcntl.LOCK_EX):
+                with file_lock(state_directory / "activity.lock", fcntl.LOCK_EX):
+                    current_lease = read_json(state_directory / "lease.json", optional=True)
+                    state = load_state(state_directory)
+                    if not current_lease or not state:
+                        return 0
+                    if float(current_lease["deadline_unix"]) > time.time():
+                        continue
+                    if (
+                        current_lease.get("generation") != state.get("generation")
+                        or current_lease.get("container_id") != state.get("container_id")
+                    ):
+                        return 0
+                    verify_local_docker()
+                    container = inspect_container(state["container_id"])
+                    if not container:
+                        (state_directory / "lease.json").unlink(missing_ok=True)
+                        append_watchdog_event(state_directory, "container-missing")
+                        return 0
+                    require_state_container(state, container)
+                    if container_is_running(container):
+                        docker("container", "stop", container["Id"], timeout=60)
+                    (state_directory / "lease.json").unlink(missing_ok=True)
+                    append_watchdog_event(state_directory, "stopped-idle")
+                    return 0
+    except Exception as error:
+        append_watchdog_event(state_directory, "failure", str(error))
+        return 1
+    finally:
+        try:
+            watchdog_state = read_json(state_directory / "watchdog.json", optional=True)
+        except ServiceError:
+            watchdog_state = None
+        if watchdog_state and watchdog_state.get("pid") == os.getpid():
+            (state_directory / "watchdog.json").unlink(missing_ok=True)
+        os.close(descriptor)
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser()
+    result.add_argument("action", choices=["prepare", "touch", "start", "status", "stop", "remove", "update", "_watchdog"])
+    result.add_argument("--state-directory", type=Path)
+    result.add_argument("--mode", choices=["managed", "external"])
+    result.add_argument("--endpoint")
+    result.add_argument("--idle-timeout", type=int)
+    result.add_argument("--host-port", type=int)
+    result.add_argument("--image")
+    result.add_argument("--settings-file")
+    result.add_argument("--language")
+    result.add_argument("--safe-search", type=int)
+    result.add_argument("--engine-enable", action="append", default=[])
+    result.add_argument("--engine-disable", action="append", default=[])
+    result.add_argument("--engine-keep-only", action="append", default=[])
+    result.add_argument("--force", action="store_true")
+    return result
+
+
+def main() -> int:
+    arguments = parser().parse_args()
+    state_directory = (arguments.state_directory or default_state_directory()).expanduser().resolve()
+    state_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if arguments.action == "_watchdog":
+        return watchdog(state_directory)
+    try:
+        if arguments.action == "prepare":
+            desired = desired_config(arguments)
+            result = prepare(state_directory, desired)
+        elif arguments.action == "touch":
+            result = touch(state_directory)
+        elif arguments.action == "start":
+            desired = desired_config(arguments)
+            result = prepare(state_directory, desired)
+        elif arguments.action == "status":
+            desired = desired_config(arguments)
+            result = status(state_directory, desired)
+        elif arguments.action == "stop":
+            result = stop_service(state_directory, force=arguments.force)
+        elif arguments.action == "remove":
+            result = remove_service(state_directory, force=arguments.force)
+        elif arguments.action == "update":
+            desired = desired_config(arguments)
+            result = update_service(state_directory, desired)
+        else:
+            raise AssertionError(arguments.action)
+        print(json.dumps({"protocol": "sandwalk.searxng-service-result.v1", "result": result}, separators=(",", ":")))
+        append_service_event(state_directory, arguments.action, "success")
+        return 0
+    except ServiceError as error:
+        append_service_event(state_directory, arguments.action, "failure", str(error))
+        print(str(error), file=sys.stderr)
+        return 69
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

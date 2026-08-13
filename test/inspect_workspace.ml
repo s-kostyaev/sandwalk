@@ -859,6 +859,93 @@ PRAGMA user_version = 21;
 |})
 ;;
 
+let create_v22 database slug =
+  create_v21 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+CREATE TABLE candidate_rejections (
+  step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  candidate_kind TEXT NOT NULL CHECK (
+    candidate_kind IN ('hit', 'snapshot', 'excerpt')
+  ),
+  candidate_ref TEXT NOT NULL,
+  claim_id TEXT REFERENCES claims(claim_id),
+  reason_text TEXT NOT NULL CHECK (
+    length(CAST(reason_text AS BLOB)) BETWEEN 1 AND 65536
+  ),
+  reason_path TEXT NOT NULL,
+  reason_md5 TEXT NOT NULL CHECK (length(reason_md5) = 32),
+  reason_size INTEGER NOT NULL CHECK (
+    reason_size > 0 AND reason_size <= 65536
+  ),
+  rejected_at TEXT NOT NULL,
+  PRIMARY KEY (step_key, candidate_kind, candidate_ref)
+);
+CREATE TABLE finding_repairs (
+  repair_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  step_key TEXT NOT NULL,
+  finding_key TEXT NOT NULL,
+  previous_revision INTEGER NOT NULL CHECK (previous_revision >= 1),
+  repair_revision INTEGER NOT NULL CHECK (repair_revision > previous_revision),
+  reason_text TEXT NOT NULL CHECK (
+    length(CAST(reason_text AS BLOB)) BETWEEN 1 AND 65536
+  ),
+  reason_path TEXT NOT NULL,
+  reason_md5 TEXT NOT NULL CHECK (length(reason_md5) = 32),
+  reason_size INTEGER NOT NULL CHECK (
+    reason_size > 0 AND reason_size <= 65536
+  ),
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (step_key, finding_key)
+    REFERENCES findings(step_key, finding_key),
+  UNIQUE (step_key, finding_key, repair_revision)
+);
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (22, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 22;
+|})
+;;
+
+let create_v23 database slug =
+  create_v22 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+ALTER TABLE search_queries ADD COLUMN source_root TEXT;
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (23, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 23;
+|})
+;;
+
+let create_v24 database slug =
+  create_v23 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+ALTER TABLE snapshots
+ADD COLUMN document_artifact TEXT NOT NULL DEFAULT 'document.md'
+CHECK (
+  document_artifact NOT IN ('', '.', '..')
+  AND document_artifact NOT LIKE '%/%'
+  AND document_artifact NOT LIKE '%\%'
+);
+ALTER TABLE snapshots
+ADD COLUMN document_media_type TEXT NOT NULL DEFAULT 'text/markdown'
+CHECK (document_media_type IN ('text/markdown', 'text/plain'));
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (24, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 24;
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -910,6 +997,16 @@ let inspect_search_roots database =
     database
     {|
 SELECT adapter, COALESCE(source_root, 'NULL')
+FROM search_queries
+ORDER BY query_id
+|}
+;;
+
+let inspect_search_metadata database =
+  print_query
+    database
+    {|
+SELECT adapter_metadata_json
 FROM search_queries
 ORDER BY query_id
 |}
@@ -1067,10 +1164,15 @@ let () =
     | [| _; "--create-v19"; path; slug |] -> `Create (19, slug), path
     | [| _; "--create-v20"; path; slug |] -> `Create (20, slug), path
     | [| _; "--create-v21"; path; slug |] -> `Create (21, slug), path
+    | [| _; "--create-v22"; path; slug |] -> `Create (22, slug), path
+    | [| _; "--create-v23"; path; slug |] -> `Create (23, slug), path
+    | [| _; "--create-v24"; path; slug |] -> `Create (24, slug), path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
     | [| _; "--inspect-search-roots"; path |] -> `Inspect_search_roots, path
+    | [| _; "--inspect-search-metadata"; path |] ->
+      `Inspect_search_metadata, path
     | [| _; "--inspect-snapshots"; path |] -> `Inspect_snapshots, path
     | [| _; "--inspect-excerpts"; path |] -> `Inspect_excerpts, path
     | [| _; "--inspect-findings"; path |] -> `Inspect_findings, path
@@ -1114,12 +1216,16 @@ let () =
       | `Create (19, slug) -> create_v19 database slug
       | `Create (20, slug) -> create_v20 database slug
       | `Create (21, slug) -> create_v21 database slug
+      | `Create (22, slug) -> create_v22 database slug
+      | `Create (23, slug) -> create_v23 database slug
+      | `Create (24, slug) -> create_v24 database slug
       | `Create _ -> assert false
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
       | `Inspect_checkpoints -> inspect_checkpoints database
       | `Inspect_hits -> inspect_hits database
       | `Inspect_search_roots -> inspect_search_roots database
+      | `Inspect_search_metadata -> inspect_search_metadata database
       | `Inspect_snapshots -> inspect_snapshots database
       | `Inspect_excerpts -> inspect_excerpts database
       | `Inspect_findings -> inspect_findings database

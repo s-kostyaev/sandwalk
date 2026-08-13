@@ -1,0 +1,128 @@
+#!/bin/sh
+set -eu
+
+# The service manager supplies these values in the deliberately small child
+# environment.  Keep the adapter independent of the parent process' config.
+endpoint=${SANDWALK_SEARXNG_ENDPOINT:-}
+mode=${SANDWALK_SEARXNG_MODE:-}
+image_digest=${SANDWALK_SEARXNG_IMAGE_DIGEST:-}
+profile=${SANDWALK_SEARXNG_PROFILE:-}
+config_sha256=${SANDWALK_SEARXNG_CONFIG_SHA256:-}
+language=${SANDWALK_SEARXNG_LANGUAGE:-all}
+safe_search=${SANDWALK_SEARXNG_SAFE_SEARCH:-0}
+
+case "$endpoint" in
+  http://*|https://*) ;;
+  *) printf '%s\n' 'SearXNG endpoint must use HTTP or HTTPS' >&2; exit 64 ;;
+esac
+# An endpoint is an origin, rather than an arbitrary URL supplied to curl.
+printf '%s' "$endpoint" | grep -Eq '^https?://[^/@?#[:space:]]+$' || {
+  printf '%s\n' 'SearXNG endpoint must be an HTTP origin' >&2
+  exit 64
+}
+[ "${#endpoint}" -le 512 ] || {
+  printf '%s\n' 'SearXNG endpoint is too long' >&2; exit 64
+}
+if [ -z "$mode" ] || [ "${#mode}" -gt 64 ] ||
+  ! printf '%s' "$mode" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+    printf '%s\n' 'invalid SearXNG mode' >&2; exit 64;
+fi
+if [ -z "$profile" ] || [ "${#profile}" -gt 128 ] ||
+  ! printf '%s' "$profile" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+    printf '%s\n' 'invalid SearXNG profile' >&2; exit 64;
+fi
+if { [ "$mode" = "managed" ] && [ -z "$image_digest" ]; } ||
+  { [ -n "$image_digest" ] &&
+    ! printf '%s' "$image_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; }; then
+    printf '%s\n' 'invalid SearXNG image digest' >&2; exit 64;
+fi
+if [ -z "$config_sha256" ] ||
+  ! printf '%s' "$config_sha256" | grep -Eq '^[0-9a-f]{64}$'; then
+    printf '%s\n' 'invalid SearXNG config hash' >&2; exit 64;
+fi
+if [ -z "$language" ] || [ "${#language}" -gt 32 ] ||
+  ! printf '%s' "$language" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+  printf '%s\n' 'invalid SearXNG language' >&2; exit 64
+fi
+case "$safe_search" in
+  0 | 1 | 2) ;;
+  *) printf '%s\n' 'invalid SearXNG safe-search level' >&2; exit 64 ;;
+esac
+
+request=$(cat)
+protocol=$(printf '%s' "$request" | jq -er '.protocol')
+query=$(printf '%s' "$request" | jq -er '.query')
+limit=$(printf '%s' "$request" | jq -er '.limit // 10')
+[ "$protocol" = "sandwalk.search.v1" ] || {
+  printf '%s\n' 'unsupported search protocol' >&2; exit 64;
+}
+printf '%s' "$limit" | grep -Eq '^[0-9]+$' || {
+  printf '%s\n' 'search limit must be an integer' >&2; exit 64;
+}
+[ "$limit" -ge 1 ] && [ "$limit" -le 25 ] || {
+  printf '%s\n' 'search limit must be between 1 and 25' >&2; exit 64
+}
+[ -n "$query" ] && [ "${#query}" -le 2048 ] || {
+  printf '%s\n' 'search query must contain between 1 and 2048 bytes' >&2; exit 64
+}
+
+temporary_directory=${TMPDIR:-/tmp}
+[ -d "$temporary_directory" ] && [ -w "$temporary_directory" ] || temporary_directory=/tmp
+body_file=$(mktemp "$temporary_directory/sandwalk-searxng.XXXXXX")
+error_file=$(mktemp "$temporary_directory/sandwalk-searxng-error.XXXXXX")
+trap 'rm -f "$body_file" "$error_file"' EXIT HUP INT TERM
+
+set +e
+curl --fail-with-body --silent --show-error --connect-timeout 5 --max-time 20 \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode "q=$query" --data-urlencode 'format=json' \
+  --data-urlencode "language=$language" --data-urlencode "safesearch=$safe_search" \
+  "$endpoint/search" >"$body_file" 2>"$error_file"
+status=$?
+set -e
+[ "$status" -eq 0 ] || { cat "$error_file" >&2; exit 69; }
+[ "$(wc -c <"$body_file" | tr -d ' ')" -le 1048576 ] || {
+  printf '%s\n' 'SearXNG response exceeds 1 MiB' >&2; exit 69
+}
+
+# Parsing and shaping are deliberately done in one bounded jq program.  This
+# also strips engine diagnostics down to short names for provenance.
+jq -e 'type == "object" and (.results | type == "array")' "$body_file" >/dev/null || {
+  printf '%s\n' 'invalid SearXNG JSON response' >&2; exit 69;
+}
+jq -c \
+  --arg endpoint "$endpoint" --arg mode "$mode" --arg digest "$image_digest" \
+  --arg profile "$profile" --arg config_sha256 "$config_sha256" --argjson limit "$limit" '
+  def clean: tostring | gsub("[\\r\\n\\t]+"; " ") | .[0:2048];
+  {
+    protocol: "sandwalk.search-results.v1",
+    adapter: {
+      name: "searxng",
+      protocol_version: 1,
+      search_profile: $profile,
+      profile: $profile,
+      mode: $mode,
+      image_digest: $digest,
+      config_sha256: $config_sha256,
+      endpoint_origin: $endpoint,
+      unresponsive_engines: (
+        [(.unresponsive_engines // [])[]?
+         | if type == "string" then .
+           elif type == "array" and (.[0] | type == "string") then .[0]
+           else empty
+           end
+         | clean]
+        | .[0:25]
+      )
+    },
+    results: [
+      .results[]?
+      | select((.url // "") | type == "string" and test("^https?://"))
+      | {
+          url: (.url | .[0:2048]),
+          title: ((.title // "Untitled") | clean | .[0:500]),
+          snippet: ((.content // .snippet // "") | clean | .[0:1000])
+        }
+      | select(.title != "")
+    ][0:$limit]
+  }' "$body_file"

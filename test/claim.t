@@ -1,5 +1,5 @@
   $ sandwalk init --slug claim-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"claim-test","phase":"initialized","schema_version":24}}
+  {"ok":true,"result":{"slug":"claim-test","phase":"initialized","schema_version":25}}
 
   $ sandwalk plan add-step --slug claim-test --directory-prefix workspaces \
   >   --key primary --title "Primary research"
@@ -91,7 +91,7 @@ Create a released-schema v4 fixture and claim its step through migration v5.
 
   $ ./inspect_workspace.exe legacy-v4/v4-test/database/sandwalk.sqlite3
   v4-test|researching
-  24
+  25
   wal
   ok
 

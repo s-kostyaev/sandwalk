@@ -678,7 +678,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 24
+let current_schema_version = 25
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -1264,6 +1264,19 @@ PRAGMA user_version = 24;
 |}
 ;;
 
+let migration_v25 =
+  {|
+ALTER TABLE search_queries
+ADD COLUMN adapter_metadata_json TEXT NOT NULL DEFAULT '{}'
+CHECK (
+  length(CAST(adapter_metadata_json AS BLOB)) BETWEEN 2 AND 16384
+  AND json_valid(adapter_metadata_json)
+  AND json_type(adapter_metadata_json) = 'object'
+);
+PRAGMA user_version = 25;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -1451,10 +1464,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:23 ~now)
       else Ok ()
     in
-    if from_version < 24
+    let%bind () =
+      if from_version < 24
+      then (
+        let%bind () = execute database migration_v24 in
+        insert_migration database ~version:24 ~now)
+      else Ok ()
+    in
+    if from_version < 25
     then (
-      let%bind () = execute database migration_v24 in
-      insert_migration database ~version:24 ~now)
+      let%bind () = execute database migration_v25 in
+      insert_migration database ~version:25 ~now)
     else Ok ())
 ;;
 
@@ -4832,6 +4852,7 @@ let insert_search_query
       ~claim_id
       ~step_key
       ~adapter
+      ~adapter_metadata
       ~source_root
       ~now
   =
@@ -4839,9 +4860,10 @@ let insert_search_query
     database
     {|
 INSERT INTO search_queries (
-  query, phase, claim_id, step_key, adapter, source_root, created_at
+  query, phase, claim_id, step_key, adapter, source_root,
+  adapter_metadata_json, created_at
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
 |}
     ~f:(fun statement ->
       let open Result.Let_syntax in
@@ -4869,7 +4891,10 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
       in
       let%bind () = bind_text database statement 5 adapter in
       let%bind () = bind_optional_text 6 source_root in
-      let%bind () = bind_text database statement 7 now in
+      let%bind () =
+        bind_text database statement 7 (Yojson.Safe.to_string adapter_metadata)
+      in
+      let%bind () = bind_text database statement 8 now in
       let%map () = step_done database statement in
       Sqlite3.last_insert_rowid database)
 ;;
@@ -4914,6 +4939,7 @@ let record_search
       ~claim_id
       ~query
       ~adapter
+      ~adapter_metadata
       ~source_root
       ~hits
       ~now
@@ -4972,6 +4998,7 @@ let record_search
                 ~claim_id
                 ~step_key
                 ~adapter
+                ~adapter_metadata
                 ~source_root
                 ~now
             in

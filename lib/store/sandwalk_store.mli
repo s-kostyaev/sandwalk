@@ -733,6 +733,7 @@ val record_search
   -> claim_id:Sandwalk_core.Claim_id.t option
   -> query:string
   -> adapter:string
+  -> adapter_metadata:Yojson.Safe.t
   -> source_root:string option
   -> hits:(Sandwalk_core.Hit_id.t * string * string * string) list
   -> now:string

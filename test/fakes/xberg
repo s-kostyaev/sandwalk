@@ -2,8 +2,54 @@
 set -eu
 
 if [ "${1:-}" = "version" ]; then
-  printf '%s\n' 'xberg 5.test'
+  printf '%s\n' 'xberg-cli 1.0.test'
   exit 0
+fi
+
+config_path=
+no_cache=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config)
+      config_path=$2
+      shift 2
+      ;;
+    --no-cache)
+      no_cache=$2
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+[ -n "$config_path" ] && [ -f "$config_path" ] || {
+  printf '%s\n' 'xberg fake requires an explicit config' >&2
+  exit 64
+}
+
+[ "$no_cache" = "true" ] || {
+  printf '%s\n' 'xberg fake requires cache disabling' >&2
+  exit 64
+}
+
+jq -e '
+  .output_format == "markdown"
+  and .include_document_structure == true
+  and .use_layout_for_markdown == false
+  and .pdf_options.extract_images == false
+  and .pdf_options.extract_tables == true
+  and .pdf_options.ocr_inline_images == false
+  and .pdf_options.reading_order == false
+  and .pdf_options.hierarchy.enabled == true
+  and .pdf_options.hierarchy.k_clusters == 6
+  and .pdf_options.hierarchy.include_bbox == true
+' "$config_path" >/dev/null
+
+if [ -n "${XBERG_TEST_LOG:-}" ]; then
+  jq -cS . "$config_path" >"$XBERG_TEST_LOG"
+  printf 'no-cache=%s\n' "$no_cache" >>"$XBERG_TEST_LOG"
 fi
 
 if [ "${XBERG_FLAT_MARKDOWN:-0}" = 1 ]; then
@@ -22,10 +68,16 @@ Typed adapter architecture.
 '
 fi
 
-jq -n --arg content "$markdown" '
+tables='[]'
+if [ "${XBERG_FLAT_TABLE:-0}" = 1 ]; then
+  tables='[{"table_id":"table-1","rows":1,"columns":2}]'
+fi
+
+jq -n --arg content "$markdown" --argjson tables "$tables" '
   {
     result: {
         content: $content,
+        tables: $tables,
         document: {
           nodes: [
             {

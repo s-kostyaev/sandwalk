@@ -55,7 +55,8 @@ of its irrelevant hits. Guidance prefers the newest query.
   >   -e 's/"replacement_query": "[^"]*"/"replacement_query": "oxcaml features"/' \
   >   restart/restart/artifacts/work/current.json > restarted.json
   $ mv restarted.json restart/restart/artifacts/work/current.json
-  $ PATH="$PWD/fakes:$PATH" sandwalk apply \
+  $ PATH="$PWD/fakes:$PATH" \
+  >   SANDWALK_SEARXNG_STATE_DIRECTORY="$PWD/searx-state" sandwalk apply \
   >   --file restart/restart/artifacts/work/current.json >/dev/null
   $ sqlite3 restart/restart/database/sandwalk.sqlite3 \
   >   "SELECT query FROM search_queries ORDER BY query_id DESC LIMIT 1;"
@@ -142,4 +143,4 @@ Released schema 21 migrates candidate rejection and finding repair state.
   $ sandwalk continue --slug legacy21 --directory-prefix legacy21 >/dev/null
   $ sqlite3 legacy21/legacy21/database/sandwalk.sqlite3 \
   >   "SELECT (SELECT COUNT(*) FROM candidate_rejections), (SELECT COUNT(*) FROM finding_repairs), user_version FROM pragma_user_version;"
-  0|0|24
+  0|0|25

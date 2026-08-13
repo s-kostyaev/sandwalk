@@ -39,6 +39,6 @@ Citation targets must be current, reviewed, and accepted.
 
   $ ./inspect_workspace.exe workspace/report-test/database/sandwalk.sqlite3
   report-test|draft-review
-  24
+  25
   wal
   ok

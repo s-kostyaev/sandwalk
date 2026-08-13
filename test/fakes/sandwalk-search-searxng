@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+request=$(cat)
+limit=$(printf '%s' "$request" | jq -er '.limit // 10')
+printf '%s\n' "${SANDWALK_SEARXNG_ENDPOINT:?missing endpoint}" >/dev/null
+jq -nc --argjson limit "$limit" '{
+  protocol: "sandwalk.search-results.v1",
+  adapter: {
+    name: "searxng",
+    protocol_version: 1,
+    search_profile: "research-v1",
+    mode: "managed",
+    image_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    config_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    endpoint_origin: "http://127.0.0.1:18888"
+  },
+  results: ([{
+    url: "https://example.test/primary",
+    title: "Primary result",
+    snippet: "A deterministic search result."
+  }][0:$limit])
+}'
