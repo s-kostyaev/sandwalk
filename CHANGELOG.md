@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-08-14
+
+### Web search
+
+- Make the bundled SearXNG connector the default web search path, with a pinned
+  per-user Docker service, loopback-only networking, explicit lifecycle
+  commands, desired-versus-active configuration reporting, and an idle
+  watchdog that does not serialize parallel searches.
+- Add the curated `research-v1` engine profile, external-endpoint mode, bounded
+  sanitized search provenance, and schema-25 migration. Keep `ddgr` available
+  as an explicit compatibility adapter without silent fallback.
+
 ### Local sources
 
 - Refresh the explicit Xberg adapter for the renamed v1 CLI, disable ambient
@@ -12,6 +24,12 @@
   Keep Docling as the default: Xberg's layout/reading-order path recovered some
   headings but regressed global section order and table fidelity on the fixture;
   retain the fixture source for reproducible future comparisons.
+
+### Development
+
+- Add development-only tooling that re-runs the controlled Docling/Xberg
+  normalizer comparison and retains deterministic raw and summarized outputs
+  for evaluating future releases without expanding the runtime package.
 
 ## 0.2.0 — 2026-07-20
 
