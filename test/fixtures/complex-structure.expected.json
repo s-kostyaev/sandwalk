@@ -1,0 +1,40 @@
+{
+  "schema": "sandwalk.normalizer-fixture.v1",
+  "headings": [
+    "Sandwalk Structure Benchmark",
+    "1 Executive overview",
+    "1.1 Scope and constraints",
+    "1.1.1 Evidence matrix",
+    "1.1.1.1 Interpretation detail",
+    "2 Two-column analysis",
+    "2.1 Left-column findings",
+    "2.2 Right-column findings",
+    "3 Recovery procedure",
+    "3.1 Primary checks",
+    "3.1.1 Heading fidelity",
+    "3.1.2 Reading-order fidelity",
+    "3.2 Secondary checks",
+    "4 Final observations"
+  ],
+  "ordered_markers": [
+    "LEFT-ONE",
+    "LEFT-TWO",
+    "LEFT-THREE",
+    "RIGHT-ONE",
+    "RIGHT-TWO",
+    "RIGHT-THREE"
+  ],
+  "table_cells": [
+    "Criterion",
+    "Expected signal",
+    "Failure mode",
+    "Hierarchy",
+    "Reading order",
+    "Table grid",
+    "Bookmarks"
+  ],
+  "furniture": [
+    "Sandwalk controlled fixture",
+    "Complex structure benchmark"
+  ]
+}

@@ -1,0 +1,198 @@
+#!/bin/sh
+set -eu
+
+script_directory=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+repository_root=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
+fixture="$repository_root/test/fixtures/complex-structure.tex"
+expected="$repository_root/test/fixtures/complex-structure.expected.json"
+layout_config="$script_directory/xberg-layout.json"
+output_directory=
+
+usage() {
+  cat <<'EOF'
+Usage: dev/normalizer-comparison/run [OPTIONS]
+
+Build the controlled PDF fixture and compare the production Docling and Xberg
+profiles with Xberg's experimental layout profile.
+
+Options:
+  --fixture PATH           TeX fixture (default: test/fixtures/complex-structure.tex)
+  --expected PATH          Expected signals JSON next to the fixture
+  --layout-config PATH     Experimental Xberg configuration
+  --output-directory PATH  New directory for retained comparison artifacts
+  -h, --help               Show this help
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fixture | --expected | --layout-config | --output-directory)
+      [ "$#" -ge 2 ] || {
+        printf 'missing value for %s\n' "$1" >&2
+        exit 64
+      }
+      case "$1" in
+        --fixture) fixture=$2 ;;
+        --expected) expected=$2 ;;
+        --layout-config) layout_config=$2 ;;
+        --output-directory) output_directory=$2 ;;
+      esac
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+for command in jq mq python3 xberg xelatex sandwalk-docling-normalize; do
+  command -v "$command" >/dev/null 2>&1 || {
+    printf 'required comparison command is not on PATH: %s\n' "$command" >&2
+    exit 69
+  }
+done
+
+[ -f "$fixture" ] || {
+  printf 'fixture does not exist: %s\n' "$fixture" >&2
+  exit 66
+}
+[ -f "$expected" ] || {
+  printf 'expected-signals file does not exist: %s\n' "$expected" >&2
+  exit 66
+}
+[ -f "$layout_config" ] || {
+  printf 'layout configuration does not exist: %s\n' "$layout_config" >&2
+  exit 66
+}
+
+if [ -z "$output_directory" ]; then
+  mkdir -p "$repository_root/_build/normalizer-comparison"
+  output_directory=$(mktemp -d "$repository_root/_build/normalizer-comparison/run.XXXXXX")
+else
+  case "$output_directory" in
+    /*) ;;
+    *) output_directory="$PWD/$output_directory" ;;
+  esac
+  [ ! -e "$output_directory" ] || {
+    printf 'output directory already exists: %s\n' "$output_directory" >&2
+    exit 73
+  }
+  mkdir -p "$output_directory"
+fi
+
+fixture_directory="$output_directory/fixture"
+mkdir -p "$fixture_directory"
+cp "$fixture" "$fixture_directory/fixture.tex"
+cp "$expected" "$output_directory/expected.json"
+cp "$layout_config" "$output_directory/xberg-layout.json"
+
+(
+  cd "$fixture_directory"
+  xelatex -interaction=nonstopmode -halt-on-error fixture.tex >xelatex-1.stdout 2>xelatex-1.stderr
+  xelatex -interaction=nonstopmode -halt-on-error fixture.tex >xelatex-2.stdout 2>xelatex-2.stderr
+)
+
+pdf="$fixture_directory/fixture.pdf"
+request="$output_directory/fetch-request.json"
+jq -n \
+  --arg url "file://$pdf" \
+  --arg source_root "$fixture_directory" \
+  '{
+    protocol: "sandwalk.fetch.v1",
+    url: $url,
+    source_root: $source_root,
+    output_directory: "CANDIDATE_OUTPUT_DIRECTORY"
+  }' >"$request"
+
+milliseconds() {
+  python3 -c 'import time; print(time.time_ns() // 1000000)'
+}
+
+run_adapter() {
+  name=$1
+  adapter=$2
+  candidate_directory="$output_directory/$name"
+  mkdir -p "$candidate_directory"
+  jq --arg output_directory "$candidate_directory" \
+    '.output_directory = $output_directory' "$request" \
+    >"$candidate_directory/request.json"
+  started=$(milliseconds)
+  set +e
+  "$adapter" \
+    <"$candidate_directory/request.json" \
+    >"$candidate_directory/stdout" \
+    2>"$candidate_directory/stderr"
+  status=$?
+  set -e
+  finished=$(milliseconds)
+  printf '%s\n' "$status" >"$candidate_directory/exit-code"
+  printf '%s\n' "$((finished - started))" >"$candidate_directory/duration-ms"
+}
+
+run_adapter docling "$repository_root/adapters/docling-fetch"
+run_adapter xberg-fast "$repository_root/adapters/xberg-fetch"
+
+layout_directory="$output_directory/xberg-layout"
+mkdir -p "$layout_directory"
+layout_started=$(milliseconds)
+set +e
+NO_COLOR=1 xberg --log-level error extract "$pdf" \
+  --no-cache true \
+  --config "$output_directory/xberg-layout.json" \
+  --content-format markdown \
+  --format json \
+  --ocr true \
+  --ocr-backend tesseract \
+  >"$layout_directory/document.json" \
+  2>"$layout_directory/stderr"
+layout_status=$?
+set -e
+layout_finished=$(milliseconds)
+printf '%s\n' "$layout_status" >"$layout_directory/exit-code"
+printf '%s\n' "$((layout_finished - layout_started))" >"$layout_directory/duration-ms"
+: >"$layout_directory/stdout"
+if [ "$layout_status" -eq 0 ]; then
+  jq -er '
+    if (.result | type) == "object" then
+      .result.content
+    elif (.results | type) == "array" and (.results | length) == 1 then
+      .results[0].content
+    else
+      empty
+    end
+    | select(type == "string" and length > 0)
+  ' "$layout_directory/document.json" >"$layout_directory/document.md"
+fi
+
+xberg_version=$(xberg version 2>"$output_directory/xberg-version.stderr" | sed -n '1p')
+docling_version=$(sandwalk-docling-normalize --version 2>"$output_directory/docling-version.stderr" | sed -n '1p')
+mq_version=$(mq --version 2>"$output_directory/mq-version.stderr" | sed -n '1p')
+xelatex_version=$(xelatex --version 2>"$output_directory/xelatex-version.stderr" | sed -n '1p')
+jq -n \
+  --arg xberg "$xberg_version" \
+  --arg docling "$docling_version" \
+  --arg mq "$mq_version" \
+  --arg xelatex "$xelatex_version" \
+  '{
+    schema: "sandwalk.normalizer-comparison-environment.v1",
+    xberg: $xberg,
+    docling: $docling,
+    mq: $mq,
+    xelatex: $xelatex
+  }' >"$output_directory/environment.json"
+
+python3 "$script_directory/analyze.py" \
+  --expected "$output_directory/expected.json" \
+  --output-directory "$output_directory" \
+  --candidate "docling=$output_directory/docling" \
+  --candidate "xberg-fast=$output_directory/xberg-fast" \
+  --candidate "xberg-layout=$output_directory/xberg-layout"
+
+printf 'comparison artifacts: %s\n' "$output_directory"
+printf 'report: %s/report.md\n' "$output_directory"

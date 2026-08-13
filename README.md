@@ -123,3 +123,10 @@ dune build @install
 dune runtest
 dune exec sandwalk -- about
 ```
+
+Normalizer releases can be re-evaluated with the development-only
+[normalizer comparison tool](dev/normalizer-comparison/README.md).
+It rebuilds the controlled fixture, retains raw output from the production
+Docling and Xberg profiles plus the experimental Xberg layout profile, and
+generates deterministic JSON and Markdown comparisons under `_build/`. It has
+no Dune install stanza and is not included in the runtime package.
