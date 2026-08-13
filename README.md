@@ -12,6 +12,11 @@ uses `ugrep+`; the bundled local-file connector preserves ordinary source text
 as `text/plain` and delegates rich documents to Docling. The Docling connector
 retains Markdown headings and subheadings for `mq`, the original file, and
 Docling's structured JSON and quality report.
+Xberg v1 is also available as an explicit fast adapter for simple local
+documents. Its bounded profile retains Xberg's structured JSON and quality
+report, disables result caching and remote/LLM features, and rejects structured
+headings or tables that disappear from Markdown. Docling remains the default
+for complex PDFs and rich formats.
 Remote PDFs use the same normalization path. arXiv snapshots prefer the
 structured HTML article for agents while always retaining the matching
 versioned PDF for readers, with PDF-to-Docling fallback when HTML fails its
@@ -28,6 +33,28 @@ canonical architecture and invariants.
 
 The portable agent skill is installed under
 `share/sandwalk/skills/deep-research`.
+
+## Normalizer choice
+
+Docling remains the default for PDFs and rich formats. Xberg v1.0.14 was
+re-evaluated against Docling 2.110.0 on the reproducible three-page
+[`complex-structure.tex`](test/fixtures/complex-structure.tex) fixture, which
+contains a PDF outline, four heading levels, repeated headers and footers, a
+three-column table, and an explicit two-column reading order.
+
+| Recovery signal | Docling profile | Xberg fast profile | Xberg layout profile |
+|---|---|---|---|
+| Title and numbered outline | Retained; all four top-level sections | Title omitted; two nested headings flattened | Title omitted; headings recovered but globally reordered |
+| Three-column table | Retained as Markdown grid | Flattened into prose | Malformed sparse grid |
+| Left-before-right columns | Retained | Retained | Right column moved before earlier content |
+| Repeated furniture and ToC noise | Filtered from body | Leaked into body | Leaked into body |
+| Paragraph-level heading | Flattened into prose | Retained | Retained |
+
+This focused fixture is not a universal quality or speed benchmark. It does
+show that Xberg's new layout path is not yet a safer default for Sandwalk's
+hierarchy-sensitive agent snapshots. The bundled Xberg adapter therefore keeps
+the fast non-layout profile and rejects structured tables that disappear from
+Markdown.
 
 ## Installation
 
@@ -79,6 +106,9 @@ type is used:
   Chromium runtime once with
   `uv run --with playwright==1.55.0 playwright install chromium`.
 - `yt-dlp` for YouTube caption snapshots.
+- [`xberg`](https://github.com/xberg-io/xberg) for the optional explicit fast
+  local-document adapter. Sandwalk's current profile is tested with Xberg
+  v1.0.14; install the CLI with `brew install xberg-io/tap/xberg`.
 
 Docling-based local and PDF normalization also uses its pinned profile through
 `uv`.

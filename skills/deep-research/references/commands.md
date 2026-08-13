@@ -78,7 +78,11 @@ not invoke `ugrep+`, Xberg, Docling, or `mq` directly except for bounded
 inspection of already-returned Sandwalk artifact paths. Inspect hierarchical
 `text/markdown` documents with `mq` before selecting excerpt ranges. Use
 `sandwalk fetch ... --adapter sandwalk-fetch-xberg` only as an explicit fast
-alternative for a simple document.
+alternative for a simple document. The bundled Xberg v1 profile disables its
+result cache, layout-to-Markdown and layout-dependent reading-order rewriting,
+VLM, and remote enrichment; it retains structured JSON and `quality.json`, and
+rejects headings, subheadings, or structured tables flattened out of Markdown.
+Keep Docling as the default for complex PDFs and rich formats.
 
 Use the fourth search form for installed GNU Info and active Emacs Info manuals.
 The local read-only adapter returns one `info://texiq/` hit per matching node;

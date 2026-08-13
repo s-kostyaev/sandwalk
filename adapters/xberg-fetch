@@ -48,9 +48,15 @@ original_directory="$output_directory/original"
 original="$original_directory/$source_basename"
 document="$output_directory/document.md"
 structure="$output_directory/document.json"
+quality="$output_directory/quality.json"
 config="$output_directory/xberg-config.json"
 manifest="$output_directory/manifest.json"
 manifest_temporary="$output_directory/manifest.json.tmp"
+
+cleanup() {
+  rm -f "$manifest_temporary" "$config"
+}
+trap cleanup EXIT HUP INT TERM
 rm -f "$manifest" "$manifest_temporary"
 
 # Copy first so extraction and hashes observe one immutable input even if the
@@ -63,10 +69,11 @@ cp -P "$canonical_source" "$original"
 }
 
 printf '%s\n' \
-  '{"output_format":"markdown","include_document_structure":true,"pdf_options":{"hierarchy":{"enabled":true,"include_bbox":true}}}' \
+  '{"output_format":"markdown","include_document_structure":true,"use_layout_for_markdown":false,"pdf_options":{"extract_images":false,"extract_tables":true,"ocr_inline_images":false,"reading_order":false,"hierarchy":{"enabled":true,"k_clusters":6,"include_bbox":true}}}' \
   >"$config"
 
 NO_COLOR=1 xberg --log-level error extract "$original" \
+  --no-cache true \
   --config "$config" \
   --content-format markdown \
   --format json \
@@ -126,15 +133,27 @@ has_structured_subheading=$(
     )
   ' "$structure"
 )
+structured_table_count=$(
+  jq -r '
+    def extraction_result:
+      if (.result | type) == "object" then
+        .result
+      elif (.results | type) == "array" and (.results | length) == 1 then
+        .results[0]
+      else
+        empty
+      end;
+    ([extraction_result.tables // [] | length]
+     + [[
+          extraction_result.document.nodes[]?
+          | select(.content.node_type == "table")
+        ] | length])
+    | max
+  ' "$structure"
+)
 
-if [ "$heading_nodes" -eq 0 ]; then
-  temporary="$document.tmp"
-  {
-    printf '# %s\n\n' "$source_basename"
-    cat "$document"
-  } >"$temporary"
-  mv "$temporary" "$document"
-elif ! grep -Eq '^#{1,6}[[:space:]]' "$document"; then
+if [ "$heading_nodes" -gt 0 ] &&
+  ! grep -Eq '^#{1,6}[[:space:]]' "$document"; then
   printf '%s\n' 'xberg reported headings but flattened the Markdown output' >&2
   exit 65
 fi
@@ -145,16 +164,75 @@ if [ "$has_structured_subheading" = "true" ] &&
   exit 65
 fi
 
+synthetic_root_heading=false
+if ! grep -Eq '^#[[:space:]]' "$document"; then
+  temporary="$document.tmp"
+  {
+    printf '# %s\n\n' "$source_basename"
+    cat "$document"
+  } >"$temporary"
+  mv "$temporary" "$document"
+  synthetic_root_heading=true
+fi
+
 [ -s "$document" ] || {
   printf '%s\n' 'xberg produced an empty Markdown document' >&2
   exit 65
 }
 
+markdown_table_row_count=$(grep -Ec '^\|.*\|[[:space:]]*$' "$document" || true)
+if [ "$structured_table_count" -gt 0 ] &&
+  [ "$markdown_table_row_count" -lt 2 ]; then
+  printf '%s\n' 'xberg reported tables but flattened the Markdown output' >&2
+  exit 65
+fi
+
 mq "$document" '.tree' >/dev/null
+
+markdown_heading_count=$(grep -Ec '^#{1,6}[[:space:]]' "$document" || true)
+nonblank_line_count=$(awk 'NF { count += 1 } END { print count + 0 }' "$document")
+maximum_heading_characters=$(
+  awk '
+    /^#{1,6}[[:space:]]/ {
+      sub(/^#{1,6}[[:space:]]+/, "")
+      if (length($0) > maximum) maximum = length($0)
+    }
+    END { print maximum + 0 }
+  ' "$document"
+)
+
+[ "$maximum_heading_characters" -le 200 ] || {
+  printf '%s\n' 'xberg produced an implausibly long Markdown heading' >&2
+  exit 65
+}
+
+jq -n \
+  --arg protocol "sandwalk.xberg-quality.v1" \
+  --arg profile "markdown-hierarchy-tables-tesseract-v2" \
+  --argjson structured_heading_count "$heading_nodes" \
+  --argjson markdown_heading_count "$markdown_heading_count" \
+  --argjson structured_table_count "$structured_table_count" \
+  --argjson markdown_table_row_count "$markdown_table_row_count" \
+  --argjson nonblank_line_count "$nonblank_line_count" \
+  --argjson maximum_heading_characters "$maximum_heading_characters" \
+  --argjson synthetic_root_heading "$synthetic_root_heading" \
+  '{
+    protocol: $protocol,
+    profile: $profile,
+    structured_heading_count: $structured_heading_count,
+    markdown_heading_count: $markdown_heading_count,
+    structured_table_count: $structured_table_count,
+    markdown_table_row_count: $markdown_table_row_count,
+    nonblank_line_count: $nonblank_line_count,
+    maximum_heading_characters: $maximum_heading_characters,
+    synthetic_root_heading: $synthetic_root_heading,
+    warnings: (if $synthetic_root_heading then ["synthetic-filename-root"] else [] end)
+  }' >"$quality"
 
 input_sha256=$(shasum -a 256 "$original" | awk '{print $1}')
 markdown_sha256=$(shasum -a 256 "$document" | awk '{print $1}')
 structure_sha256=$(shasum -a 256 "$structure" | awk '{print $1}')
+quality_sha256=$(shasum -a 256 "$quality" | awk '{print $1}')
 configuration_sha256=$(shasum -a 256 "$config" | awk '{print $1}')
 xberg_version=$(xberg version | sed -n '1{s/"/\\"/g;p;}')
 mq_version=$(mq --version | sed -n '1{s/"/\\"/g;p;}')
@@ -172,6 +250,7 @@ jq -n \
   --arg input_sha256 "$input_sha256" \
   --arg markdown_sha256 "$markdown_sha256" \
   --arg structure_sha256 "$structure_sha256" \
+  --arg quality_sha256 "$quality_sha256" \
   --arg configuration_sha256 "$configuration_sha256" \
   --arg xberg_version "$xberg_version" \
   --arg mq_version "$mq_version" \
@@ -181,7 +260,7 @@ jq -n \
       name: $adapter,
       protocol_version: 1,
       implementation_version: $xberg_version,
-      extraction_profile: "markdown-hierarchy-tesseract-v1",
+      extraction_profile: "markdown-hierarchy-tables-tesseract-v2",
       mq_version: $mq_version
     },
     requested_url: $requested_url,
@@ -195,11 +274,13 @@ jq -n \
       input_sha256: $input_sha256,
       normalized_document_sha256: $markdown_sha256,
       structure_sha256: $structure_sha256,
+      quality_sha256: $quality_sha256,
       sanitized_configuration_sha256: $configuration_sha256
     },
     artifacts: {
       document: "document.md",
       structure: "document.json",
+      quality: "quality.json",
       original: ("original/" + $source_basename)
     },
     queryability_check: {

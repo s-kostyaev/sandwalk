@@ -1,0 +1,67 @@
+\documentclass[10pt]{article}
+\usepackage[margin=18mm]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{multicol}
+\usepackage{fancyhdr}
+\usepackage{array}
+\hypersetup{bookmarksopen=true,bookmarksnumbered=true,pdftitle={Sandwalk Structure Benchmark}}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{Sandwalk controlled fixture}
+\fancyhead[R]{Complex structure benchmark}
+\fancyfoot[C]{\thepage}
+\setcounter{secnumdepth}{4}
+\setcounter{tocdepth}{4}
+\title{Sandwalk Structure Benchmark}
+\author{Controlled fixture}
+\date{2026-08-13}
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+\section{Executive overview}
+This fixture has a known PDF outline, numbered headings, repeated furniture, a nested table, and a multi-column region. Alpha overview sentence precedes every other section.
+\subsection{Scope and constraints}
+The expected order is overview, scope, evidence matrix, left column, right column, recovery, checks, and final observations.
+\subsubsection{Evidence matrix}
+\begin{table}[h]
+\centering
+\caption{Recovery criteria}
+\begin{tabular}{>{\raggedright\arraybackslash}p{30mm}p{42mm}p{42mm}}
+\toprule
+Criterion & Expected signal & Failure mode \\
+\midrule
+Hierarchy & Four numbered levels & Flattened or invented headings \\
+Reading order & Left column before right column & Interleaved column text \\
+Table grid & Three columns and four body rows & Rows collapsed into prose \\
+Bookmarks & Title and numbered outline & Outline ignored \\
+\bottomrule
+\end{tabular}
+\end{table}
+\paragraph{Interpretation detail}
+The paragraph-level heading should remain subordinate to Evidence matrix and must not be promoted above it.
+\section{Two-column analysis}
+\begin{multicols}{2}
+\subsection{Left-column findings}
+LEFT-ONE begins the first column. LEFT-TWO follows it. LEFT-THREE closes the left-column sequence with enough prose to make ordering visible in extracted text.
+
+Additional left-column material repeats no right-column marker and should remain contiguous before the column break.
+\columnbreak
+\subsection{Right-column findings}
+RIGHT-ONE begins only after all left-column material. RIGHT-TWO follows it. RIGHT-THREE closes the right-column sequence.
+
+Additional right-column material is deliberately distinct so interleaving can be detected exactly.
+\end{multicols}
+\newpage
+\section{Recovery procedure}
+\subsection{Primary checks}
+\subsubsection{Heading fidelity}
+Compare the extracted Markdown heading levels with the PDF outline and this source hierarchy.
+\subsubsection{Reading-order fidelity}
+Verify LEFT-ONE precedes LEFT-THREE and every left marker precedes RIGHT-ONE.
+\subsection{Secondary checks}
+Verify the table caption and all criterion rows survive without becoming headings.
+\section{Final observations}
+The final section is intentionally short and must still appear as a top-level heading after the page break.
+\end{document}

@@ -401,10 +401,12 @@ the explicit profile is removed.
   $ test -f "docling-output/original/Architecture Notes.pdf"
   $ test ! -e docling-output/docling-profile.json
 
-Xberg remains an explicit fast adapter and retains its structured source model.
+X-Berg remains an explicit fast adapter, uses the current v1 profile without
+ambient config or result caches, and retains structure plus quality metrics.
 
   $ mkdir local-output
-  $ PATH="$PWD/fakes:$PATH" ../adapters/xberg-fetch <<EOF
+  $ XBERG_TEST_LOG="$PWD/xberg.log" PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/xberg-fetch <<EOF
   > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/local%20documents/Architecture%20Notes.pdf","source_root":"$PWD/local documents","output_directory":"local-output"}
   > EOF
   {"protocol":"sandwalk.fetch-result.v1","manifest":"local-output/manifest.json"}
@@ -416,9 +418,17 @@ Xberg remains an explicit fast adapter and retains its structured source model.
   
   Typed adapter architecture.
 
-  $ jq -r '[.artifacts.structure, .adapter.extraction_profile, .queryability_check.ok] | @tsv' \
+  $ jq -r '[.artifacts.structure, .artifacts.quality, .adapter.extraction_profile, .queryability_check.ok] | @tsv' \
   >   local-output/manifest.json
-  document.json	markdown-hierarchy-tesseract-v1	true
+  document.json	quality.json	markdown-hierarchy-tables-tesseract-v2	true
+
+  $ jq -r '[.structured_heading_count, .markdown_heading_count, .structured_table_count, .synthetic_root_heading, (.warnings | length)] | @tsv' \
+  >   local-output/quality.json
+  2	2	0	false	0
+
+  $ cat xberg.log
+  {"include_document_structure":true,"output_format":"markdown","pdf_options":{"extract_images":false,"extract_tables":true,"hierarchy":{"enabled":true,"include_bbox":true,"k_clusters":6},"ocr_inline_images":false,"reading_order":false},"use_layout_for_markdown":false}
+  no-cache=true
 
   $ jq -r '.result.document.nodes[] | [.content.node_type, (.content.level // 0)] | @tsv' \
   >   local-output/document.json
@@ -444,6 +454,20 @@ Flattening recognized subheadings fails before snapshot publication.
   [65]
 
   $ test ! -e flat-output/manifest.json
+  $ test ! -e flat-output/xberg-config.json
+
+Structured tables that disappear from Markdown fail the quality gate.
+
+  $ mkdir flat-table-output
+  $ XBERG_FLAT_TABLE=1 PATH="$PWD/fakes:$PATH" \
+  >   ../adapters/xberg-fetch >/dev/null <<EOF
+  > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/local%20documents/Architecture%20Notes.pdf","source_root":"$PWD/local documents","output_directory":"flat-table-output"}
+  > EOF
+  xberg reported tables but flattened the Markdown output
+  [65]
+
+  $ test ! -e flat-table-output/manifest.json
+  $ test ! -e flat-table-output/xberg-config.json
 
 Canonicalization prevents a file locator from escaping the authorized root.
 

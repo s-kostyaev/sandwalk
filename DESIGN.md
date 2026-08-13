@@ -610,14 +610,27 @@ bookmark coverage and undecoded formulas are explicit warnings.
 `mq document.md '.tree'` is the final queryability gate.
 
 `sandwalk-fetch-xberg` remains a bundled explicit fast adapter for simple PDFs
-and other local formats. It runs with an explicit configuration rather than an
-auto-discovered `xberg.toml`, local Tesseract OCR, Markdown output, PDF
-hierarchy and bounding boxes, and document-structure extraction. Its profile
-must not enable VLM or remote enrichment. If Xberg reports title or heading
-nodes but emits no ATX Markdown headings, or reports level-two-or-deeper nodes
-without corresponding Markdown subheadings, the adapter rejects the result
-instead of publishing a flattened document. Choosing a normalizer remains an
-adapter decision, not a core-state distinction.
+and other local formats. It targets the current Xberg v1 CLI, supplies an
+explicit configuration rather than permitting discovery of `xberg.toml`, and
+disables Xberg's result cache for each immutable snapshot. The bundled profile
+uses local Tesseract OCR, Markdown output, six-level PDF font hierarchy,
+bounding boxes, native table extraction, and document-structure extraction.
+It does not enable VLM, remote enrichment, layout-to-Markdown, or the
+layout-dependent reading-order pass. The latter two options can recover
+individual structures but can also reorder section trees and fragment tables;
+they require broader corpus evidence before entering the bundled profile.
+
+The Xberg snapshot retains `original`, hierarchical `document.md`, Xberg's
+`document.json`, and `quality.json`. Quality metrics bind structured and
+Markdown heading counts, structured-table and Markdown-table signals,
+nonblank content, maximum heading length, and any synthetic filename root. If
+Xberg reports title or heading nodes but emits no ATX Markdown headings,
+reports level-two-or-deeper nodes without corresponding Markdown subheadings,
+reports structured tables without a Markdown table, or produces an
+implausibly long heading, the adapter rejects the result instead of publishing
+a flattened document. When Xberg emits headings but no H1, the adapter adds one
+filename root and records that repair in `quality.json`. Choosing a normalizer
+remains an adapter decision, not a core-state distinction.
 
 Sandwalk records:
 

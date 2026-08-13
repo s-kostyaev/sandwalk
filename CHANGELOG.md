@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Local sources
+
+- Refresh the explicit Xberg adapter for the renamed v1 CLI, disable ambient
+  result caching, use the current hierarchy/table configuration, retain a
+  versioned quality report, synthesize a recorded filename root when needed,
+  and reject structured tables flattened out of Markdown.
+- Re-evaluate Xberg v1.0.14 against Docling 2.110.0 on a controlled complex PDF.
+  Keep Docling as the default: Xberg's layout/reading-order path recovered some
+  headings but regressed global section order and table fidelity on the fixture;
+  retain the fixture source for reproducible future comparisons.
+
 ## 0.2.0 — 2026-07-20
 
 ### Local sources
