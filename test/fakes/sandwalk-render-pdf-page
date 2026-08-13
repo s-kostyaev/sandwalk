@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+import base64
+import hashlib
+import json
+import os
+import sys
+
+request = json.load(sys.stdin)
+assert request["protocol"] == "sandwalk.visual-render.v1"
+assert request["page"] == 1
+source = request["source_pdf"]
+output = request["output_directory"]
+os.mkdir(output)
+image_path = os.path.join(output, "page.png")
+image = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+with open(image_path, "wb") as stream:
+    stream.write(image)
+
+def sha256(path):
+    with open(path, "rb") as stream:
+        return hashlib.sha256(stream.read()).hexdigest()
+
+manifest = {
+    "protocol": "sandwalk.visual-render-manifest.v1",
+    "source_pdf_sha256": sha256(source),
+    "page": 1,
+    "page_count": 2,
+    "artifact": "page.png",
+    "image_sha256": sha256(image_path),
+    "image_size": len(image),
+    "width": 1,
+    "height": 1,
+    "render_profile": "poppler-png-144dpi-v1",
+    "renderer_version": "pdftocairo fake-1.0",
+}
+manifest_path = os.path.join(output, "manifest.json")
+with open(manifest_path, "w", encoding="utf-8") as stream:
+    json.dump(manifest, stream, sort_keys=True, separators=(",", ":"))
+    stream.write("\n")
+if os.environ.get("SANDWALK_TEST_EXTRA_VISUAL_ARTIFACT") == "1":
+    with open(os.path.join(output, "extra.txt"), "w", encoding="utf-8") as stream:
+        stream.write("not declared\n")
+result = dict(manifest)
+result.pop("artifact")
+result["protocol"] = "sandwalk.visual-render-result.v1"
+result["image_path"] = image_path
+result["manifest_path"] = manifest_path
+json.dump(result, sys.stdout, sort_keys=True, separators=(",", ":"))
+sys.stdout.write("\n")

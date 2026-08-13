@@ -1,5 +1,5 @@
   $ sandwalk init --slug typed-harness --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":25}}
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":26}}
 
   $ find workspaces/typed-harness -type d | sort
   workspaces/typed-harness
@@ -8,6 +8,7 @@
   workspaces/typed-harness/artifacts/resume
   workspaces/typed-harness/artifacts/snapshots
   workspaces/typed-harness/artifacts/temporary
+  workspaces/typed-harness/artifacts/visuals
   workspaces/typed-harness/artifacts/work
   workspaces/typed-harness/database
   workspaces/typed-harness/exports
@@ -15,7 +16,7 @@
 
   $ ./inspect_workspace.exe workspaces/typed-harness/database/sandwalk.sqlite3
   typed-harness|initialized
-  25
+  26
   wal
   ok
 
@@ -23,13 +24,13 @@
          2
 
   $ sandwalk status --slug typed-harness --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":25}}
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":26}}
 
   $ sandwalk init --slug second-workspace --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"second-workspace","phase":"initialized","schema_version":25}}
+  {"ok":true,"result":{"slug":"second-workspace","phase":"initialized","schema_version":26}}
 
   $ sandwalk list --directory-prefix workspaces
-  {"ok":true,"result":{"directory_prefix":"workspaces","workspaces":[{"slug":"second-workspace","phase":"initialized","schema_version":25},{"slug":"typed-harness","phase":"initialized","schema_version":25}]}}
+  {"ok":true,"result":{"directory_prefix":"workspaces","workspaces":[{"slug":"second-workspace","phase":"initialized","schema_version":26},{"slug":"typed-harness","phase":"initialized","schema_version":26}]}}
 
   $ sandwalk list --directory-prefix empty-workspaces
   {"ok":true,"result":{"directory_prefix":"empty-workspaces","workspaces":[]}}
@@ -45,7 +46,7 @@
          6
 
   $ SANDWALK_DIRECTORY_PREFIX=workspaces sandwalk status --slug typed-harness
-  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":25}}
+  {"ok":true,"result":{"slug":"typed-harness","phase":"initialized","schema_version":26}}
 
   $ sandwalk status --slug missing --directory-prefix workspaces
   {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace does not exist."}}

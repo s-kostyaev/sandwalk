@@ -111,7 +111,7 @@ the query is recorded.
 
   $ ./inspect_workspace.exe workspace/search-test/database/sandwalk.sqlite3
   search-test|researching
-  25
+  26
   wal
   ok
 
@@ -136,4 +136,4 @@ metadata before recording sanitized metadata for new searches.
   {}
   {}
   $ ./inspect_workspace.exe legacy-v24/database/sandwalk.sqlite3 | sed -n '2p'
-  25
+  26

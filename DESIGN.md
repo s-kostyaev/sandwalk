@@ -46,6 +46,7 @@ Public opaque references exist only when possession proves provenance:
 - `hit_...`: a result returned by a search adapter.
 - `snap_...`: an immutable retrieved and normalized document snapshot.
 - `excerpt_...`: an exact, validated fragment of one snapshot.
+- `visual_...`: an immutable rendered PDF page used as visual evidence.
 - `claim_...`: an exclusive capability for an agent working on one plan step.
 
 Plan steps and findings use human-readable keys. Logical sources, evidence
@@ -65,6 +66,7 @@ The workspace root is:
 ├── artifacts/
 │   ├── snapshots/
 │   ├── excerpts/
+│   ├── visuals/
 │   ├── resume/
 │   │   └── workspace.md
 │   ├── work/
@@ -769,27 +771,75 @@ exclusive end. Exact-text matching permits overlapping occurrences and
 `--occurrence` is one-based. Excerpt text is limited to 65,536 bytes. In
 `researching`, creation requires the active claim that owns the snapshot.
 
+## Visual evidence
+
+Visual evidence covers source meaning that cannot be faithfully represented by
+normalized text, such as charts, diagrams, spatial tables, formulas, and page
+layout. The first version supports PDF snapshots only and renders one complete,
+one-based page at a time:
+
+```console
+sandwalk visual create --slug <slug> --claim <claim> \
+  --snapshot <snapshot> --page 7 --description-file <path>
+```
+
+The description is a bounded agent-authored observation used for navigation
+and review; it is explicitly not source text. The PNG remains the evidence.
+Sandwalk never invokes a vision model. The surrounding harness must make the
+returned `image_path` available to a vision-capable agent and reviewer.
+
+Sandwalk resolves the retained PDF only from the immutable snapshot manifest;
+the agent cannot supply an arbitrary input path. The renderer adapter receives
+a versioned `sandwalk.visual-render.v1` request, runs offline, and publishes a
+`sandwalk.visual-render-result.v1` response with `page.png` plus a bounded
+manifest. The bundled profile uses Poppler at 144 DPI, caps page count, image
+dimensions, pixel count, and encoded size, and records the renderer version.
+The result binds:
+
+- the visual reference, source snapshot, and owning claim/step;
+- the retained PDF path and SHA-256;
+- one-based page number and total page count;
+- PNG path, dimensions, byte size, and SHA-256;
+- render profile, implementation version, and creation time;
+- the bounded observation text and its hash.
+
+Visual artifacts live under `artifacts/visuals/visual_.../`. Creating the same
+snapshot page with the same render profile is idempotent. A visual is valid only
+while its persisted PDF hash, PNG hash, and manifest hash still match the
+immutable artifacts. Raw GC preserves PDFs that back visual evidence. Creating
+a visual invalidates any older unapplied raw-cleanup plan in the same database;
+a newly generated plan excludes every backing snapshot.
+
+The continuation policy may present an excerpt-oriented packet because visual
+capture is a semantic choice rather than a deterministic default. A worker may
+perform this bounded evidence detour with its current claim, but must discard
+the old packet after the mutation and run `continue` to derive fresh work from
+durable state.
+
 ## Findings and evidence
 
 A finding has a human-readable key scoped to one plan step. Its evidence bundle
 is stored inside the finding rather than exposed as another reference type.
 
-Each attached excerpt has one relation:
+Each attached text excerpt or visual has one relation:
 
 - `supports`
 - `contradicts`
 - `qualifies`
 - `context`
 
-At least one current excerpt must use a claim-bearing relation (`supports`,
-`contradicts`, or `qualifies`) before a finding can be sealed. `context`
-evidence may supplement a bundle but cannot satisfy the seal gate by itself.
+At least one current text excerpt or visual must use a claim-bearing relation
+(`supports`, `contradicts`, or `qualifies`) before a finding can be sealed.
+`context` evidence may supplement a bundle but cannot satisfy the seal gate by
+itself.
 
 ```console
 sandwalk finding create --slug <slug> --step <step> \
   --claim <claim> --key <key> --claim-file <path>
 sandwalk finding attach --slug <slug> --finding <step>/<key> \
   --claim <claim> --excerpt <excerpt> --relation supports
+sandwalk finding attach --slug <slug> --finding <step>/<key> \
+  --claim <claim> --visual <visual> --relation supports
 sandwalk finding seal --slug <slug> --finding <step>/<key> --claim <claim>
 sandwalk finding review --slug <slug> --finding <step>/<key> \
   --claim <claim> --review-file <path>
@@ -812,13 +862,21 @@ capability that owns the named plan step; `--claim-file` is the statement
 content, not the claim capability.
 
 Finding reviews are bounded JSON using protocol
-`sandwalk.finding-review.v1`. They record one agent-authored verdict
-(`supported`, `partially-supported`, `unsupported`, or `contradicted`) plus a
-non-empty summary and explicit source-quality, conflict, and qualification
-notes. Sandwalk accepts a review only for the current sealed revision. Repeating
-the identical review is idempotent; a different review cannot silently replace
-it. Editing reviewed content creates a new draft revision, so the prior review
-is stale by construction.
+`sandwalk.finding-review.v1` for text-only findings. A finding containing visual
+evidence requires `sandwalk.finding-review.v2` and an exact
+`reviewed_visuals` list containing every current `visual_...` reference. This
+does not prove semantic correctness, but it prevents a text-only review from
+accidentally approving an unseen visual bundle. Reviews record one
+agent-authored verdict (`supported`, `partially-supported`, `unsupported`, or
+`contradicted`) plus a non-empty summary and explicit source-quality, conflict,
+and qualification notes. Sandwalk accepts a review only for the current sealed
+revision. Repeating the identical review is idempotent; a different review
+cannot silently replace it. Editing reviewed content creates a new draft
+revision, so the prior review is stale by construction.
+
+A finding revision may attach at most 256 distinct visual references, matching
+the bounded v2 review protocol. The same visual may carry more than one typed
+relation without consuming another visual slot.
 
 ## Validation gates
 
@@ -826,7 +884,7 @@ Before drafting:
 
 - required plan steps are complete;
 - included findings are sealed;
-- attached excerpts and snapshots are valid;
+- attached excerpts, visuals, and backing snapshots are valid;
 - finding revisions have current semantic reviews;
 - unsupported findings are excluded or revised.
 
@@ -834,11 +892,12 @@ Before drafting:
 sandwalk draft prepare --slug <slug>
 ```
 
-`draft prepare` rechecks the gate, validates every excerpt artifact against its
-durable hash, writes a deterministic bounded `exports/writer-pack.md`, and only
-then performs the checked `evidence-review → drafting` transition. The pack
-contains current reviewed claim text, exact evidence, provenance, and stable
-typed citation tokens. It is limited to 1 MiB.
+`draft prepare` rechecks the gate, validates every excerpt and visual artifact
+against durable hashes (including each visual's manifest and backing PDF),
+writes a deterministic bounded `exports/writer-pack.md`, and only then performs
+the checked `evidence-review → drafting` transition. The pack contains current
+reviewed claim text, exact evidence, provenance, and stable typed citation
+tokens. It is limited to 1 MiB.
 
 After drafting, Sandwalk splits the report into bounded citation-bearing blocks.
 A validation agent records whether each block is supported, partially

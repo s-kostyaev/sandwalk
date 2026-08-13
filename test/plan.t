@@ -1,5 +1,5 @@
   $ sandwalk init --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"initialized","schema_version":25}}
+  {"ok":true,"result":{"slug":"plan-test","phase":"initialized","schema_version":26}}
 
   $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
   >   --key primary-sources --title "Review primary sources"
@@ -21,7 +21,7 @@
   
 
   $ sandwalk status --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"planning","schema_version":25}}
+  {"ok":true,"result":{"slug":"plan-test","phase":"planning","schema_version":26}}
 
   $ sandwalk plan seal --slug plan-test --directory-prefix workspaces
   {"ok":false,"error":{"code":"PLAN_NOT_VALIDATED","message":"Plan must be validated before sealing."},"next":"'sandwalk' 'plan' 'validate' '--slug' 'plan-test' '--directory-prefix' 'workspaces'"}
@@ -91,7 +91,7 @@
   {"ok":true,"result":{"revision":3,"sealed":true,"already_sealed":true,"phase":"researching","plan_path":"workspaces/plan-test/exports/research-plan.md"}}
 
   $ sandwalk status --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","phase":"researching","schema_version":25}}
+  {"ok":true,"result":{"slug":"plan-test","phase":"researching","schema_version":26}}
 
   $ sandwalk plan add-step --slug plan-test --directory-prefix workspaces \
   >   --key too-late --title "Too late"
@@ -111,7 +111,7 @@
   [1]
 
   $ sandwalk resume --slug plan-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"plan-test","resume_path":"workspaces/plan-test/artifacts/resume/workspace.md","schema_version":25,"phase":"researching","action":"claim-step","reason":"The selected dependency-ready plan step has no active claim.","advisory":true,"alternatives_possible":true,"step":"primary-sources"},"next":"'sandwalk' 'step' 'claim' '--step' 'primary-sources' '--slug' 'plan-test' '--directory-prefix' 'workspaces'"}
+  {"ok":true,"result":{"slug":"plan-test","resume_path":"workspaces/plan-test/artifacts/resume/workspace.md","schema_version":26,"phase":"researching","action":"claim-step","reason":"The selected dependency-ready plan step has no active claim.","advisory":true,"alternatives_possible":true,"step":"primary-sources"},"next":"'sandwalk' 'step' 'claim' '--step' 'primary-sources' '--slug' 'plan-test' '--directory-prefix' 'workspaces'"}
 
   $ sed -n '/## Durable entities/,+6p' workspaces/plan-test/artifacts/resume/workspace.md
   ## Durable entities
@@ -137,7 +137,7 @@ Create a released-schema v1 fixture and prove the first plan mutation upgrades i
 
   $ ./inspect_workspace.exe legacy/legacy-test/database/sandwalk.sqlite3
   legacy-test|planning
-  25
+  26
   wal
   ok
 
@@ -155,7 +155,7 @@ Create a released-schema v3 fixture and seal it through the v4 migration.
 
   $ ./inspect_workspace.exe legacy-v3/v3-test/database/sandwalk.sqlite3
   v3-test|researching
-  25
+  26
   wal
   ok
 
@@ -173,6 +173,6 @@ Create a released-schema v2 fixture and validate it through the v4 migration.
 
   $ ./inspect_workspace.exe legacy-v2/v2-test/database/sandwalk.sqlite3
   v2-test|planning
-  25
+  26
   wal
   ok

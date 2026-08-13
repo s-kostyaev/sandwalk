@@ -1,19 +1,19 @@
   $ sandwalk init --slug recovery-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"recovery-test","phase":"initialized","schema_version":25}}
+  {"ok":true,"result":{"slug":"recovery-test","phase":"initialized","schema_version":26}}
 
 Simulate a command whose process exited before recording its terminal event.
 
   $ printf '%s\n' '{"version":1,"event":"command.started","invocation_id":"crashed-1","timestamp":"2026-07-01 12:00:00Z","command":"plan add-step","phase":"initialized","claim":null,"step":null,"raw_argv":[],"arguments":{},"consumed_references":[],"created_references":[],"state_changes":[],"hint":null}' >> workspaces/recovery-test/logs/events.jsonl
 
   $ sandwalk resume --slug recovery-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"recovery-test","resume_path":"workspaces/recovery-test/artifacts/resume/workspace.md","schema_version":25,"phase":"initialized","action":"start-reconnaissance","reason":"Workspace scope and plan are not yet defined.","advisory":true,"alternatives_possible":true},"next":"'sandwalk' 'recon' 'start' '--goal-file' 'goal.md' '--slug' 'recovery-test' '--directory-prefix' 'workspaces'"}
+  {"ok":true,"result":{"slug":"recovery-test","resume_path":"workspaces/recovery-test/artifacts/resume/workspace.md","schema_version":26,"phase":"initialized","action":"start-reconnaissance","reason":"Workspace scope and plan are not yet defined.","advisory":true,"alternatives_possible":true},"next":"'sandwalk' 'recon' 'start' '--goal-file' 'goal.md' '--slug' 'recovery-test' '--directory-prefix' 'workspaces'"}
 
   $ cat workspaces/recovery-test/artifacts/resume/workspace.md
   # Sandwalk resume pack
   
   - Workspace: "recovery-test"
   - Phase: initialized
-  - Schema version: 25
+  - Schema version: 26
   
   ## Step objective and scope
   
@@ -132,7 +132,7 @@ Recovery upgrades legacy state before generating guidance.
   >   legacy/legacy-recovery/database/sandwalk.sqlite3 legacy-recovery
 
   $ sandwalk resume --slug legacy-recovery --directory-prefix legacy
-  {"ok":true,"result":{"slug":"legacy-recovery","resume_path":"legacy/legacy-recovery/artifacts/resume/workspace.md","schema_version":25,"phase":"researching","action":"claim-step","reason":"The selected dependency-ready plan step has no active claim.","advisory":true,"alternatives_possible":true,"step":"fixture-step"},"next":"'sandwalk' 'step' 'claim' '--step' 'fixture-step' '--slug' 'legacy-recovery' '--directory-prefix' 'legacy'"}
+  {"ok":true,"result":{"slug":"legacy-recovery","resume_path":"legacy/legacy-recovery/artifacts/resume/workspace.md","schema_version":26,"phase":"researching","action":"claim-step","reason":"The selected dependency-ready plan step has no active claim.","advisory":true,"alternatives_possible":true,"step":"fixture-step"},"next":"'sandwalk' 'step' 'claim' '--step' 'fixture-step' '--slug' 'legacy-recovery' '--directory-prefix' 'legacy'"}
 
   $ ./inspect_workspace.exe --inspect-claims \
   >   legacy/legacy-recovery/database/sandwalk.sqlite3
@@ -146,4 +146,4 @@ Recovery upgrades legacy state before generating guidance.
   
   - Workspace: "legacy-recovery"
   - Phase: researching
-  - Schema version: 25
+  - Schema version: 26

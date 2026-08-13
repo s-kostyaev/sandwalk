@@ -7,7 +7,8 @@ and renders citations without invoking an LLM.
 The initial end-to-end workflow includes workspace recovery, append-only plans,
 durable exclusive claims, SearXNG web search, local-document and GNU Info
 search, immutable structured Markdown or plain-text snapshots, exact excerpts,
-reviewed findings, packet-driven continuation, and citation-safe finalization.
+immutable PDF-page visual evidence, reviewed findings, packet-driven
+continuation, and citation-safe finalization.
 Local discovery uses `ugrep+`; the bundled local-file connector preserves ordinary source text
 as `text/plain` and delegates rich documents to Docling. The Docling connector
 retains Markdown headings and subheadings for `mq`, the original file, and
@@ -107,6 +108,10 @@ type is used:
 - `pandoc` and `curl` for web page/PDF retrieval and PDF export paths. PDF
   export additionally requires `xelatex` and fontconfig's `fc-match`; the
   exporter selects installed fonts with Russian Cyrillic support.
+- Poppler's `pdfinfo` and `pdftocairo` for optional PDF-page visual evidence.
+  Sandwalk renders one full page at a fixed 144 DPI profile, bounds dimensions
+  and output size, and never invokes a vision model itself. `shasum` is used to
+  revalidate the retained backing PDF before drafting.
 - `uv` for the pinned Playwright browser fallback. Install its matching
   Chromium runtime once with
   `uv run --with playwright==1.55.0 playwright install chromium`.
@@ -180,6 +185,34 @@ profile until `search-service update` is requested. Idle shutdown uses one
 detached watchdog with a 900-second default timeout; setting it to `0`
 disables the watchdog. Parallel searches share an activity guard while
 lifecycle operations take ownership locks.
+
+## Visual evidence
+
+When text extraction loses a diagram, page layout, handwritten annotation, or
+other materially visual content, a claimed worker can render one retained PDF
+page into immutable evidence:
+
+```console
+sandwalk visual create --slug <slug> --claim <claim_id> \
+  --snapshot <snapshot_id> --page <one-based-page> \
+  --description-file <observation.md>
+sandwalk finding attach --slug <slug> --claim <claim_id> \
+  --finding <step>/<finding> --visual <visual_id> --relation supports
+```
+
+The input must be a PDF retained by the snapshot manifest; arbitrary filesystem
+paths are rejected. The published artifact contains `page.png` and a render
+manifest under `artifacts/visuals/<visual_id>/`. The description is a bounded
+agent observation and is explicitly not treated as source text.
+
+Findings with visual evidence use `sandwalk.finding-review.v2`. Review packets
+include every `image_path`; a vision-capable reviewer must inspect each image
+and copy the exact visual references into `reviewed_visuals`. This prevents a
+text-only review from silently approving an unseen image. Writer packs preserve
+the image path, source URL, snapshot, page number, and the non-source
+description for downstream vision-capable models. A finding revision can bind
+up to 256 distinct visual references; additional relations to the same visual
+do not consume another slot.
 
 ## Development
 

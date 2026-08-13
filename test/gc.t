@@ -27,7 +27,7 @@ Plans are hash-bound and cannot be edited before apply.
 
   $ ./inspect_workspace.exe workspace/gc-test/database/sandwalk.sqlite3
   gc-test|completed
-  25
+  26
   wal
   ok
 
