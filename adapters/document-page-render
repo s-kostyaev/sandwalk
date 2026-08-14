@@ -81,8 +81,23 @@ def regular_nonsymlink(path: Path) -> os.stat_result:
     return status
 
 
-def convert_with_libreoffice(source: Path, workspace: Path) -> tuple[Path, str]:
+def find_libreoffice() -> str | None:
     executable = shutil.which("soffice") or shutil.which("libreoffice")
+    if executable is not None:
+        return executable
+    if sys.platform == "darwin":
+        application_executable = Path(
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        )
+        if application_executable.is_file() and os.access(
+            application_executable, os.X_OK
+        ):
+            return str(application_executable)
+    return None
+
+
+def convert_with_libreoffice(source: Path, workspace: Path) -> tuple[Path, str]:
+    executable = find_libreoffice()
     if executable is None:
         fail("LibreOffice is required to render this document format", 69)
     profile = workspace / "profile"

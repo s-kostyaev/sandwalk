@@ -111,8 +111,9 @@ type is used:
 - Poppler's `pdfinfo` and `pdftocairo` for optional page visual evidence.
   Sandwalk renders one full page at a fixed 144 DPI profile, bounds dimensions
   and output size, and never invokes a vision model itself. Non-PDF rich
-  documents additionally require `soffice` or `libreoffice` on `PATH`; the
-  bundled adapter performs an isolated headless conversion in a temporary
+  documents additionally require `soffice` or `libreoffice` on `PATH` (the
+  standard macOS `/Applications/LibreOffice.app` installation is also detected);
+  the bundled adapter performs an isolated headless conversion in a temporary
   profile before using Poppler. `shasum` revalidates the retained original
   before drafting.
 - `uv` for the pinned Playwright browser fallback. Install its matching
