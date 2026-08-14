@@ -627,6 +627,7 @@ module Writer_pack = struct
     ; visual : string
     ; snapshot : string
     ; source_url : string
+    ; source_format : string
     ; page : int
     ; image_path : string
     ; description : string
@@ -673,6 +674,7 @@ module Writer_pack = struct
         ~visual
         ~snapshot
         ~source_url
+        ~source_format
         ~page
         ~image_path
         ~description
@@ -686,6 +688,7 @@ module Writer_pack = struct
       ; visual
       ; snapshot
       ; source_url
+      ; source_format
       ; page
       ; image_path
       ; description
@@ -743,7 +746,8 @@ module Writer_pack = struct
           ; ""
           ; "- Source: " ^ item.source_url
           ; "- Snapshot: " ^ item.snapshot
-          ; sprintf "- PDF page: %d" item.page
+          ; "- Source format: " ^ String.uppercase item.source_format
+          ; sprintf "- Source page: %d" item.page
           ; "- Image: " ^ item.image_path
           ; "- Agent observation (not source text): " ^ String.strip item.description
           ; ""

@@ -116,15 +116,20 @@ media type; never treat the search snippet as document content.
 
 When the source meaning depends on a diagram, page layout, handwriting, or
 another visual feature that normalized text does not preserve, use
-`sandwalk visual create` on the retained PDF snapshot page. It accepts only the
-PDF named by the immutable snapshot manifest, renders one full page with a
-bounded fixed profile, and never invokes a model. Inspect the returned PNG with
-vision before attaching it. The required description is your short observation
-for navigation; it is not a quotation and cannot substitute for inspecting the
-image. Prefer exact excerpts for ordinary textual claims. Visual capture is a
-permitted bounded detour from a current excerpt/finding packet: create and
-attach the visual with the current claim, do not apply the now-stale packet,
-then run `sandwalk continue` to derive a fresh packet from durable state.
+`sandwalk visual create` on the retained rich-document snapshot page. It accepts
+only a supported paginated artifact named by the immutable snapshot manifest,
+renders one full page with a bounded fixed profile, and never invokes a model.
+PDF is direct; Office, OpenDocument, RTF, EPUB/FB2, Visio, and Publisher inputs
+use a temporary LibreOffice-to-PDF conversion before Poppler. Treat the returned
+PNG—not page numbering from another native viewer—as authoritative visual
+evidence, because font availability and renderer differences can affect
+non-PDF pagination. Inspect the PNG with vision before attaching it. The
+required description is your short observation for navigation; it is not a
+quotation and cannot substitute for inspecting the image. Prefer exact excerpts
+for ordinary textual claims. Visual capture is a permitted bounded detour from
+a current excerpt/finding packet: create and attach the visual with the current
+claim, do not apply the now-stale packet, then run `sandwalk continue` to derive
+a fresh packet from durable state.
 
 The explicit `sandwalk-fetch-xberg` alternative targets the Xberg v1 CLI and
 is intended for simple local documents where its lower operational cost is
@@ -178,9 +183,9 @@ audio, or captions outside Sandwalk.
    hits, and read only the necessary portions of the returned immutable
    primary documents.
 6. Create exact excerpts and, only when material visual content requires it,
-   bounded PDF-page visuals. Write narrow findings, attach evidence with typed
-   relations, seal each finding revision, and review it against every attached
-   artifact.
+   bounded rich-document page visuals. Write narrow findings, attach evidence
+   with typed relations, seal each finding revision, and review it against every
+   attached artifact.
    Prefer an independent validation worker; with one worker, perform the review
    as a separate evidence-only pass.
 7. Complete the claim only after its current findings pass review. Repeat until

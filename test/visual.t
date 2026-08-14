@@ -1,4 +1,5 @@
-Visual evidence is an immutable, bounded rendering of one retained PDF page.
+Visual evidence is an immutable, bounded rendering of one retained
+rich-document page.
 
   $ mkdir -p workspace/visual-test/database workspace/visual-test/logs \
   >   workspace/visual-test/exports workspace/visual-test/artifacts/temporary \
@@ -21,7 +22,7 @@ Visual evidence is an immutable, bounded rendering of one retained PDF page.
   >   --claim claim_00000000000000000000000000000001 \
   >   --snapshot "$snapshot" --page 1 \
   >   --description-file observation.md \
-  >   --adapter "$PWD/fakes/sandwalk-render-pdf-page")
+  >   --adapter "$PWD/fakes/sandwalk-render-document-page")
   $ printf '%s\n' "$rendered" | sed -E \
   >   -e 's/visual_[0-9a-f]{32}/visual_ID/g' \
   >   -e 's/snap_[0-9a-f]{32}/snap_ID/g' \
@@ -38,11 +39,67 @@ The same snapshot page and render profile are idempotent.
   >   --claim claim_00000000000000000000000000000001 \
   >   --snapshot "$snapshot" --page 1 \
   >   --description-file observation.md \
-  >   --adapter "$PWD/fakes/sandwalk-render-pdf-page" | \
+  >   --adapter "$PWD/fakes/sandwalk-render-document-page" | \
   >   sed -E -e 's/visual_[0-9a-f]{32}/visual_ID/g' -e 's/snap_[0-9a-f]{32}/snap_ID/g'
   {"ok":true,"result":{"visual":"visual_ID","created":false,"snapshot":"snap_ID","page":1,"page_count":2,"image":"workspace/visual-test/artifacts/visuals/visual_ID/page.png","render_profile":"poppler-png-144dpi-v1"}}
   $ find workspace/visual-test/artifacts/visuals -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' '
   1
+
+The same command resolves an extension-preserving rich-document original from
+the immutable snapshot and records the complete conversion-and-render profile.
+
+  $ mkdir -p workspace/visual-rich/database workspace/visual-rich/logs \
+  >   workspace/visual-rich/exports workspace/visual-rich/artifacts/temporary \
+  >   workspace/visual-rich/artifacts/visuals
+  $ ./inspect_workspace.exe --create-v7 \
+  >   workspace/visual-rich/database/sandwalk.sqlite3 visual-rich
+  $ rich_fetched=$(SANDWALK_TEST_VISUAL_FORMAT=docx PATH="$PWD/fakes:$PATH" \
+  >   sandwalk fetch --slug visual-rich --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --adapter "$PWD/fakes/sandwalk-fetch-pdf" \
+  >   hit_00000000000000000000000000000001)
+  $ rich_snapshot=$(printf '%s' "$rich_fetched" | jq -r '.result.snapshot')
+  $ rich_rendered=$(PATH="$PWD/fakes:$PATH" sandwalk visual create \
+  >   --slug visual-rich --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --snapshot "$rich_snapshot" --page 1 \
+  >   --description-file observation.md \
+  >   --adapter "$PWD/../adapters/document-page-render")
+  $ printf '%s\n' "$rich_rendered" | jq -c \
+  >   '.result | {created,page,page_count,render_profile}'
+  {"created":true,"page":1,"page_count":3,"render_profile":"libreoffice-pdf-poppler-png-144dpi-v1"}
+  $ rich_visual=$(printf '%s' "$rich_rendered" | jq -r '.result.visual')
+  $ jq -r '[.source_format, .render_profile] | @tsv' \
+  >   "workspace/visual-rich/artifacts/visuals/$rich_visual/manifest.json"
+  docx	libreoffice-pdf-poppler-png-144dpi-v1
+  $ find "workspace/visual-rich/artifacts/visuals/$rich_visual" -mindepth 1 -maxdepth 1 -type f | \
+  >   sed "s#$rich_visual#visual_ID#" | sort
+  workspace/visual-rich/artifacts/visuals/visual_ID/manifest.json
+  workspace/visual-rich/artifacts/visuals/visual_ID/page.png
+
+A structured but non-paginated message snapshot does not acquire invented page
+semantics.
+
+  $ mkdir -p workspace/visual-unpaged/database workspace/visual-unpaged/logs \
+  >   workspace/visual-unpaged/exports workspace/visual-unpaged/artifacts/temporary \
+  >   workspace/visual-unpaged/artifacts/visuals
+  $ ./inspect_workspace.exe --create-v7 \
+  >   workspace/visual-unpaged/database/sandwalk.sqlite3 visual-unpaged
+  $ unpaged_fetched=$(SANDWALK_TEST_VISUAL_FORMAT=msg PATH="$PWD/fakes:$PATH" \
+  >   sandwalk fetch --slug visual-unpaged --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --adapter "$PWD/fakes/sandwalk-fetch-pdf" \
+  >   hit_00000000000000000000000000000001)
+  $ unpaged_snapshot=$(printf '%s' "$unpaged_fetched" | jq -r '.result.snapshot')
+  $ unpaged_render=$(PATH="$PWD/fakes:$PATH" sandwalk visual create \
+  >   --slug visual-unpaged --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --snapshot "$unpaged_snapshot" --page 1 \
+  >   --description-file observation.md \
+  >   --adapter "$PWD/fakes/sandwalk-render-document-page")
+  [1]
+  $ printf '%s\n' "$unpaged_render" | sed -E 's/snap_[0-9a-f]{32}/snap_ID/g'
+  {"ok":false,"error":{"code":"SNAPSHOT_VISUAL_SOURCE_NOT_FOUND","message":"Snapshot \"snap_ID\" does not retain a supported paginated source artifact."}}
 
 Renderer output is a closed two-file set; undeclared artifacts are rejected.
 
@@ -50,13 +107,24 @@ Renderer output is a closed two-file set; undeclared artifacts are rejected.
   >   sandwalk visual create --slug visual-test --directory-prefix workspace \
   >   --claim claim_00000000000000000000000000000001 \
   >   --snapshot "$snapshot" --page 1 --description-file observation.md \
-  >   --adapter "$PWD/fakes/sandwalk-render-pdf-page"
+  >   --adapter "$PWD/fakes/sandwalk-render-document-page"
   {"ok":false,"error":{"code":"VISUAL_RENDER_ARTIFACT_ERROR","message":"Visual render output must contain only the bounded regular artifacts."}}
   [1]
   $ find workspace/visual-test/artifacts/visuals -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' '
   1
   $ find workspace/visual-test/artifacts/temporary -name 'visual-*' | wc -l | tr -d ' '
   0
+
+The CLI independently hashes the render input instead of trusting adapter
+provenance.
+
+  $ SANDWALK_TEST_BAD_RENDER_INPUT_HASH=1 PATH="$PWD/fakes:$PATH" \
+  >   sandwalk visual create --slug visual-test --directory-prefix workspace \
+  >   --claim claim_00000000000000000000000000000001 \
+  >   --snapshot "$snapshot" --page 1 --description-file observation.md \
+  >   --adapter "$PWD/fakes/sandwalk-render-document-page"
+  {"ok":false,"error":{"code":"VISUAL_RENDER_ARTIFACT_ERROR","message":"Rendered visual does not match its manifest."}}
+  [1]
 
 Visuals attach through the same typed relation as exact excerpts.
 
@@ -120,10 +188,10 @@ agent observation as non-source text.
   
   - Source: https://example.test/start
   - Snapshot: snap_ID
-  - PDF page: 1
+  - Source format: PDF
+  - Source page: 1
   - Image: workspace/visual-test/artifacts/visuals/visual_ID/page.png
   - Agent observation (not source text): The page contains the fixture diagram and its labels.
-  
 
 Visual-only findings retain their source provenance through finalization.
 
@@ -172,8 +240,8 @@ A retained PDF cannot escape its immutable snapshot through a symlinked parent.
   >   --claim claim_00000000000000000000000000000001 \
   >   --snapshot "$symlink_snapshot" --page 1 \
   >   --description-file observation.md \
-  >   --adapter "$PWD/fakes/sandwalk-render-pdf-page"
-  {"ok":false,"error":{"code":"VISUAL_RENDER_ARTIFACT_ERROR","message":"Retained PDF must be a regular non-symlink snapshot artifact."}}
+  >   --adapter "$PWD/fakes/sandwalk-render-document-page"
+  {"ok":false,"error":{"code":"VISUAL_RENDER_ARTIFACT_ERROR","message":"Retained source must be a bounded regular non-symlink snapshot artifact."}}
   [1]
 
 The 256-reference review bound is enforced before a finding becomes impossible
@@ -195,7 +263,7 @@ to review; another relation to an existing visual would not consume a slot.
   >   --claim claim_00000000000000000000000000000001 \
   >   --snapshot "$limit_snapshot" --page 1 \
   >   --description-file observation.md \
-  >   --adapter "$PWD/fakes/sandwalk-render-pdf-page")
+  >   --adapter "$PWD/fakes/sandwalk-render-document-page")
   $ limit_visual=$(printf '%s' "$limit_render" | jq -r '.result.visual')
   $ printf 'Bounded visual bundle.\n' > limit-finding.md
   $ sandwalk finding create --slug visual-limit --directory-prefix workspace \

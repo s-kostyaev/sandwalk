@@ -7,7 +7,7 @@ and renders citations without invoking an LLM.
 The initial end-to-end workflow includes workspace recovery, append-only plans,
 durable exclusive claims, SearXNG web search, local-document and GNU Info
 search, immutable structured Markdown or plain-text snapshots, exact excerpts,
-immutable PDF-page visual evidence, reviewed findings, packet-driven
+immutable rich-document page visual evidence, reviewed findings, packet-driven
 continuation, and citation-safe finalization.
 Local discovery uses `ugrep+`; the bundled local-file connector preserves ordinary source text
 as `text/plain` and delegates rich documents to Docling. The Docling connector
@@ -108,10 +108,13 @@ type is used:
 - `pandoc` and `curl` for web page/PDF retrieval and PDF export paths. PDF
   export additionally requires `xelatex` and fontconfig's `fc-match`; the
   exporter selects installed fonts with Russian Cyrillic support.
-- Poppler's `pdfinfo` and `pdftocairo` for optional PDF-page visual evidence.
+- Poppler's `pdfinfo` and `pdftocairo` for optional page visual evidence.
   Sandwalk renders one full page at a fixed 144 DPI profile, bounds dimensions
-  and output size, and never invokes a vision model itself. `shasum` is used to
-  revalidate the retained backing PDF before drafting.
+  and output size, and never invokes a vision model itself. Non-PDF rich
+  documents additionally require `soffice` or `libreoffice` on `PATH`; the
+  bundled adapter performs an isolated headless conversion in a temporary
+  profile before using Poppler. `shasum` revalidates the retained original
+  before drafting.
 - `uv` for the pinned Playwright browser fallback. Install its matching
   Chromium runtime once with
   `uv run --with playwright==1.55.0 playwright install chromium`.
@@ -189,8 +192,8 @@ lifecycle operations take ownership locks.
 ## Visual evidence
 
 When text extraction loses a diagram, page layout, handwritten annotation, or
-other materially visual content, a claimed worker can render one retained PDF
-page into immutable evidence:
+other materially visual content, a claimed worker can render one retained
+rich-document page into immutable evidence:
 
 ```console
 sandwalk visual create --slug <slug> --claim <claim_id> \
@@ -200,10 +203,25 @@ sandwalk finding attach --slug <slug> --claim <claim_id> \
   --finding <step>/<finding> --visual <visual_id> --relation supports
 ```
 
-The input must be a PDF retained by the snapshot manifest; arbitrary filesystem
-paths are rejected. The published artifact contains `page.png` and a render
-manifest under `artifacts/visuals/<visual_id>/`. The description is a bounded
-agent observation and is explicitly not treated as source text.
+The input is resolved from the original or PDF artifact named by the snapshot
+manifest; arbitrary filesystem paths are rejected. PDF is rendered directly.
+RTF, Word, PowerPoint, Excel, OpenDocument, EPUB, FB2, Visio, and Publisher
+inputs are converted to a temporary PDF by LibreOffice and then rendered by
+Poppler. Formats without stable page semantics, such as MSG, are rejected.
+Only `page.png` and its render manifest are published under
+`artifacts/visuals/<visual_id>/`; the temporary PDF and private LibreOffice
+profile are removed after Sandwalk independently checks the intermediate PDF's
+path, type, signature, size, and SHA-256. The manifest binds the original hash
+and format, transient PDF hash, complete render profile, implementation
+versions, and image hash.
+The description is a bounded agent observation and is explicitly not treated
+as source text.
+
+For non-PDF inputs, the image is evidence of LibreOffice's rendering of the
+retained original. Missing fonts or differences from Microsoft Office or other
+native applications can change pagination and appearance, so page numbers and
+layout should be reviewed against the generated PNG rather than assumed from a
+different viewer.
 
 Findings with visual evidence use `sandwalk.finding-review.v2`. Review packets
 include every `image_path`; a vision-capable reviewer must inspect each image

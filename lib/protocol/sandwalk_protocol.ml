@@ -828,7 +828,10 @@ module Visual_render = struct
   type t =
     { image_path : string
     ; manifest_path : string
-    ; source_pdf_sha256 : string
+    ; render_input_path : string
+    ; source_sha256 : string
+    ; render_input_sha256 : string
+    ; source_format : string
     ; image_sha256 : string
     ; image_size : int
     ; width : int
@@ -844,10 +847,11 @@ module Visual_render = struct
     | Unsupported_protocol
   [@@deriving sexp_of]
 
-  let request ~source_pdf ~output_directory ~page =
+  let request ~source_document ~source_format ~output_directory ~page =
     `Assoc
       [ "protocol", `String "sandwalk.visual-render.v1"
-      ; "source_pdf", `String source_pdf
+      ; "source_document", `String source_document
+      ; "source_format", `String source_format
       ; "output_directory", `String output_directory
       ; "page", `Int page
       ]
@@ -874,6 +878,15 @@ module Visual_render = struct
     | Some _ | None -> None
   ;;
 
+  let valid_source_format value =
+    let length = String.length value in
+    length >= 1
+    && length <= 16
+    && String.for_all value ~f:(function
+      | '0' .. '9' | 'a' .. 'z' -> true
+      | _ -> false)
+  ;;
+
   let decode = function
     | `Assoc fields ->
       (match List.Assoc.find fields "protocol" ~equal:String.equal with
@@ -884,14 +897,26 @@ module Visual_render = struct
            let%bind manifest_path =
              bounded_string fields "manifest_path" ~maximum:16_384
            in
-           let%bind source_pdf_sha256 =
-             bounded_string fields "source_pdf_sha256" ~maximum:64
+           let%bind render_input_path =
+             bounded_string fields "render_input_path" ~maximum:16_384
+           in
+           let%bind source_sha256 =
+             bounded_string fields "source_sha256" ~maximum:64
+           in
+           let%bind source_format =
+             bounded_string fields "source_format" ~maximum:16
            in
            let%bind image_sha256 =
              bounded_string fields "image_sha256" ~maximum:64
            in
+           let%bind render_input_sha256 =
+             bounded_string fields "render_input_sha256" ~maximum:64
+           in
            let%bind () =
-             if sha256 source_pdf_sha256 && sha256 image_sha256
+             if sha256 source_sha256
+                && valid_source_format source_format
+                && sha256 image_sha256
+                && sha256 render_input_sha256
              then Some ()
              else None
            in
@@ -915,7 +940,10 @@ module Visual_render = struct
            Some
              { image_path
              ; manifest_path
-             ; source_pdf_sha256
+             ; render_input_path
+             ; source_sha256
+             ; source_format
+             ; render_input_sha256
              ; image_sha256
              ; image_size
              ; width
@@ -934,7 +962,10 @@ module Visual_render = struct
 
   let image_path t = t.image_path
   let manifest_path t = t.manifest_path
-  let source_pdf_sha256 t = t.source_pdf_sha256
+  let render_input_path t = t.render_input_path
+  let source_sha256 t = t.source_sha256
+  let source_format t = t.source_format
+  let render_input_sha256 t = t.render_input_sha256
   let image_sha256 t = t.image_sha256
   let image_size t = t.image_size
   let width t = t.width

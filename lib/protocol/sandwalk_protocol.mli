@@ -188,7 +188,8 @@ module Visual_render : sig
   [@@deriving sexp_of]
 
   val request
-    :  source_pdf:string
+    :  source_document:string
+    -> source_format:string
     -> output_directory:string
     -> page:int
     -> Yojson.Safe.t
@@ -196,7 +197,10 @@ module Visual_render : sig
   val decode : Yojson.Safe.t -> (t, error) Result.t
   val image_path : t -> string
   val manifest_path : t -> string
-  val source_pdf_sha256 : t -> string
+  val render_input_path : t -> string
+  val source_sha256 : t -> string
+  val source_format : t -> string
+  val render_input_sha256 : t -> string
   val image_sha256 : t -> string
   val image_size : t -> int
   val width : t -> int

@@ -46,7 +46,8 @@ Public opaque references exist only when possession proves provenance:
 - `hit_...`: a result returned by a search adapter.
 - `snap_...`: an immutable retrieved and normalized document snapshot.
 - `excerpt_...`: an exact, validated fragment of one snapshot.
-- `visual_...`: an immutable rendered PDF page used as visual evidence.
+- `visual_...`: an immutable rendered rich-document page used as visual
+  evidence.
 - `claim_...`: an exclusive capability for an agent working on one plan step.
 
 Plan steps and findings use human-readable keys. Logical sources, evidence
@@ -775,8 +776,8 @@ exclusive end. Exact-text matching permits overlapping occurrences and
 
 Visual evidence covers source meaning that cannot be faithfully represented by
 normalized text, such as charts, diagrams, spatial tables, formulas, and page
-layout. The first version supports PDF snapshots only and renders one complete,
-one-based page at a time:
+layout. It renders one complete, one-based page at a time from a paginated
+source artifact retained by the immutable snapshot manifest:
 
 ```console
 sandwalk visual create --slug <slug> --claim <claim> \
@@ -788,27 +789,46 @@ and review; it is explicitly not source text. The PNG remains the evidence.
 Sandwalk never invokes a vision model. The surrounding harness must make the
 returned `image_path` available to a vision-capable agent and reviewer.
 
-Sandwalk resolves the retained PDF only from the immutable snapshot manifest;
-the agent cannot supply an arbitrary input path. The renderer adapter receives
-a versioned `sandwalk.visual-render.v1` request, runs offline, and publishes a
+Sandwalk resolves the retained source only from the immutable snapshot
+manifest; the agent cannot supply an arbitrary input path. Supported sources
+are PDF, RTF, Word, PowerPoint, Excel, OpenDocument text/presentation/sheet/
+drawing, EPUB, FB2, Visio, and Publisher artifacts. The exact accepted
+extensions are shared with the bundled renderer contract. Structured formats
+without stable page semantics, including message files, remain valid text
+normalization inputs but cannot become page visual evidence.
+
+The renderer adapter receives a versioned `sandwalk.visual-render.v1` request
+containing the resolved source path, its validated lowercase format, the page,
+and a Sandwalk-controlled output directory. It publishes a
 `sandwalk.visual-render-result.v1` response with `page.png` plus a bounded
-manifest. The bundled profile uses Poppler at 144 DPI, caps page count, image
-dimensions, pixel count, and encoded size, and records the renderer version.
-The result binds:
+manifest. PDF is rasterized directly. Other supported formats are converted by
+LibreOffice in headless safe mode using a fresh private user profile and a
+Sandwalk temporary directory; the converted PDF and profile are deleted before
+publication. The adapter leaves the converted PDF only in its controlled
+staging directory long enough for Sandwalk to validate its regular-file status,
+PDF signature, bound, exact path, and SHA-256; Sandwalk then deletes it and
+rechecks the closed two-file output set. Poppler renders the selected page at
+144 DPI. The adapter
+caps source and intermediate size, conversion and rendering time, page count,
+image dimensions, pixel count, and encoded size. The published directory is a
+closed two-file set. The result binds:
 
 - the visual reference, source snapshot, and owning claim/step;
-- the retained PDF path and SHA-256;
+- the retained source artifact, lowercase format, and SHA-256;
+- the transient PDF SHA-256, complete conversion/render profile, and
+  LibreOffice/Poppler implementation versions;
 - one-based page number and total page count;
 - PNG path, dimensions, byte size, and SHA-256;
 - render profile, implementation version, and creation time;
 - the bounded observation text and its hash.
 
 Visual artifacts live under `artifacts/visuals/visual_.../`. Creating the same
-snapshot page with the same render profile is idempotent. A visual is valid only
-while its persisted PDF hash, PNG hash, and manifest hash still match the
-immutable artifacts. Raw GC preserves PDFs that back visual evidence. Creating
-a visual invalidates any older unapplied raw-cleanup plan in the same database;
-a newly generated plan excludes every backing snapshot.
+snapshot page with the same complete render profile is idempotent. A visual is
+valid only while its persisted source hash, PNG hash, and manifest hash still
+match the immutable artifacts. Raw GC preserves every original rich document
+that backs visual evidence. Creating a visual invalidates any older unapplied
+raw-cleanup plan in the same database; a newly generated plan excludes every
+backing snapshot.
 
 The continuation policy may present an excerpt-oriented packet because visual
 capture is a semantic choice rather than a deterministic default. A worker may
@@ -893,7 +913,7 @@ sandwalk draft prepare --slug <slug>
 ```
 
 `draft prepare` rechecks the gate, validates every excerpt and visual artifact
-against durable hashes (including each visual's manifest and backing PDF),
+against durable hashes (including each visual's manifest and backing source),
 writes a deterministic bounded `exports/writer-pack.md`, and only then performs
 the checked `evidence-review → drafting` transition. The pack contains current
 reviewed claim text, exact evidence, provenance, and stable typed citation

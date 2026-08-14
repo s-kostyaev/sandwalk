@@ -194,8 +194,9 @@ module Visual_evidence = struct
     ; step_key : Sandwalk_core.Plan_step.Key.t
     ; image_path : string
     ; manifest_path : string
-    ; source_pdf_artifact : string
-    ; source_pdf_sha256 : string
+    ; source_artifact : string
+    ; source_sha256 : string
+    ; source_format : string
     ; page : int
     ; page_count : int
     ; image_sha256 : string
@@ -215,8 +216,9 @@ module Visual_evidence = struct
   let step_key t = t.step_key
   let image_path t = t.image_path
   let manifest_path t = t.manifest_path
-  let source_pdf_artifact t = t.source_pdf_artifact
-  let source_pdf_sha256 t = t.source_pdf_sha256
+  let source_artifact t = t.source_artifact
+  let source_sha256 t = t.source_sha256
+  let source_format t = t.source_format
   let page t = t.page
   let page_count t = t.page_count
   let image_sha256 t = t.image_sha256
@@ -360,10 +362,11 @@ module Writer_visual = struct
     ; image_sha256 : string
     ; manifest_path : string
     ; manifest_md5 : string
-    ; source_pdf_root : string
-    ; source_pdf_artifact : string
-    ; source_pdf_path : string
-    ; source_pdf_sha256 : string
+    ; source_root : string
+    ; source_artifact : string
+    ; source_path : string
+    ; source_sha256 : string
+    ; source_format : string
     ; description : string
     ; description_md5 : string
     ; snapshot : string
@@ -382,10 +385,11 @@ module Writer_visual = struct
   let image_sha256 t = t.image_sha256
   let manifest_path t = t.manifest_path
   let manifest_md5 t = t.manifest_md5
-  let source_pdf_root t = t.source_pdf_root
-  let source_pdf_artifact t = t.source_pdf_artifact
-  let source_pdf_path t = t.source_pdf_path
-  let source_pdf_sha256 t = t.source_pdf_sha256
+  let source_root t = t.source_root
+  let source_artifact t = t.source_artifact
+  let source_path t = t.source_path
+  let source_sha256 t = t.source_sha256
+  let source_format t = t.source_format
   let description t = t.description
   let description_md5 t = t.description_md5
   let snapshot t = t.snapshot
@@ -1415,10 +1419,14 @@ CREATE TABLE visual_evidence (
   step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
   image_path TEXT NOT NULL UNIQUE CHECK (image_path <> ''),
   manifest_path TEXT NOT NULL UNIQUE CHECK (manifest_path <> ''),
-  source_pdf_artifact TEXT NOT NULL CHECK (source_pdf_artifact <> ''),
-  source_pdf_sha256 TEXT NOT NULL CHECK (
-    length(source_pdf_sha256) = 64
-    AND source_pdf_sha256 NOT GLOB '*[^0-9a-f]*'
+  source_artifact TEXT NOT NULL CHECK (source_artifact <> ''),
+  source_sha256 TEXT NOT NULL CHECK (
+    length(source_sha256) = 64
+    AND source_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
+  source_format TEXT NOT NULL CHECK (
+    length(source_format) BETWEEN 1 AND 16
+    AND source_format NOT GLOB '*[^0-9a-z]*'
   ),
   page_number INTEGER NOT NULL CHECK (page_number BETWEEN 1 AND 100000),
   page_count INTEGER NOT NULL CHECK (
@@ -4156,7 +4164,7 @@ ORDER BY fe.excerpt_ref, fe.relation
                    with_statement database
                      {|
 SELECT v.visual_ref, v.snapshot_ref, v.step_key, v.image_path,
-       v.manifest_path, v.source_pdf_artifact, v.source_pdf_sha256,
+       v.manifest_path, v.source_artifact, v.source_sha256, v.source_format,
        v.page_number, v.page_count, v.image_sha256, v.image_md5, v.image_size,
        v.width, v.height, v.render_profile, v.renderer_version,
        v.description_text, v.description_md5, v.manifest_md5, fe.relation
@@ -4190,22 +4198,23 @@ ORDER BY v.visual_ref, fe.relation
                                 ; step_key
                                 ; image_path = Sqlite3.column_text query 3
                                 ; manifest_path = Sqlite3.column_text query 4
-                                ; source_pdf_artifact = Sqlite3.column_text query 5
-                                ; source_pdf_sha256 = Sqlite3.column_text query 6
-                                ; page = Sqlite3.column_int query 7
-                                ; page_count = Sqlite3.column_int query 8
-                                ; image_sha256 = Sqlite3.column_text query 9
-                                ; image_md5 = Sqlite3.column_text query 10
-                                ; manifest_md5 = Sqlite3.column_text query 18
-                                ; image_size = Sqlite3.column_int query 11
-                                ; width = Sqlite3.column_int query 12
-                                ; height = Sqlite3.column_int query 13
-                                ; render_profile = Sqlite3.column_text query 14
-                                ; renderer_version = Sqlite3.column_text query 15
-                                ; description = Sqlite3.column_text query 16
-                                ; description_md5 = Sqlite3.column_text query 17
+                                ; source_artifact = Sqlite3.column_text query 5
+                                ; source_sha256 = Sqlite3.column_text query 6
+                                ; source_format = Sqlite3.column_text query 7
+                                ; page = Sqlite3.column_int query 8
+                                ; page_count = Sqlite3.column_int query 9
+                                ; image_sha256 = Sqlite3.column_text query 10
+                                ; image_md5 = Sqlite3.column_text query 11
+                                ; manifest_md5 = Sqlite3.column_text query 19
+                                ; image_size = Sqlite3.column_int query 12
+                                ; width = Sqlite3.column_int query 13
+                                ; height = Sqlite3.column_int query 14
+                                ; render_profile = Sqlite3.column_text query 15
+                                ; renderer_version = Sqlite3.column_text query 16
+                                ; description = Sqlite3.column_text query 17
+                                ; description_md5 = Sqlite3.column_text query 18
                                   }
-                                , Sqlite3.column_text query 19 )
+                                , Sqlite3.column_text query 20 )
                                 :: !visuals;
                               loop ()
                             | _ ->
@@ -5967,8 +5976,9 @@ let record_visual
       ~visual_id
       ~image_path
       ~manifest_path
-      ~source_pdf_artifact
-      ~source_pdf_sha256
+      ~source_artifact
+      ~source_sha256
+      ~source_format
       ~page
       ~page_count
       ~image_sha256
@@ -6062,13 +6072,13 @@ WHERE s.snapshot_ref = ?1
                     {|
 INSERT INTO visual_evidence (
   visual_ref, snapshot_ref, claim_id, step_key, image_path, manifest_path,
-  source_pdf_artifact, source_pdf_sha256, page_number, page_count,
+  source_artifact, source_sha256, source_format, page_number, page_count,
   image_sha256, image_md5, image_size, width, height, render_profile, renderer_version,
   description_text, description_md5, description_size, manifest_json,
   manifest_md5, created_at
 ) VALUES (
   ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
+  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
 )
 |}
                     ~f:(fun statement ->
@@ -6078,23 +6088,24 @@ INSERT INTO visual_evidence (
                       let%bind () = bind_text database statement 4 (Sandwalk_core.Plan_step.Key.to_string step_key) in
                       let%bind () = bind_text database statement 5 image_path in
                       let%bind () = bind_text database statement 6 manifest_path in
-                      let%bind () = bind_text database statement 7 source_pdf_artifact in
-                      let%bind () = bind_text database statement 8 source_pdf_sha256 in
-                      let%bind () = check database (Sqlite3.bind_int statement 9 page) in
-                      let%bind () = check database (Sqlite3.bind_int statement 10 page_count) in
-                      let%bind () = bind_text database statement 11 image_sha256 in
-                      let%bind () = bind_text database statement 12 image_md5 in
-                      let%bind () = check database (Sqlite3.bind_int statement 13 image_size) in
-                      let%bind () = check database (Sqlite3.bind_int statement 14 width) in
-                      let%bind () = check database (Sqlite3.bind_int statement 15 height) in
-                      let%bind () = bind_text database statement 16 render_profile in
-                      let%bind () = bind_text database statement 17 renderer_version in
-                      let%bind () = bind_text database statement 18 description in
-                      let%bind () = bind_text database statement 19 description_md5 in
-                      let%bind () = check database (Sqlite3.bind_int statement 20 description_size) in
-                      let%bind () = bind_text database statement 21 manifest_json in
-                      let%bind () = bind_text database statement 22 manifest_md5 in
-                      let%bind () = bind_text database statement 23 now in
+                      let%bind () = bind_text database statement 7 source_artifact in
+                      let%bind () = bind_text database statement 8 source_sha256 in
+                      let%bind () = bind_text database statement 9 source_format in
+                      let%bind () = check database (Sqlite3.bind_int statement 10 page) in
+                      let%bind () = check database (Sqlite3.bind_int statement 11 page_count) in
+                      let%bind () = bind_text database statement 12 image_sha256 in
+                      let%bind () = bind_text database statement 13 image_md5 in
+                      let%bind () = check database (Sqlite3.bind_int statement 14 image_size) in
+                      let%bind () = check database (Sqlite3.bind_int statement 15 width) in
+                      let%bind () = check database (Sqlite3.bind_int statement 16 height) in
+                      let%bind () = bind_text database statement 17 render_profile in
+                      let%bind () = bind_text database statement 18 renderer_version in
+                      let%bind () = bind_text database statement 19 description in
+                      let%bind () = bind_text database statement 20 description_md5 in
+                      let%bind () = check database (Sqlite3.bind_int statement 21 description_size) in
+                      let%bind () = bind_text database statement 22 manifest_json in
+                      let%bind () = bind_text database statement 23 manifest_md5 in
+                      let%bind () = bind_text database statement 24 now in
                       step_done database statement)
                 in
                 visual_id, true
@@ -6136,7 +6147,7 @@ let read_visual ?(busy_timeout_ms = 5_000) ~database_path ~visual_id () =
             with_statement database
               {|
 SELECT snapshot_ref, step_key, image_path, manifest_path,
-       source_pdf_artifact, source_pdf_sha256, page_number, page_count,
+       source_artifact, source_sha256, source_format, page_number, page_count,
        image_sha256, image_md5, image_size, width, height, render_profile,
        renderer_version, description_text, description_md5, manifest_md5
 FROM visual_evidence WHERE visual_ref = ?1
@@ -6159,20 +6170,21 @@ FROM visual_evidence WHERE visual_ref = ?1
                     ; step_key
                     ; image_path = Sqlite3.column_text statement 2
                     ; manifest_path = Sqlite3.column_text statement 3
-                    ; source_pdf_artifact = Sqlite3.column_text statement 4
-                    ; source_pdf_sha256 = Sqlite3.column_text statement 5
-                    ; page = Sqlite3.column_int statement 6
-                    ; page_count = Sqlite3.column_int statement 7
-                    ; image_sha256 = Sqlite3.column_text statement 8
-                    ; image_md5 = Sqlite3.column_text statement 9
-                    ; manifest_md5 = Sqlite3.column_text statement 17
-                    ; image_size = Sqlite3.column_int statement 10
-                    ; width = Sqlite3.column_int statement 11
-                    ; height = Sqlite3.column_int statement 12
-                    ; render_profile = Sqlite3.column_text statement 13
-                    ; renderer_version = Sqlite3.column_text statement 14
-                    ; description = Sqlite3.column_text statement 15
-                    ; description_md5 = Sqlite3.column_text statement 16
+                    ; source_artifact = Sqlite3.column_text statement 4
+                    ; source_sha256 = Sqlite3.column_text statement 5
+                    ; source_format = Sqlite3.column_text statement 6
+                    ; page = Sqlite3.column_int statement 7
+                    ; page_count = Sqlite3.column_int statement 8
+                    ; image_sha256 = Sqlite3.column_text statement 9
+                    ; image_md5 = Sqlite3.column_text statement 10
+                    ; manifest_md5 = Sqlite3.column_text statement 18
+                    ; image_size = Sqlite3.column_int statement 11
+                    ; width = Sqlite3.column_int statement 12
+                    ; height = Sqlite3.column_int statement 13
+                    ; render_profile = Sqlite3.column_text statement 14
+                    ; renderer_version = Sqlite3.column_text statement 15
+                    ; description = Sqlite3.column_text statement 16
+                    ; description_md5 = Sqlite3.column_text statement 17
                     }
                 | Sqlite3.Rc.DONE -> Error (Error.Visual_not_found reference)
                 | return_code -> check database return_code |> Result.map ~f:(fun () -> assert false))
@@ -8008,7 +8020,7 @@ SELECT f.step_key, f.finding_key, r.verdict, fr.claim_text,
        fe.relation, v.visual_ref, v.image_path, v.image_md5, v.image_sha256,
        v.description_text, v.description_md5, s.snapshot_ref,
        s.final_url, v.page_number, v.manifest_path, v.manifest_md5,
-       s.artifact_path, v.source_pdf_artifact, v.source_pdf_sha256
+       s.artifact_path, v.source_artifact, v.source_sha256, v.source_format
 FROM findings AS f
 JOIN step_executions AS se
   ON se.step_key = f.step_key AND se.state = 'completed'
@@ -8035,9 +8047,9 @@ ORDER BY p.position, f.finding_key, v.page_number, v.visual_ref, fe.relation
                        Some relation; Some visual; Some image_path; Some image_md5;
                        Some image_sha256; Some description; Some description_md5; Some snapshot;
                        Some source_url; Some page; Some manifest_path;
-                       Some manifest_md5; Some source_pdf_root;
-                       Some source_pdf_artifact;
-                       Some source_pdf_sha256 |] ->
+                       Some manifest_md5; Some source_root;
+                       Some source_artifact; Some source_sha256;
+                       Some source_format |] ->
                     rows :=
                       { Writer_visual.step
                       ; finding
@@ -8050,11 +8062,11 @@ ORDER BY p.position, f.finding_key, v.page_number, v.visual_ref, fe.relation
                       ; image_sha256
                       ; manifest_path
                       ; manifest_md5
-                      ; source_pdf_root
-                      ; source_pdf_artifact
-                      ; source_pdf_path =
-                          Filename.concat source_pdf_root source_pdf_artifact
-                      ; source_pdf_sha256
+                      ; source_root
+                      ; source_artifact
+                      ; source_path = Filename.concat source_root source_artifact
+                      ; source_sha256
+                      ; source_format
                       ; description
                       ; description_md5
                       ; snapshot

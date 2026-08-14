@@ -132,14 +132,19 @@ must be sealed and reviewed again.
 `context` cannot seal a finding by itself; at least one evidence artifact must
 use `supports`, `contradicts`, or `qualifies`.
 
-Use visual evidence only for a PDF retained by the immutable snapshot manifest
-and only when layout or graphical content is material. `visual create` renders
-one complete page to a bounded PNG and records the Poppler profile and hashes.
-Open the returned image with vision before attaching it. Its description is an
-agent observation for navigation, not source text. The same snapshot page and
-render profile return the same durable visual reference. If this is done while
-a current excerpt or finding packet exists, do not apply that old packet after
-the mutation; run `sandwalk continue` to regenerate it from durable state.
+Use visual evidence only for a supported paginated rich-document artifact
+retained by the immutable snapshot manifest and only when layout or graphical
+content is material. `visual create` renders one complete page to a bounded PNG
+and records the original format/hash, conversion-and-render profile, transient
+PDF hash when applicable, implementation versions, and image hash. PDF is
+direct; Office, OpenDocument, RTF, EPUB/FB2, Visio, and Publisher inputs use a
+temporary LibreOffice conversion. Open the returned image with vision before
+attaching it, and use its displayed pagination for non-PDF inputs. Its
+description is an agent observation for navigation, not source text. The same
+snapshot page and render profile return the same durable visual reference. If
+this is done while a current excerpt or finding packet exists, do not apply that
+old packet after the mutation; run `sandwalk continue` to regenerate it from
+durable state.
 
 Checkpoint long work or handoffs:
 
@@ -179,7 +184,7 @@ was actually inspected:
   "protocol": "sandwalk.finding-review.v2",
   "verdict": "partially-supported",
   "summary": "The rendered page supports the diagram-dependent portion.",
-  "source_quality": "Primary PDF page.",
+  "source_quality": "Primary source page rendered from the retained original.",
   "conflicts": "",
   "qualifications": "The nearby prose was verified separately.",
   "reviewed_visuals": [

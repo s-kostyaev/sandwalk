@@ -26,6 +26,6 @@
   ../adapters/texiq-fetch
   ../adapters/qmd-fetch
   ../adapters/xberg-fetch
-  ../adapters/pdf-page-render
+  ../adapters/document-page-render
   ../adapters/pandoc-pdf-export
   (source_tree fakes)))

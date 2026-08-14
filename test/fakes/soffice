@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+for argument in "$@"; do
+  if [ "$argument" = "--version" ]; then
+    printf '%s\n' 'LibreOffice fake-1.0'
+    exit 0
+  fi
+done
+
+output_directory=
+source_document=
+previous=
+for argument in "$@"; do
+  if [ "$previous" = "--outdir" ]; then
+    output_directory=$argument
+  fi
+  previous=$argument
+  source_document=$argument
+done
+
+[ -n "$output_directory" ]
+[ -n "$source_document" ]
+basename=$(basename "$source_document")
+stem=${basename%.*}
+printf '%%PDF-1.7\nconverted fixture\n' >"$output_directory/$stem.pdf"

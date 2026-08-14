@@ -275,6 +275,7 @@ module Writer_pack : sig
     -> visual:string
     -> snapshot:string
     -> source_url:string
+    -> source_format:string
     -> page:int
     -> image_path:string
     -> description:string

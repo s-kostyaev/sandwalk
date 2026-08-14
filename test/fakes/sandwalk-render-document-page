@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Deterministic rich-document page renderer used by visual evidence tests.
 import base64
 import hashlib
 import json
@@ -8,7 +9,8 @@ import sys
 request = json.load(sys.stdin)
 assert request["protocol"] == "sandwalk.visual-render.v1"
 assert request["page"] == 1
-source = request["source_pdf"]
+source = request["source_document"]
+source_format = request["source_format"]
 output = request["output_directory"]
 os.mkdir(output)
 image_path = os.path.join(output, "page.png")
@@ -24,7 +26,9 @@ def sha256(path):
 
 manifest = {
     "protocol": "sandwalk.visual-render-manifest.v1",
-    "source_pdf_sha256": sha256(source),
+    "source_sha256": sha256(source),
+    "source_format": source_format,
+    "render_input_sha256": sha256(source),
     "page": 1,
     "page_count": 2,
     "artifact": "page.png",
@@ -32,9 +36,19 @@ manifest = {
     "image_size": len(image),
     "width": 1,
     "height": 1,
-    "render_profile": "poppler-png-144dpi-v1",
-    "renderer_version": "pdftocairo fake-1.0",
+    "render_profile": (
+        "poppler-png-144dpi-v1"
+        if source_format == "pdf"
+        else "libreoffice-pdf-poppler-png-144dpi-v1"
+    ),
+    "renderer_version": (
+        "pdftocairo fake-1.0"
+        if source_format == "pdf"
+        else "LibreOffice fake-1.0; pdftocairo fake-1.0"
+    ),
 }
+if os.environ.get("SANDWALK_TEST_BAD_RENDER_INPUT_HASH") == "1":
+    manifest["render_input_sha256"] = "0" * 64
 manifest_path = os.path.join(output, "manifest.json")
 with open(manifest_path, "w", encoding="utf-8") as stream:
     json.dump(manifest, stream, sort_keys=True, separators=(",", ":"))
@@ -47,5 +61,6 @@ result.pop("artifact")
 result["protocol"] = "sandwalk.visual-render-result.v1"
 result["image_path"] = image_path
 result["manifest_path"] = manifest_path
+result["render_input_path"] = source
 json.dump(result, sys.stdout, sort_keys=True, separators=(",", ":"))
 sys.stdout.write("\n")

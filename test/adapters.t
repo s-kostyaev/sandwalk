@@ -507,6 +507,42 @@ Canonicalization prevents a file locator from escaping the authorized root.
   local source resolves outside its authorized root
   [77]
 
+The bundled visual renderer uses the same bounded Poppler raster profile for
+the paginated rich-document families after an isolated LibreOffice conversion.
+The private LibreOffice profile is removed, while a bounded render-input PDF is
+left in the staging directory for Sandwalk to hash-check and delete before
+publishing the closed evidence directory.
+
+  $ visual_formats="rtf docx pptx xlsx odt odp ods epub fb2 vsdx pub"
+  $ for extension in $visual_formats; do
+  >   printf 'rich visual fixture\n' > "visual-source.$extension"
+  >   PATH="$PWD/fakes:$PATH" ../adapters/document-page-render <<EOF > "visual-$extension.json"
+  > {"protocol":"sandwalk.visual-render.v1","source_document":"$PWD/visual-source.$extension","source_format":"$extension","output_directory":"visual-$extension","page":2}
+  > EOF
+  >   jq -e --arg extension "$extension" \
+  >     '.source_format == $extension and .page == 2 and .page_count == 3 and .render_profile == "libreoffice-pdf-poppler-png-144dpi-v1"' \
+  >     "visual-$extension.json" >/dev/null
+  >   test "$(find "visual-$extension" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = 3
+  >   test "$(find "visual-$extension" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = 0
+  > done
+  $ printf '%s\n' "$visual_formats"
+  rtf docx pptx xlsx odt odp ods epub fb2 vsdx pub
+
+  $ jq -r '[.source_format, .render_profile, .renderer_version] | @tsv' \
+  >   visual-docx/manifest.json
+  docx	libreoffice-pdf-poppler-png-144dpi-v1	LibreOffice fake-1.0; pdftocairo fake-1.0
+
+Formats without stable page semantics are rejected before an output directory
+is created.
+
+  $ printf 'message fixture\n' > visual-source.msg
+  $ PATH="$PWD/fakes:$PATH" ../adapters/document-page-render >/dev/null <<EOF
+  > {"protocol":"sandwalk.visual-render.v1","source_document":"$PWD/visual-source.msg","source_format":"msg","output_directory":"visual-msg","page":1}
+  > EOF
+  unsupported visual-render source format
+  [64]
+  $ test ! -e visual-msg
+
   $ ln -s "$PWD/outside/secret.pdf" "local documents/linked-secret.pdf"
   $ PATH="$PWD/fakes:$PATH" ../adapters/xberg-fetch >/dev/null <<EOF
   > {"protocol":"sandwalk.fetch.v1","url":"file://$PWD/local%20documents/linked-secret.pdf","source_root":"$PWD/local documents","output_directory":"symlink-output"}

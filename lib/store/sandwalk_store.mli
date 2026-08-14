@@ -164,8 +164,9 @@ module Visual_evidence : sig
   val step_key : t -> Sandwalk_core.Plan_step.Key.t
   val image_path : t -> string
   val manifest_path : t -> string
-  val source_pdf_artifact : t -> string
-  val source_pdf_sha256 : t -> string
+  val source_artifact : t -> string
+  val source_sha256 : t -> string
+  val source_format : t -> string
   val page : t -> int
   val page_count : t -> int
   val image_sha256 : t -> string
@@ -268,10 +269,11 @@ module Writer_visual : sig
   val image_sha256 : t -> string
   val manifest_path : t -> string
   val manifest_md5 : t -> string
-  val source_pdf_root : t -> string
-  val source_pdf_artifact : t -> string
-  val source_pdf_path : t -> string
-  val source_pdf_sha256 : t -> string
+  val source_root : t -> string
+  val source_artifact : t -> string
+  val source_path : t -> string
+  val source_sha256 : t -> string
+  val source_format : t -> string
   val description : t -> string
   val description_md5 : t -> string
   val snapshot : t -> string
@@ -894,8 +896,9 @@ val record_visual
   -> visual_id:Sandwalk_core.Visual_id.t
   -> image_path:string
   -> manifest_path:string
-  -> source_pdf_artifact:string
-  -> source_pdf_sha256:string
+  -> source_artifact:string
+  -> source_sha256:string
+  -> source_format:string
   -> page:int
   -> page_count:int
   -> image_sha256:string

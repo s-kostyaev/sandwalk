@@ -142,8 +142,8 @@ let explanation = function
       , "Verify the selected adapter and its normalizer are on PATH. Info hits require `texiq`; semantic hits require an unchanged Sandwalk QMD index; the default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root." )
   | "VISUAL_RENDER_FAILED" ->
     Some
-      ( "The retained PDF page could not be rendered into bounded visual evidence."
-      , "Verify `pdfinfo` and `pdftocairo` are on PATH and that the requested snapshot retains a valid PDF artifact." )
+      ( "The retained document page could not be rendered into bounded visual evidence."
+      , "Verify `pdfinfo` and `pdftocairo` are on PATH. Non-PDF rich documents also require LibreOffice (`soffice`) and a supported paginated source format." )
   | "INDEX_ADAPTER_FAILED" ->
     Some
       ( "The local ingest or QMD indexing process exited unsuccessfully or timed out."
@@ -4704,19 +4704,71 @@ let visual_store_error = function
   | error -> excerpt_store_error error
 ;;
 
-let safe_pdf_artifact value =
-  (not (String.is_empty value))
-  && String.length value <= 4_096
-  && not (Filename.is_absolute value)
-  && not (String.mem value '\\')
-  && List.for_all (String.split value ~on:'/') ~f:(fun component ->
-    not (String.is_empty component)
-    && not (String.equal component ".")
-    && not (String.equal component ".."))
-  && String.is_suffix (String.lowercase value) ~suffix:".pdf"
+let visual_source_formats =
+  String.Set.of_list
+    [ "pdf"
+    ; "rtf"
+    ; "doc"
+    ; "dot"
+    ; "docm"
+    ; "docx"
+    ; "dotx"
+    ; "dotm"
+    ; "ppt"
+    ; "pps"
+    ; "pot"
+    ; "pptx"
+    ; "pptm"
+    ; "ppsx"
+    ; "ppsm"
+    ; "potx"
+    ; "potm"
+    ; "xls"
+    ; "xlt"
+    ; "xlsm"
+    ; "xlsx"
+    ; "xltx"
+    ; "xltm"
+    ; "xlsb"
+    ; "odt"
+    ; "ott"
+    ; "odp"
+    ; "otp"
+    ; "ods"
+    ; "ots"
+    ; "odg"
+    ; "otg"
+    ; "odf"
+    ; "epub"
+    ; "fb2"
+    ; "vsd"
+    ; "vsdx"
+    ; "pub"
+    ]
 ;;
 
-let snapshot_pdf_artifact manifest_json =
+let visual_source_format value =
+  let safe =
+    (not (String.is_empty value))
+    && String.length value <= 4_096
+    && not (Filename.is_absolute value)
+    && not (String.mem value '\\')
+    && List.for_all (String.split value ~on:'/') ~f:(fun component ->
+      not (String.is_empty component)
+      && not (String.equal component ".")
+      && not (String.equal component ".."))
+  in
+  if not safe
+  then None
+  else (
+    match String.rsplit2 (Filename.basename value) ~on:'.' with
+    | Some (_, extension) ->
+      let extension = String.lowercase extension in
+      if Set.mem visual_source_formats extension then Some extension else None
+    | None -> None)
+;;
+
+let snapshot_visual_source manifest_json =
   Or_error.try_with (fun () ->
     let manifest = Yojson.Safe.from_string manifest_json in
     let artifacts =
@@ -4729,7 +4781,8 @@ let snapshot_pdf_artifact manifest_json =
     in
     let candidate name =
       match List.Assoc.find artifacts name ~equal:String.equal with
-      | Some (`String value) when safe_pdf_artifact value -> Some value
+      | Some (`String value) ->
+        Option.map (visual_source_format value) ~f:(fun format -> value, format)
       | Some _ | None -> None
     in
     Option.first_some (candidate "pdf") (candidate "original")
@@ -4754,8 +4807,14 @@ let visual_manifest_matches
     in
     Option.value_map (string "protocol") ~default:false ~f:(String.equal "sandwalk.visual-render-manifest.v1")
     && Option.value_map (string "artifact") ~default:false ~f:(String.equal "page.png")
-    && Option.value_map (string "source_pdf_sha256") ~default:false
-         ~f:(String.equal (Sandwalk_protocol.Visual_render.source_pdf_sha256 rendered))
+    && Option.value_map (string "source_sha256") ~default:false
+         ~f:(String.equal (Sandwalk_protocol.Visual_render.source_sha256 rendered))
+    && Option.value_map (string "source_format") ~default:false
+         ~f:(String.equal (Sandwalk_protocol.Visual_render.source_format rendered))
+    && Option.value_map (string "render_input_sha256") ~default:false
+         ~f:
+           (String.equal
+              (Sandwalk_protocol.Visual_render.render_input_sha256 rendered))
     && Option.value_map (string "image_sha256") ~default:false
          ~f:(String.equal (Sandwalk_protocol.Visual_render.image_sha256 rendered))
     && Option.value_map (string "render_profile") ~default:false
@@ -4811,7 +4870,11 @@ let regular_nonsymlink path =
       | S_DIR | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> false))
 ;;
 
-let bounded_pdf_descendant_nonsymlink ~directory ~relative =
+let bounded_visual_source_descendant_nonsymlink
+      ~directory
+      ~relative
+      ~source_format
+  =
   Deferred.Or_error.try_with (fun () ->
     In_thread.run (fun () ->
       let rec descend parent = function
@@ -4837,13 +4900,33 @@ let bounded_pdf_descendant_nonsymlink ~directory ~relative =
         Exn.protect
           ~f:(fun () ->
             let size = Stdlib.in_channel_length channel in
-            size >= 5
+            size >= 1
             && size <= 536_870_912
-            && String.equal (Stdlib.really_input_string channel 5) "%PDF-")
+            && (if String.equal source_format "pdf"
+                then
+                  size >= 5
+                  && String.equal (Stdlib.really_input_string channel 5) "%PDF-"
+                else true))
           ~finally:(fun () -> Stdlib.close_in_noerr channel))))
 ;;
 
-let exact_visual_directory path =
+let bounded_pdf_nonsymlink path =
+  Deferred.Or_error.try_with (fun () ->
+    In_thread.run (fun () ->
+      match (Core_unix.lstat path).st_kind with
+      | S_REG ->
+        let channel = Stdlib.open_in_bin path in
+        Exn.protect
+          ~f:(fun () ->
+            let size = Stdlib.in_channel_length channel in
+            size >= 5
+            && size <= 536_870_912
+            && String.equal (Stdlib.really_input_string channel 5) "%PDF-")
+          ~finally:(fun () -> Stdlib.close_in_noerr channel)
+      | S_DIR | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> false))
+;;
+
+let exact_visual_directory ~includes_render_input path =
   Deferred.Or_error.try_with (fun () ->
     In_thread.run (fun () ->
       match (Core_unix.lstat path).st_kind with
@@ -4851,7 +4934,11 @@ let exact_visual_directory path =
         Stdlib.Sys.readdir path
         |> Array.to_list
         |> List.sort ~compare:String.compare
-        |> List.equal String.equal [ "manifest.json"; "page.png" ]
+        |> List.equal
+             String.equal
+             (if includes_render_input
+              then [ "manifest.json"; "page.png"; "render-input.pdf" ]
+              else [ "manifest.json"; "page.png" ])
       | S_REG | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> false))
 ;;
 
@@ -6039,17 +6126,17 @@ let excerpt_command =
 
 let visual_create_command =
   Async.Command.async
-    ~summary:"Render one retained PDF page as immutable visual evidence."
+    ~summary:"Render one retained rich-document page as immutable visual evidence."
     (let%map_open.Command slug_text =
        flag "--slug" (required string) ~doc:"SLUG Workspace slug"
      and directory_prefix =
        flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
      and claim_text =
        flag "--claim" (required string) ~doc:"CLAIM Active execution claim"
-     and snapshot_text =
-       flag "--snapshot" (required string) ~doc:"SNAPSHOT Immutable PDF snapshot"
+    and snapshot_text =
+       flag "--snapshot" (required string) ~doc:"SNAPSHOT Immutable rich-document snapshot"
      and page =
-       flag "--page" (required int) ~doc:"N One-based PDF page number"
+       flag "--page" (required int) ~doc:"N One-based source page number"
      and description_path =
        flag
          "--description-file"
@@ -6058,8 +6145,8 @@ let visual_create_command =
      and adapter =
        flag
          "--adapter"
-         (optional_with_default "sandwalk-render-pdf-page" string)
-         ~doc:"PATH Offline PDF page renderer"
+         (optional_with_default "sandwalk-render-document-page" string)
+         ~doc:"PATH Offline rich-document page renderer"
      in
      fun () ->
        match
@@ -6082,7 +6169,7 @@ let visual_create_command =
        | Ok _, Some _, Some _ when page < 1 || page > 100_000 ->
          print_failure_and_exit
            ~code:"INVALID_PAGE"
-           ~message:"PDF page must be between 1 and 100000."
+           ~message:"Document page must be between 1 and 100000."
        | Ok slug, Some claim_id, Some snapshot_id ->
          let directory_prefix =
            Sandwalk_runtime.resolve_directory_prefix ~command_line:directory_prefix
@@ -6139,22 +6226,22 @@ let visual_create_command =
                    print_failure_and_exit ~code ~message
                  | Ok snapshot ->
                    (match
-                      snapshot_pdf_artifact
+                      snapshot_visual_source
                         (Sandwalk_store.Snapshot_for_visual.manifest_json snapshot)
                     with
                     | Error _ ->
                       print_failure_and_exit
-                        ~code:"SNAPSHOT_PDF_NOT_FOUND"
+                        ~code:"SNAPSHOT_VISUAL_SOURCE_NOT_FOUND"
                         ~message:
                           (sprintf
-                             "Snapshot %S does not retain a usable PDF artifact."
+                             "Snapshot %S does not retain a supported paginated source artifact."
                              snapshot_text)
-                    | Ok source_pdf_artifact ->
+                    | Ok (source_artifact, source_format) ->
                       let snapshot_artifact_path =
                         Sandwalk_store.Snapshot_for_visual.artifact_path snapshot
                       in
-                      let source_pdf =
-                        Filename.concat snapshot_artifact_path source_pdf_artifact
+                      let source_document =
+                        Filename.concat snapshot_artifact_path source_artifact
                       in
                       let started_at = Time_float_unix.now () in
                       let%bind invocation_id, visual_id =
@@ -6263,12 +6350,30 @@ let visual_create_command =
                            ~code:"AUDIT_LOG_ERROR"
                            ~message:"Could not append workspace audit log."
                        | Ok () ->
+                         let%bind source_safe_before_render =
+                           bounded_visual_source_descendant_nonsymlink
+                             ~directory:snapshot_artifact_path
+                             ~relative:source_artifact
+                             ~source_format
+                         in
+                         if
+                           not
+                             (Option.value
+                                (Or_error.ok source_safe_before_render)
+                                ~default:false)
+                         then
+                           fail_with_audit
+                             ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
+                             ~message:
+                               "Retained source must be a bounded regular non-symlink snapshot artifact."
+                         else
                          let%bind () =
                            Unix.mkdir ~p:() (Filename.dirname visual_path)
                          in
                          let request =
                            Sandwalk_protocol.Visual_render.request
-                             ~source_pdf
+                             ~source_document
+                             ~source_format
                              ~output_directory:temporary_path
                              ~page
                          in
@@ -6276,7 +6381,7 @@ let visual_create_command =
                            Sandwalk_runtime.Adapter.run_json
                              ~executable:adapter
                              ~request
-                             ~timeout:(Time_float.Span.of_sec 75.)
+                             ~timeout:(Time_float.Span.of_min 5.)
                              ~maximum_output_bytes:65_536
                              ()
                          in
@@ -6284,17 +6389,23 @@ let visual_create_command =
                           | Error _ ->
                             fail_with_audit
                               ~code:"VISUAL_RENDER_FAILED"
-                              ~message:"PDF page renderer failed."
+                              ~message:"Document page renderer failed."
                           | Ok adapter_output ->
                             (match Sandwalk_protocol.Visual_render.decode adapter_output with
                              | Error _ ->
                                fail_with_audit
                                  ~code:"VISUAL_RENDER_PROTOCOL_ERROR"
-                                 ~message:"PDF page renderer returned an invalid result."
+                                 ~message:"Document page renderer returned an invalid result."
                              | Ok rendered ->
                                let expected_image = Filename.concat temporary_path "page.png" in
                                let expected_manifest =
                                  Filename.concat temporary_path "manifest.json"
+                               in
+                               let converted = not (String.equal source_format "pdf") in
+                               let expected_render_input =
+                                 if converted
+                                 then Filename.concat temporary_path "render-input.pdf"
+                                 else source_document
                                in
                                if
                                  not
@@ -6304,28 +6415,40 @@ let visual_create_command =
                                     && String.equal
                                          expected_manifest
                                          (Sandwalk_protocol.Visual_render.manifest_path rendered)
+                                    && String.equal
+                                         expected_render_input
+                                         (Sandwalk_protocol.Visual_render
+                                          .render_input_path rendered)
                                     && Int.equal
                                          page
                                          (Sandwalk_protocol.Visual_render.page rendered))
                                then
                                  fail_with_audit
                                    ~code:"VISUAL_RENDER_PROTOCOL_ERROR"
-                                   ~message:"PDF renderer escaped its assigned output or changed the requested page."
+                                   ~message:"Document renderer escaped its assigned output or changed the requested page."
                                else (
                                  let%bind
                                    source_safe,
-                                   (safe_outputs, exact_directory)
+                                   (render_input_safe, (safe_outputs, exact_directory))
                                    =
                                    Deferred.both
-                                     (bounded_pdf_descendant_nonsymlink
+                                     (bounded_visual_source_descendant_nonsymlink
                                         ~directory:snapshot_artifact_path
-                                        ~relative:source_pdf_artifact)
+                                        ~relative:source_artifact
+                                        ~source_format)
                                      (Deferred.both
-                                        (Deferred.List.map
-                                           [ expected_image; expected_manifest ]
-                                           ~how:`Parallel
-                                           ~f:regular_nonsymlink)
-                                        (exact_visual_directory temporary_path))
+                                        (bounded_pdf_nonsymlink expected_render_input)
+                                        (Deferred.both
+                                           (Deferred.List.map
+                                              ([ expected_image; expected_manifest ]
+                                               @ if converted
+                                                 then [ expected_render_input ]
+                                                 else [])
+                                              ~how:`Parallel
+                                              ~f:regular_nonsymlink)
+                                           (exact_visual_directory
+                                              ~includes_render_input:converted
+                                              temporary_path)))
                                  in
                                  if
                                    not
@@ -6336,9 +6459,13 @@ let visual_create_command =
                                    fail_with_audit
                                      ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
                                      ~message:
-                                       "Retained PDF must be a regular non-symlink snapshot artifact."
+                                       "Retained source must be a bounded regular non-symlink snapshot artifact."
                                  else if
                                    not
+                                     (Option.value
+                                        (Or_error.ok render_input_safe)
+                                        ~default:false)
+                                   || not
                                      (List.for_all safe_outputs ~f:(function
                                         | Ok true -> true
                                         | Ok false | Error _ -> false))
@@ -6355,7 +6482,8 @@ let visual_create_command =
                                  let%bind
                                    image_input,
                                    ( manifest_input
-                                   , (image_sha256, source_sha256) )
+                                   , ( image_sha256
+                                     , (source_sha256, render_input_sha256) ) )
                                    =
                                    Deferred.both
                                      (Sandwalk_runtime.File_input.read
@@ -6368,26 +6496,32 @@ let visual_create_command =
                                         (Deferred.both
                                            (Sandwalk_runtime.File_digest.sha256
                                               ~path:expected_image)
-                                           (Sandwalk_runtime.File_digest.sha256
-                                              ~path:source_pdf)))
+                                           (Deferred.both
+                                              (Sandwalk_runtime.File_digest.sha256
+                                                 ~path:source_document)
+                                              (Sandwalk_runtime.File_digest.sha256
+                                                 ~path:expected_render_input))))
                                  in
                                  match
                                    image_input,
                                    manifest_input,
                                    image_sha256,
-                                   source_sha256
+                                   source_sha256,
+                                   render_input_sha256
                                  with
-                                 | Error _, _, _, _
-                                 | _, Error _, _, _
-                                 | _, _, Error _, _
-                                 | _, _, _, Error _ ->
+                                 | Error _, _, _, _, _
+                                 | _, Error _, _, _, _
+                                 | _, _, Error _, _, _
+                                 | _, _, _, Error _, _
+                                 | _, _, _, _, Error _ ->
                                    fail_with_audit
                                      ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
-                                     ~message:"PDF renderer omitted a bounded visual artifact."
+                                     ~message:"Document renderer omitted a bounded visual artifact."
                                  | ( Ok image_input
                                    , Ok manifest_input
                                    , Ok image_sha256
-                                   , Ok source_sha256 ) ->
+                                   , Ok source_sha256
+                                   , Ok render_input_sha256 ) ->
                                    let manifest =
                                      Or_error.try_with (fun () ->
                                        Yojson.Safe.from_string
@@ -6410,7 +6544,15 @@ let visual_create_command =
                                      && String.equal
                                           source_sha256
                                           (Sandwalk_protocol.Visual_render
-                                           .source_pdf_sha256 rendered)
+                                           .source_sha256 rendered)
+                                     && String.equal
+                                          source_format
+                                          (Sandwalk_protocol.Visual_render
+                                           .source_format rendered)
+                                     && String.equal
+                                          render_input_sha256
+                                          (Sandwalk_protocol.Visual_render
+                                           .render_input_sha256 rendered)
                                      && Option.value_map
                                           (Or_error.ok manifest)
                                           ~default:false
@@ -6422,7 +6564,21 @@ let visual_create_command =
                                      fail_with_audit
                                        ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
                                        ~message:"Rendered visual does not match its manifest."
-                                   else (
+                                   else
+                                     let%bind removed_render_input =
+                                       if converted
+                                       then
+                                         Deferred.Or_error.try_with (fun () ->
+                                           Unix.unlink expected_render_input)
+                                       else Deferred.Or_error.return ()
+                                     in
+                                     (match removed_render_input with
+                                      | Error _ ->
+                                        fail_with_audit
+                                          ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
+                                          ~message:
+                                            "Could not discard the verified temporary render input."
+                                      | Ok () ->
                                      let%bind published =
                                        Deferred.Or_error.try_with (fun () ->
                                          Unix.rename
@@ -6456,10 +6612,11 @@ let visual_create_command =
                                              ~visual_id
                                              ~image_path:final_image
                                              ~manifest_path:final_manifest
-                                             ~source_pdf_artifact
-                                             ~source_pdf_sha256:
+                                             ~source_artifact
+                                             ~source_sha256:
                                                (Sandwalk_protocol.Visual_render
-                                                .source_pdf_sha256 rendered)
+                                                .source_sha256 rendered)
+                                             ~source_format
                                              ~page
                                              ~page_count:
                                                (Sandwalk_protocol.Visual_render
@@ -6558,7 +6715,7 @@ let visual_create_command =
                                                then Deferred.return [ Ok true ]
                                                else
                                                  Deferred.List.map
-                                                   [ source_pdf
+                                                   [ source_document
                                                    ; stored_image_path
                                                    ; stored_manifest_path
                                                    ]
@@ -6601,7 +6758,7 @@ let visual_create_command =
                                                          ~path:stored_manifest_path
                                                          ~maximum_bytes:16_384)
                                                       (Sandwalk_runtime.File_digest
-                                                       .sha256 ~path:source_pdf))
+                                                       .sha256 ~path:source_document))
                                              in
                                              let stored_valid =
                                                match
@@ -6622,8 +6779,11 @@ let visual_create_command =
                                                  && String.equal
                                                       source_sha256
                                                       (Sandwalk_store.Visual_evidence
-                                                       .source_pdf_sha256
-                                                         stored_visual)
+                                                       .source_sha256 stored_visual)
+                                                 && String.equal
+                                                      source_format
+                                                      (Sandwalk_store.Visual_evidence
+                                                       .source_format stored_visual)
                                                | _ -> false
                                              in
                                              if not stored_valid
@@ -6704,7 +6864,7 @@ let visual_create_command =
 
 let visual_command =
   Async.Command.group
-    ~summary:"Create and manage PDF page visual evidence."
+    ~summary:"Create and manage rich-document page visual evidence."
     [ "create", visual_create_command ]
 ;;
 
@@ -7917,7 +8077,7 @@ let finding_attach_command =
      and excerpt_text =
        flag "--excerpt" (optional string) ~doc:"EXCERPT Exact text excerpt"
      and visual_text =
-       flag "--visual" (optional string) ~doc:"VISUAL PDF page visual evidence"
+       flag "--visual" (optional string) ~doc:"VISUAL Document-page visual evidence"
      and relation_text =
        flag "--relation" (required string) ~doc:"RELATION Evidence relation"
      and claim_text =
@@ -9125,17 +9285,18 @@ let draft_prepare_command =
                     let manifest_path =
                       Sandwalk_store.Writer_visual.manifest_path row
                     in
-                    let source_pdf_path =
-                      Sandwalk_store.Writer_visual.source_pdf_path row
+                    let source_path =
+                      Sandwalk_store.Writer_visual.source_path row
                     in
                     let%bind source_safe, safe_outputs =
                       Deferred.both
-                        (bounded_pdf_descendant_nonsymlink
+                        (bounded_visual_source_descendant_nonsymlink
                            ~directory:
-                             (Sandwalk_store.Writer_visual.source_pdf_root row)
+                             (Sandwalk_store.Writer_visual.source_root row)
                            ~relative:
-                             (Sandwalk_store.Writer_visual.source_pdf_artifact
-                                row))
+                             (Sandwalk_store.Writer_visual.source_artifact row)
+                           ~source_format:
+                             (Sandwalk_store.Writer_visual.source_format row))
                         (Deferred.List.map
                            [ image_path; manifest_path ]
                            ~how:`Parallel
@@ -9168,7 +9329,7 @@ let draft_prepare_command =
                                 (Sandwalk_runtime.File_digest.sha256
                                    ~path:image_path)
                                 (Sandwalk_runtime.File_digest.sha256
-                                   ~path:source_pdf_path)))
+                                   ~path:source_path)))
                       in
                       match
                         image_input,
@@ -9192,8 +9353,7 @@ let draft_prepare_command =
                                   (Sandwalk_store.Writer_visual.manifest_md5 row)
                              && String.equal
                                   source_sha256
-                                  (Sandwalk_store.Writer_visual
-                                   .source_pdf_sha256 row)
+                                  (Sandwalk_store.Writer_visual.source_sha256 row)
                              && String.equal
                                   (Md5.digest_string
                                      (Sandwalk_store.Writer_visual.description
@@ -9237,6 +9397,8 @@ let draft_prepare_command =
                         ~visual:(Sandwalk_store.Writer_visual.visual row)
                         ~snapshot:(Sandwalk_store.Writer_visual.snapshot row)
                         ~source_url:(Sandwalk_store.Writer_visual.source_url row)
+                        ~source_format:
+                          (Sandwalk_store.Writer_visual.source_format row)
                         ~page:(Sandwalk_store.Writer_visual.page row)
                         ~image_path:(Sandwalk_store.Writer_visual.image_path row)
                         ~description:

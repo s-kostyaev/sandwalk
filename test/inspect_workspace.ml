@@ -1189,7 +1189,7 @@ WITH RECURSIVE sequence(n) AS (
 )
 INSERT INTO visual_evidence (
   visual_ref, snapshot_ref, claim_id, step_key, image_path, manifest_path,
-  source_pdf_artifact, source_pdf_sha256, page_number, page_count,
+  source_artifact, source_sha256, source_format, page_number, page_count,
   image_sha256, image_md5, image_size, width, height, render_profile,
   renderer_version, description_text, description_md5, description_size,
   manifest_json, manifest_md5, created_at
@@ -1201,6 +1201,7 @@ SELECT
   printf('fixture-visual-%d/manifest.json', n),
   'original/source.pdf',
   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  'pdf',
   n + 1, 257,
   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
   'cccccccccccccccccccccccccccccccc', 1, 1, 1, 'fixture-profile',

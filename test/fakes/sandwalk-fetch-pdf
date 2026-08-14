@@ -4,25 +4,32 @@ set -eu
 request=$(cat)
 output_directory=$(printf '%s' "$request" | jq -er '.output_directory')
 url=$(printf '%s' "$request" | jq -er '.url')
+source_format=${SANDWALK_TEST_VISUAL_FORMAT:-pdf}
 
 mkdir -p "$output_directory"
 printf '# PDF fixture\n\nQueryable text.\n' >"$output_directory/document.md"
 if [ "${SANDWALK_TEST_SYMLINK_PDF_PARENT:-0}" = 1 ]; then
   mkdir -p "$output_directory/retained"
   ln -s retained "$output_directory/original"
-  pdf_path="$output_directory/retained/source.pdf"
+  source_path="$output_directory/retained/source.$source_format"
 else
   mkdir -p "$output_directory/original"
-  pdf_path="$output_directory/original/source.pdf"
+  source_path="$output_directory/original/source.$source_format"
 fi
-printf '%%PDF-1.7\nvisual fixture\n' >"$pdf_path"
-input_sha256=$(shasum -a 256 "$pdf_path" | awk '{print $1}')
+if [ "$source_format" = pdf ]; then
+  printf '%%PDF-1.7\nvisual fixture\n' >"$source_path"
+else
+  printf 'rich-document visual fixture\n' >"$source_path"
+fi
+input_sha256=$(shasum -a 256 "$source_path" | awk '{print $1}')
 document_sha256=$(shasum -a 256 "$output_directory/document.md" | awk '{print $1}')
 
 jq -n \
   --arg final_url "$url" \
   --arg input_sha256 "$input_sha256" \
   --arg document_sha256 "$document_sha256" \
+  --arg source_artifact "original/source.$source_format" \
+  --arg source_format "$source_format" \
   '{
     protocol: "sandwalk.fetch-manifest.v1",
     final_url: $final_url,
@@ -31,11 +38,8 @@ jq -n \
       input_sha256: $input_sha256,
       normalized_document_sha256: $document_sha256
     },
-    artifacts: {
-      document: "document.md",
-      pdf: "original/source.pdf",
-      original: "original/source.pdf"
-    },
+    artifacts: ({document: "document.md", original: $source_artifact}
+      + if $source_format == "pdf" then {pdf: $source_artifact} else {} end),
     queryability_check: {tool: "mq", query: ".tree", ok: true}
   }' >"$output_directory/manifest.json"
 
