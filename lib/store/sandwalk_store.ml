@@ -46,12 +46,18 @@ module Error = struct
     | Excerpt_wrong_phase of Sandwalk_core.Phase.t
     | Excerpt_requires_claim
     | Excerpt_id_collision
+    | Visual_wrong_phase of Sandwalk_core.Phase.t
+    | Visual_id_collision
+    | Visual_not_found of string
     | Finding_wrong_phase of Sandwalk_core.Phase.t
     | Finding_step_mismatch
     | Finding_exists of string
     | Finding_not_found of string
     | Excerpt_not_found of string
     | Finding_excerpt_step_mismatch
+    | Finding_visual_step_mismatch
+    | Finding_visual_limit_exceeded of string
+    | Finding_visual_review_incomplete of string
     | Excerpt_stale of string
     | Finding_has_no_evidence of string
     | Finding_not_sealed of string
@@ -131,6 +137,20 @@ module Snapshot_for_excerpt = struct
   let step_key t = t.step_key
 end
 
+module Snapshot_for_visual = struct
+  type t =
+    { snapshot_id : Sandwalk_core.Snapshot_id.t
+    ; artifact_path : string
+    ; manifest_json : string
+    ; step_key : Sandwalk_core.Plan_step.Key.t
+    }
+
+  let snapshot_id t = t.snapshot_id
+  let artifact_path t = t.artifact_path
+  let manifest_json t = t.manifest_json
+  let step_key t = t.step_key
+end
+
 module Promote_snapshot_result = struct
   type t =
     { previous_schema_version : int
@@ -153,6 +173,64 @@ module Record_excerpt_result = struct
   let excerpt_id t = t.excerpt_id
   let created t = t.created
   let step_key t = t.step_key
+end
+
+module Record_visual_result = struct
+  type t =
+    { visual_id : Sandwalk_core.Visual_id.t
+    ; created : bool
+    ; step_key : Sandwalk_core.Plan_step.Key.t
+    }
+
+  let visual_id t = t.visual_id
+  let created t = t.created
+  let step_key t = t.step_key
+end
+
+module Visual_evidence = struct
+  type t =
+    { visual_id : Sandwalk_core.Visual_id.t
+    ; snapshot_id : Sandwalk_core.Snapshot_id.t
+    ; step_key : Sandwalk_core.Plan_step.Key.t
+    ; image_path : string
+    ; manifest_path : string
+    ; source_artifact : string
+    ; source_sha256 : string
+    ; source_format : string
+    ; page : int
+    ; page_count : int
+    ; image_sha256 : string
+    ; image_md5 : string
+    ; manifest_md5 : string
+    ; image_size : int
+    ; width : int
+    ; height : int
+    ; render_profile : string
+    ; renderer_version : string
+    ; description : string
+    ; description_md5 : string
+    }
+
+  let visual_id t = t.visual_id
+  let snapshot_id t = t.snapshot_id
+  let step_key t = t.step_key
+  let image_path t = t.image_path
+  let manifest_path t = t.manifest_path
+  let source_artifact t = t.source_artifact
+  let source_sha256 t = t.source_sha256
+  let source_format t = t.source_format
+  let page t = t.page
+  let page_count t = t.page_count
+  let image_sha256 t = t.image_sha256
+  let image_md5 t = t.image_md5
+  let manifest_md5 t = t.manifest_md5
+  let image_size t = t.image_size
+  let width t = t.width
+  let height t = t.height
+  let render_profile t = t.render_profile
+  let renderer_version t = t.renderer_version
+  let description t = t.description
+  let description_md5 t = t.description_md5
 end
 
 module Create_finding_result = struct
@@ -271,6 +349,54 @@ module Writer_evidence = struct
   let line_end t = t.line_end
 end
 
+module Writer_visual = struct
+  type t =
+    { step : string
+    ; finding : string
+    ; verdict : string
+    ; claim : string
+    ; relation : string
+    ; visual : string
+    ; image_path : string
+    ; image_md5 : string
+    ; image_sha256 : string
+    ; manifest_path : string
+    ; manifest_md5 : string
+    ; source_root : string
+    ; source_artifact : string
+    ; source_path : string
+    ; source_sha256 : string
+    ; source_format : string
+    ; description : string
+    ; description_md5 : string
+    ; snapshot : string
+    ; source_url : string
+    ; page : int
+    }
+
+  let step t = t.step
+  let finding t = t.finding
+  let verdict t = t.verdict
+  let claim t = t.claim
+  let relation t = t.relation
+  let visual t = t.visual
+  let image_path t = t.image_path
+  let image_md5 t = t.image_md5
+  let image_sha256 t = t.image_sha256
+  let manifest_path t = t.manifest_path
+  let manifest_md5 t = t.manifest_md5
+  let source_root t = t.source_root
+  let source_artifact t = t.source_artifact
+  let source_path t = t.source_path
+  let source_sha256 t = t.source_sha256
+  let source_format t = t.source_format
+  let description t = t.description
+  let description_md5 t = t.description_md5
+  let snapshot t = t.snapshot
+  let source_url t = t.source_url
+  let page t = t.page
+end
+
 module Submit_report_result = struct
   type t =
     { revision : int
@@ -313,10 +439,12 @@ module Finding_review_context = struct
   type t =
     { statement : string
     ; evidence : (string * string * string) list
+    ; visuals : (Visual_evidence.t * string) list
     }
 
   let statement t = t.statement
   let evidence t = t.evidence
+  let visuals t = t.visuals
 end
 
 module Step_context = struct
@@ -678,7 +806,7 @@ module Workspace_status = struct
   let schema_version t = t.schema_version
 end
 
-let current_schema_version = 25
+let current_schema_version = 26
 
 let check database return_code =
   if Sqlite3.Rc.is_success return_code
@@ -1277,6 +1405,91 @@ PRAGMA user_version = 25;
 |}
 ;;
 
+let migration_v26 =
+  {|
+CREATE TABLE visual_evidence (
+  visual_ref TEXT PRIMARY KEY
+    CHECK (
+      length(visual_ref) = 39
+      AND substr(visual_ref, 1, 7) = 'visual_'
+      AND substr(visual_ref, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
+  snapshot_ref TEXT NOT NULL REFERENCES snapshots(snapshot_ref),
+  claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+  step_key TEXT NOT NULL REFERENCES plan_steps(step_key),
+  image_path TEXT NOT NULL UNIQUE CHECK (image_path <> ''),
+  manifest_path TEXT NOT NULL UNIQUE CHECK (manifest_path <> ''),
+  source_artifact TEXT NOT NULL CHECK (source_artifact <> ''),
+  source_sha256 TEXT NOT NULL CHECK (
+    length(source_sha256) = 64
+    AND source_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
+  source_format TEXT NOT NULL CHECK (
+    length(source_format) BETWEEN 1 AND 16
+    AND source_format NOT GLOB '*[^0-9a-z]*'
+  ),
+  page_number INTEGER NOT NULL CHECK (page_number BETWEEN 1 AND 100000),
+  page_count INTEGER NOT NULL CHECK (
+    page_count BETWEEN page_number AND 100000
+  ),
+  image_sha256 TEXT NOT NULL CHECK (
+    length(image_sha256) = 64
+    AND image_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
+  image_md5 TEXT NOT NULL CHECK (
+    length(image_md5) = 32
+    AND image_md5 NOT GLOB '*[^0-9a-f]*'
+  ),
+  image_size INTEGER NOT NULL CHECK (image_size BETWEEN 1 AND 16777216),
+  width INTEGER NOT NULL CHECK (width BETWEEN 1 AND 10000),
+  height INTEGER NOT NULL CHECK (
+    height BETWEEN 1 AND 10000 AND width * height <= 20000000
+  ),
+  render_profile TEXT NOT NULL CHECK (
+    length(CAST(render_profile AS BLOB)) BETWEEN 1 AND 128
+  ),
+  renderer_version TEXT NOT NULL CHECK (
+    length(CAST(renderer_version AS BLOB)) BETWEEN 1 AND 256
+  ),
+  description_text TEXT NOT NULL CHECK (
+    length(CAST(description_text AS BLOB)) BETWEEN 1 AND 4096
+  ),
+  description_md5 TEXT NOT NULL CHECK (
+    length(description_md5) = 32
+    AND description_md5 NOT GLOB '*[^0-9a-f]*'
+  ),
+  description_size INTEGER NOT NULL CHECK (
+    description_size = length(CAST(description_text AS BLOB))
+  ),
+  manifest_json TEXT NOT NULL CHECK (
+    length(CAST(manifest_json AS BLOB)) BETWEEN 2 AND 16384
+    AND json_valid(manifest_json)
+    AND json_type(manifest_json) = 'object'
+  ),
+  manifest_md5 TEXT NOT NULL CHECK (
+    length(manifest_md5) = 32
+    AND manifest_md5 NOT GLOB '*[^0-9a-f]*'
+  ),
+  created_at TEXT NOT NULL,
+  UNIQUE(snapshot_ref, page_number, render_profile)
+);
+CREATE TABLE finding_visual_evidence (
+  step_key TEXT NOT NULL,
+  finding_key TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  visual_ref TEXT NOT NULL REFERENCES visual_evidence(visual_ref),
+  relation TEXT NOT NULL CHECK (
+    relation IN ('supports', 'contradicts', 'qualifies', 'context')
+  ),
+  attached_at TEXT NOT NULL,
+  PRIMARY KEY (step_key, finding_key, revision, visual_ref, relation),
+  FOREIGN KEY (step_key, finding_key, revision)
+    REFERENCES finding_revisions(step_key, finding_key, revision)
+);
+PRAGMA user_version = 26;
+|}
+;;
+
 let insert_migration database ~version ~now =
   with_statement
     database
@@ -1471,10 +1684,17 @@ let migrate database ~from_version ~now =
         insert_migration database ~version:24 ~now)
       else Ok ()
     in
-    if from_version < 25
-    then (
+    let%bind () =
+      if from_version < 25
+      then (
       let%bind () = execute database migration_v25 in
       insert_migration database ~version:25 ~now)
+      else Ok ()
+    in
+    if from_version < 26
+    then (
+      let%bind () = execute database migration_v26 in
+      insert_migration database ~version:26 ~now)
     else Ok ())
 ;;
 
@@ -3905,7 +4125,7 @@ WHERE f.step_key = ?1 AND f.finding_key = ?2
                        |> Result.map ~f:(fun () -> assert false))
                in
                let evidence = ref [] in
-               let%map () =
+               let%bind () =
                  with_statement
                    database
                    {|
@@ -3936,8 +4156,79 @@ ORDER BY fe.excerpt_ref, fe.relation
                      in
                      loop ())
                in
+               let visuals = ref [] in
+               let%map () =
+                 if schema_version < 26
+                 then Ok ()
+                 else
+                   with_statement database
+                     {|
+SELECT v.visual_ref, v.snapshot_ref, v.step_key, v.image_path,
+       v.manifest_path, v.source_artifact, v.source_sha256, v.source_format,
+       v.page_number, v.page_count, v.image_sha256, v.image_md5, v.image_size,
+       v.width, v.height, v.render_profile, v.renderer_version,
+       v.description_text, v.description_md5, v.manifest_md5, fe.relation
+FROM findings f
+JOIN finding_visual_evidence fe
+  ON fe.step_key = f.step_key
+ AND fe.finding_key = f.finding_key
+ AND fe.revision = f.current_revision
+JOIN visual_evidence v ON v.visual_ref = fe.visual_ref
+WHERE f.step_key = ?1 AND f.finding_key = ?2
+ORDER BY v.visual_ref, fe.relation
+|}
+                     ~f:(fun query ->
+                       let%bind () = bind_text database query 1 step in
+                       let%bind () = bind_text database query 2 finding in
+                       let rec loop () =
+                         match Sqlite3.step query with
+                         | Sqlite3.Rc.ROW ->
+                           let visual_reference = Sqlite3.column_text query 0 in
+                           let snapshot_reference = Sqlite3.column_text query 1 in
+                           let step_reference = Sqlite3.column_text query 2 in
+                           (match
+                              Sandwalk_core.Visual_id.of_string visual_reference,
+                              Sandwalk_core.Snapshot_id.of_string snapshot_reference,
+                              Sandwalk_core.Plan_step.Key.of_string step_reference
+                            with
+                            | Some visual_id, Some snapshot_id, Ok step_key ->
+                              visuals :=
+                                ( { Visual_evidence.visual_id
+                                ; snapshot_id
+                                ; step_key
+                                ; image_path = Sqlite3.column_text query 3
+                                ; manifest_path = Sqlite3.column_text query 4
+                                ; source_artifact = Sqlite3.column_text query 5
+                                ; source_sha256 = Sqlite3.column_text query 6
+                                ; source_format = Sqlite3.column_text query 7
+                                ; page = Sqlite3.column_int query 8
+                                ; page_count = Sqlite3.column_int query 9
+                                ; image_sha256 = Sqlite3.column_text query 10
+                                ; image_md5 = Sqlite3.column_text query 11
+                                ; manifest_md5 = Sqlite3.column_text query 19
+                                ; image_size = Sqlite3.column_int query 12
+                                ; width = Sqlite3.column_int query 13
+                                ; height = Sqlite3.column_int query 14
+                                ; render_profile = Sqlite3.column_text query 15
+                                ; renderer_version = Sqlite3.column_text query 16
+                                ; description = Sqlite3.column_text query 17
+                                ; description_md5 = Sqlite3.column_text query 18
+                                  }
+                                , Sqlite3.column_text query 20 )
+                                :: !visuals;
+                              loop ()
+                            | _ ->
+                              Error
+                                (Error.Database_error
+                                   "Invalid persisted visual review evidence."))
+                         | Sqlite3.Rc.DONE -> Ok ()
+                         | return_code -> check database return_code
+                       in
+                       loop ())
+               in
                { Finding_review_context.statement
                ; evidence = List.rev !evidence
+               ; visuals = List.rev !visuals
                })
            with
            | exn -> Error (Error.Database_error (Exn.to_string exn)))
@@ -5555,6 +5846,355 @@ WHERE snapshot_ref = ?1
   | exn -> Error (Error.Database_error (Exn.to_string exn))
 ;;
 
+let snapshot_for_visual
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~claim_id
+      ~snapshot_id
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          let reference = Sandwalk_core.Snapshot_id.to_string snapshot_id in
+          let%bind () =
+            if schema_version < 8
+            then Error (Error.Snapshot_not_found reference)
+            else if schema_version > current_schema_version
+            then Error (Error.Unsupported_schema_version schema_version)
+            else Ok ()
+          in
+          let%bind slug_text, phase_text = query_workspace database in
+          let expected = Sandwalk_core.Slug.to_string expected_slug in
+          let%bind () =
+            if String.equal expected slug_text
+            then Ok ()
+            else Error (Error.Workspace_slug_mismatch { expected; actual = slug_text })
+          in
+          let%bind phase =
+            Sandwalk_core.Phase.of_string phase_text
+            |> Result.of_option ~error:(Error.Invalid_persisted_phase phase_text)
+          in
+          let%bind () =
+            if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Researching
+            then Ok ()
+            else Error (Error.Visual_wrong_phase phase)
+          in
+          let%bind active_step = active_claim_step database claim_id in
+          let snapshot_query =
+            if schema_version >= 20
+            then
+              {|
+SELECT s.artifact_path, s.manifest_json, COALESCE(s.step_key, p.step_key)
+FROM snapshots s
+LEFT JOIN snapshot_promotions p ON p.snapshot_ref = s.snapshot_ref
+WHERE s.snapshot_ref = ?1
+|}
+            else
+              {|
+SELECT artifact_path, manifest_json, step_key
+FROM snapshots
+WHERE snapshot_ref = ?1
+|}
+          in
+          with_statement
+            database
+            snapshot_query
+            ~f:(fun statement ->
+              let%bind () = bind_text database statement 1 reference in
+              match Sqlite3.step statement with
+              | Sqlite3.Rc.ROW ->
+                let owner_text =
+                  if Sqlite3.column_is_null statement 2
+                  then None
+                  else Some (Sqlite3.column_text statement 2)
+                in
+                let active_text =
+                  Sandwalk_core.Plan_step.Key.to_string active_step
+                in
+                let%bind () =
+                  match owner_text with
+                  | Some owner when String.equal owner active_text -> Ok ()
+                  | Some _ | None ->
+                    Error (Error.Snapshot_not_owned_by_claim reference)
+                in
+                Ok
+                  { Snapshot_for_visual.snapshot_id
+                  ; artifact_path = Sqlite3.column_text statement 0
+                  ; manifest_json = Sqlite3.column_text statement 1
+                  ; step_key = active_step
+                  }
+              | Sqlite3.Rc.DONE -> Error (Error.Snapshot_not_found reference)
+              | return_code ->
+                check database return_code
+                |> Result.map ~f:(fun () -> assert false))
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let query_existing_visual database ~snapshot_id ~page ~render_profile =
+  with_statement
+    database
+    {|
+SELECT visual_ref FROM visual_evidence
+WHERE snapshot_ref = ?1 AND page_number = ?2 AND render_profile = ?3
+|}
+    ~f:(fun statement ->
+      let open Result.Let_syntax in
+      let%bind () =
+        bind_text database statement 1
+          (Sandwalk_core.Snapshot_id.to_string snapshot_id)
+      in
+      let%bind () = check database (Sqlite3.bind_int statement 2 page) in
+      let%bind () = bind_text database statement 3 render_profile in
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW ->
+        Sqlite3.column_text statement 0
+        |> Sandwalk_core.Visual_id.of_string
+        |> Result.of_option
+             ~error:(Error.Database_error "Invalid persisted visual reference.")
+        |> Result.map ~f:Option.some
+      | Sqlite3.Rc.DONE -> Ok None
+      | return_code -> check database return_code |> Result.map ~f:(Fn.const None))
+;;
+
+let record_visual
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~claim_id
+      ~snapshot_id
+      ~visual_id
+      ~image_path
+      ~manifest_path
+      ~source_artifact
+      ~source_sha256
+      ~source_format
+      ~page
+      ~page_count
+      ~image_sha256
+      ~image_md5
+      ~image_size
+      ~width
+      ~height
+      ~render_profile
+      ~renderer_version
+      ~description
+      ~description_md5
+      ~description_size
+      ~manifest_json
+      ~manifest_md5
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind previous_schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:previous_schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else Error (Error.Workspace_slug_mismatch { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Researching
+              then Ok ()
+              else Error (Error.Visual_wrong_phase phase)
+            in
+            let%bind step_key = active_claim_step database claim_id in
+            let snapshot_reference = Sandwalk_core.Snapshot_id.to_string snapshot_id in
+            let%bind owner =
+              with_statement database
+                {|
+SELECT COALESCE(s.step_key, p.step_key)
+FROM snapshots s
+LEFT JOIN snapshot_promotions p ON p.snapshot_ref = s.snapshot_ref
+WHERE s.snapshot_ref = ?1
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 snapshot_reference in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW when not (Sqlite3.column_is_null statement 0) ->
+                    Ok (Sqlite3.column_text statement 0)
+                  | Sqlite3.Rc.ROW -> Error (Error.Snapshot_not_owned_by_claim snapshot_reference)
+                  | Sqlite3.Rc.DONE -> Error (Error.Snapshot_not_found snapshot_reference)
+                  | return_code -> check database return_code |> Result.map ~f:(Fn.const ""))
+            in
+            let%bind () =
+              if String.equal owner (Sandwalk_core.Plan_step.Key.to_string step_key)
+              then Ok ()
+              else Error (Error.Snapshot_not_owned_by_claim snapshot_reference)
+            in
+            let%bind existing =
+              query_existing_visual database ~snapshot_id ~page ~render_profile
+            in
+            let%bind stored_id, created =
+              match existing with
+              | Some existing_id -> Ok (existing_id, false)
+              | None ->
+                let reference = Sandwalk_core.Visual_id.to_string visual_id in
+                let%bind collision =
+                  with_statement database
+                    "SELECT 1 FROM visual_evidence WHERE visual_ref = ?1"
+                    ~f:(fun statement ->
+                      let%bind () = bind_text database statement 1 reference in
+                      match Sqlite3.step statement with
+                      | Sqlite3.Rc.ROW -> Ok true
+                      | Sqlite3.Rc.DONE -> Ok false
+                      | return_code -> check database return_code |> Result.map ~f:(Fn.const false))
+                in
+                let%bind () = if collision then Error Error.Visual_id_collision else Ok () in
+                let%map () =
+                  with_statement database
+                    {|
+INSERT INTO visual_evidence (
+  visual_ref, snapshot_ref, claim_id, step_key, image_path, manifest_path,
+  source_artifact, source_sha256, source_format, page_number, page_count,
+  image_sha256, image_md5, image_size, width, height, render_profile, renderer_version,
+  description_text, description_md5, description_size, manifest_json,
+  manifest_md5, created_at
+) VALUES (
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
+)
+|}
+                    ~f:(fun statement ->
+                      let%bind () = bind_text database statement 1 reference in
+                      let%bind () = bind_text database statement 2 snapshot_reference in
+                      let%bind () = bind_text database statement 3 (Sandwalk_core.Claim_id.to_string claim_id) in
+                      let%bind () = bind_text database statement 4 (Sandwalk_core.Plan_step.Key.to_string step_key) in
+                      let%bind () = bind_text database statement 5 image_path in
+                      let%bind () = bind_text database statement 6 manifest_path in
+                      let%bind () = bind_text database statement 7 source_artifact in
+                      let%bind () = bind_text database statement 8 source_sha256 in
+                      let%bind () = bind_text database statement 9 source_format in
+                      let%bind () = check database (Sqlite3.bind_int statement 10 page) in
+                      let%bind () = check database (Sqlite3.bind_int statement 11 page_count) in
+                      let%bind () = bind_text database statement 12 image_sha256 in
+                      let%bind () = bind_text database statement 13 image_md5 in
+                      let%bind () = check database (Sqlite3.bind_int statement 14 image_size) in
+                      let%bind () = check database (Sqlite3.bind_int statement 15 width) in
+                      let%bind () = check database (Sqlite3.bind_int statement 16 height) in
+                      let%bind () = bind_text database statement 17 render_profile in
+                      let%bind () = bind_text database statement 18 renderer_version in
+                      let%bind () = bind_text database statement 19 description in
+                      let%bind () = bind_text database statement 20 description_md5 in
+                      let%bind () = check database (Sqlite3.bind_int statement 21 description_size) in
+                      let%bind () = bind_text database statement 22 manifest_json in
+                      let%bind () = bind_text database statement 23 manifest_md5 in
+                      let%bind () = bind_text database statement 24 now in
+                      step_done database statement)
+                in
+                visual_id, true
+            in
+            let%bind () =
+              if created
+              then execute database "DELETE FROM raw_gc_plan"
+              else Ok ()
+            in
+            Ok { Record_visual_result.visual_id = stored_id; created; step_key }
+          in
+          (match outcome with
+           | Ok result -> let%map () = execute database "COMMIT" in result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let read_visual ?(busy_timeout_ms = 5_000) ~database_path ~visual_id () =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let reference = Sandwalk_core.Visual_id.to_string visual_id in
+          let%bind schema_version = query_schema_version database in
+          if schema_version < 26
+          then Error (Error.Visual_not_found reference)
+          else if schema_version > current_schema_version
+          then Error (Error.Unsupported_schema_version schema_version)
+          else
+            with_statement database
+              {|
+SELECT snapshot_ref, step_key, image_path, manifest_path,
+       source_artifact, source_sha256, source_format, page_number, page_count,
+       image_sha256, image_md5, image_size, width, height, render_profile,
+       renderer_version, description_text, description_md5, manifest_md5
+FROM visual_evidence WHERE visual_ref = ?1
+|}
+              ~f:(fun statement ->
+                let%bind () = bind_text database statement 1 reference in
+                match Sqlite3.step statement with
+                | Sqlite3.Rc.ROW ->
+                  let%bind snapshot_id =
+                    Sandwalk_core.Snapshot_id.of_string (Sqlite3.column_text statement 0)
+                    |> Result.of_option ~error:(Error.Database_error "Invalid persisted snapshot reference.")
+                  in
+                  let%bind step_key =
+                    Sandwalk_core.Plan_step.Key.of_string (Sqlite3.column_text statement 1)
+                    |> Result.map_error ~f:(fun _ -> Error.Database_error "Invalid persisted visual step.")
+                  in
+                  Ok
+                    { Visual_evidence.visual_id
+                    ; snapshot_id
+                    ; step_key
+                    ; image_path = Sqlite3.column_text statement 2
+                    ; manifest_path = Sqlite3.column_text statement 3
+                    ; source_artifact = Sqlite3.column_text statement 4
+                    ; source_sha256 = Sqlite3.column_text statement 5
+                    ; source_format = Sqlite3.column_text statement 6
+                    ; page = Sqlite3.column_int statement 7
+                    ; page_count = Sqlite3.column_int statement 8
+                    ; image_sha256 = Sqlite3.column_text statement 9
+                    ; image_md5 = Sqlite3.column_text statement 10
+                    ; manifest_md5 = Sqlite3.column_text statement 18
+                    ; image_size = Sqlite3.column_int statement 11
+                    ; width = Sqlite3.column_int statement 12
+                    ; height = Sqlite3.column_int statement 13
+                    ; render_profile = Sqlite3.column_text statement 14
+                    ; renderer_version = Sqlite3.column_text statement 15
+                    ; description = Sqlite3.column_text statement 16
+                    ; description_md5 = Sqlite3.column_text statement 17
+                    }
+                | Sqlite3.Rc.DONE -> Error (Error.Visual_not_found reference)
+                | return_code -> check database return_code |> Result.map ~f:(fun () -> assert false))
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
 let query_existing_excerpt database ~snapshot_id ~byte_start ~byte_end =
   with_statement
     database
@@ -6160,6 +6800,28 @@ WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?4
                       in
                       step_done database statement)
                 in
+                let%bind () =
+                  with_statement
+                    database
+                    {|
+INSERT INTO finding_visual_evidence (
+  step_key, finding_key, revision, visual_ref, relation, attached_at
+)
+SELECT step_key, finding_key, ?3, visual_ref, relation, attached_at
+FROM finding_visual_evidence
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?4
+|}
+                    ~f:(fun statement ->
+                      let%bind () = bind_text database statement 1 step in
+                      let%bind () = bind_text database statement 2 key in
+                      let%bind () =
+                        check database (Sqlite3.bind_int statement 3 target_revision)
+                      in
+                      let%bind () =
+                        check database (Sqlite3.bind_int statement 4 revision)
+                      in
+                      step_done database statement)
+                in
                 with_statement
                   database
                   {|
@@ -6244,6 +6906,265 @@ INSERT INTO finding_evidence (
            | Ok result ->
              let%map () = execute database "COMMIT" in
              result
+           | Error _ as error ->
+             ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
+             error)
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let attach_visual_evidence
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ~claim_id
+      ~step_key
+      ~finding_key
+      ~visual_id
+      ~relation
+      ~now
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`NO_CREATE database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind () = execute database "PRAGMA foreign_keys = ON" in
+          let%bind () = execute database "BEGIN IMMEDIATE" in
+          let outcome =
+            let%bind schema_version = query_schema_version database in
+            let%bind () = migrate database ~from_version:schema_version ~now in
+            let%bind slug_text, phase_text = query_workspace database in
+            let expected = Sandwalk_core.Slug.to_string expected_slug in
+            let%bind () =
+              if String.equal expected slug_text
+              then Ok ()
+              else Error (Error.Workspace_slug_mismatch { expected; actual = slug_text })
+            in
+            let%bind phase =
+              Sandwalk_core.Phase.of_string phase_text
+              |> Result.of_option ~error:(Error.Invalid_persisted_phase phase_text)
+            in
+            let%bind () =
+              if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Researching
+              then Ok ()
+              else Error (Error.Finding_wrong_phase phase)
+            in
+            let%bind claimed_step = active_claim_step database claim_id in
+            let step = Sandwalk_core.Plan_step.Key.to_string step_key in
+            let%bind () =
+              if String.equal (Sandwalk_core.Plan_step.Key.to_string claimed_step) step
+              then Ok ()
+              else Error Error.Finding_step_mismatch
+            in
+            let key = Sandwalk_core.Finding_key.to_string finding_key in
+            let finding_reference = step ^ "/" ^ key in
+            let%bind revision, finding_state =
+              with_statement database
+                {|
+SELECT current_revision, state FROM findings
+WHERE step_key = ?1 AND finding_key = ?2
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 step in
+                  let%bind () = bind_text database statement 2 key in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW ->
+                    Ok (Sqlite3.column_int statement 0, Sqlite3.column_text statement 1)
+                  | Sqlite3.Rc.DONE -> Error (Error.Finding_not_found finding_reference)
+                  | return_code -> check database return_code |> Result.map ~f:(fun () -> assert false))
+            in
+            let visual_reference = Sandwalk_core.Visual_id.to_string visual_id in
+            let%bind visual_step =
+              with_statement database
+                "SELECT step_key FROM visual_evidence WHERE visual_ref = ?1"
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 visual_reference in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_text statement 0)
+                  | Sqlite3.Rc.DONE -> Error (Error.Visual_not_found visual_reference)
+                  | return_code -> check database return_code |> Result.map ~f:(Fn.const ""))
+            in
+            let%bind () =
+              if String.equal visual_step step
+              then Ok ()
+              else Error Error.Finding_visual_step_mismatch
+            in
+            let%bind visual_already_present =
+              with_statement database
+                {|
+SELECT 1 FROM finding_visual_evidence
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
+  AND visual_ref = ?4
+LIMIT 1
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 step in
+                  let%bind () = bind_text database statement 2 key in
+                  let%bind () =
+                    check database (Sqlite3.bind_int statement 3 revision)
+                  in
+                  let%bind () = bind_text database statement 4 visual_reference in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW -> Ok true
+                  | Sqlite3.Rc.DONE -> Ok false
+                  | return_code ->
+                    check database return_code
+                    |> Result.map ~f:(Fn.const false))
+            in
+            let%bind visual_count =
+              with_statement database
+                {|
+SELECT COUNT(DISTINCT visual_ref) FROM finding_visual_evidence
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 step in
+                  let%bind () = bind_text database statement 2 key in
+                  let%bind () =
+                    check database (Sqlite3.bind_int statement 3 revision)
+                  in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
+                  | return_code ->
+                    check database return_code
+                    |> Result.map ~f:(Fn.const Sandwalk_core.Visual_id.maximum_per_finding))
+            in
+            let%bind () =
+              if
+                visual_already_present
+                || visual_count < Sandwalk_core.Visual_id.maximum_per_finding
+              then Ok ()
+              else
+                Error
+                  (Error.Finding_visual_limit_exceeded finding_reference)
+            in
+            let relation_text = Sandwalk_core.Finding_relation.to_string relation in
+            let exists ~revision =
+              with_statement database
+                {|
+SELECT 1 FROM finding_visual_evidence
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
+  AND visual_ref = ?4 AND relation = ?5
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 step in
+                  let%bind () = bind_text database statement 2 key in
+                  let%bind () = check database (Sqlite3.bind_int statement 3 revision) in
+                  let%bind () = bind_text database statement 4 visual_reference in
+                  let%bind () = bind_text database statement 5 relation_text in
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW -> Ok true
+                  | Sqlite3.Rc.DONE -> Ok false
+                  | return_code -> check database return_code |> Result.map ~f:(Fn.const false))
+            in
+            let%bind attached_to_current = exists ~revision in
+            let revised =
+              not attached_to_current && not (String.equal finding_state "draft")
+            in
+            let target_revision = if revised then revision + 1 else revision in
+            let%bind () =
+              if revised
+              then (
+                let%bind () =
+                  with_statement database
+                    {|
+INSERT INTO finding_revisions (
+  step_key, finding_key, revision, claim_text, claim_md5, claim_size, created_at
+)
+SELECT step_key, finding_key, ?3, claim_text, claim_md5, claim_size, ?4
+FROM finding_revisions
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?5
+|}
+                    ~f:(fun statement ->
+                      let%bind () = bind_text database statement 1 step in
+                      let%bind () = bind_text database statement 2 key in
+                      let%bind () = check database (Sqlite3.bind_int statement 3 target_revision) in
+                      let%bind () = bind_text database statement 4 now in
+                      let%bind () = check database (Sqlite3.bind_int statement 5 revision) in
+                      step_done database statement)
+                in
+                let%bind () =
+                  with_statement database
+                    {|
+INSERT INTO finding_evidence (
+  step_key, finding_key, revision, excerpt_ref, relation, attached_at
+)
+SELECT step_key, finding_key, ?3, excerpt_ref, relation, attached_at
+FROM finding_evidence
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?4
+|}
+                    ~f:(fun statement ->
+                      let%bind () = bind_text database statement 1 step in
+                      let%bind () = bind_text database statement 2 key in
+                      let%bind () = check database (Sqlite3.bind_int statement 3 target_revision) in
+                      let%bind () = check database (Sqlite3.bind_int statement 4 revision) in
+                      step_done database statement)
+                in
+                let%bind () =
+                  with_statement database
+                    {|
+INSERT INTO finding_visual_evidence (
+  step_key, finding_key, revision, visual_ref, relation, attached_at
+)
+SELECT step_key, finding_key, ?3, visual_ref, relation, attached_at
+FROM finding_visual_evidence
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?4
+|}
+                    ~f:(fun statement ->
+                      let%bind () = bind_text database statement 1 step in
+                      let%bind () = bind_text database statement 2 key in
+                      let%bind () = check database (Sqlite3.bind_int statement 3 target_revision) in
+                      let%bind () = check database (Sqlite3.bind_int statement 4 revision) in
+                      step_done database statement)
+                in
+                with_statement database
+                  {|
+UPDATE findings SET current_revision = ?3, state = 'draft', updated_at = ?4
+WHERE step_key = ?1 AND finding_key = ?2
+|}
+                  ~f:(fun statement ->
+                    let%bind () = bind_text database statement 1 step in
+                    let%bind () = bind_text database statement 2 key in
+                    let%bind () = check database (Sqlite3.bind_int statement 3 target_revision) in
+                    let%bind () = bind_text database statement 4 now in
+                    step_done database statement))
+              else Ok ()
+            in
+            let%bind already_attached = exists ~revision:target_revision in
+            let%bind () =
+              if already_attached
+              then Ok ()
+              else
+                with_statement database
+                  {|
+INSERT INTO finding_visual_evidence (
+  step_key, finding_key, revision, visual_ref, relation, attached_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+|}
+                  ~f:(fun statement ->
+                    let%bind () = bind_text database statement 1 step in
+                    let%bind () = bind_text database statement 2 key in
+                    let%bind () = check database (Sqlite3.bind_int statement 3 target_revision) in
+                    let%bind () = bind_text database statement 4 visual_reference in
+                    let%bind () = bind_text database statement 5 relation_text in
+                    let%bind () = bind_text database statement 6 now in
+                    step_done database statement)
+            in
+            Ok
+              { Attach_evidence_result.revision = target_revision
+              ; attached = not already_attached
+              ; revised
+              }
+          in
+          (match outcome with
+           | Ok result -> let%map () = execute database "COMMIT" in result
            | Error _ as error ->
              ignore (execute database "ROLLBACK" : (unit, Error.t) Result.t);
              error)
@@ -6342,8 +7263,13 @@ WHERE step_key = ?1 AND finding_key = ?2
 SELECT
   COUNT(*),
   COALESCE(SUM(CASE WHEN relation <> 'context' THEN 1 ELSE 0 END), 0)
-FROM finding_evidence
-WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
+FROM (
+  SELECT relation FROM finding_evidence
+  WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
+  UNION ALL
+  SELECT relation FROM finding_visual_evidence
+  WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
+)
 |}
                     ~f:(fun statement ->
                       let%bind () = bind_text database statement 1 step in
@@ -6427,6 +7353,7 @@ let review_finding
       ~source_quality
       ~conflicts
       ~qualifications
+      ~reviewed_visuals
       ~review_json
       ~review_md5
       ~now
@@ -6502,6 +7429,35 @@ WHERE step_key = ?1 AND finding_key = ?2
               if String.equal finding_state "draft"
               then Error (Error.Finding_not_sealed reference)
               else Ok ()
+            in
+            let current_visuals = ref [] in
+            let%bind () =
+              with_statement database
+                {|
+SELECT DISTINCT visual_ref FROM finding_visual_evidence
+WHERE step_key = ?1 AND finding_key = ?2 AND revision = ?3
+ORDER BY visual_ref
+|}
+                ~f:(fun statement ->
+                  let%bind () = bind_text database statement 1 step in
+                  let%bind () = bind_text database statement 2 key in
+                  let%bind () = check database (Sqlite3.bind_int statement 3 revision) in
+                  let rec loop () =
+                    match Sqlite3.step statement with
+                    | Sqlite3.Rc.ROW ->
+                      current_visuals := Sqlite3.column_text statement 0 :: !current_visuals;
+                      loop ()
+                    | Sqlite3.Rc.DONE -> Ok ()
+                    | return_code -> check database return_code
+                  in
+                  loop ())
+            in
+            let current_visuals = List.rev !current_visuals in
+            let reviewed_visuals = List.sort reviewed_visuals ~compare:String.compare in
+            let%bind () =
+              if List.equal String.equal current_visuals reviewed_visuals
+              then Ok ()
+              else Error (Error.Finding_visual_review_incomplete reference)
             in
             let%bind existing_hash =
               with_statement
@@ -6787,6 +7743,7 @@ WHERE state = 'claimed'
 
 let check_draft_gate database =
   let open Result.Let_syntax in
+  let%bind schema_version = query_schema_version database in
   let%bind required_incomplete =
     with_statement
       database
@@ -6826,9 +7783,9 @@ WHERE e.state = 'completed'
         | return_code ->
           check database return_code |> Result.map ~f:(Fn.const 1))
   in
-  let%bind invalid_evidence =
-    with_statement
-      database
+  let invalid_evidence_query =
+    if schema_version >= 26
+    then
       {|
 SELECT COUNT(*)
 FROM findings AS f
@@ -6836,11 +7793,14 @@ JOIN step_executions AS se ON se.step_key = f.step_key
 WHERE se.state = 'completed'
   AND (
     NOT EXISTS (
-      SELECT 1
-      FROM finding_evidence AS fe
-      WHERE fe.step_key = f.step_key
-        AND fe.finding_key = f.finding_key
-        AND fe.revision = f.current_revision
+      SELECT 1 FROM (
+        SELECT step_key, finding_key, revision FROM finding_evidence
+        UNION ALL
+        SELECT step_key, finding_key, revision FROM finding_visual_evidence
+      ) AS evidence
+      WHERE evidence.step_key = f.step_key
+        AND evidence.finding_key = f.finding_key
+        AND evidence.revision = f.current_revision
     )
     OR EXISTS (
       SELECT 1
@@ -6854,6 +7814,37 @@ WHERE se.state = 'completed'
     )
   )
 |}
+    else
+      {|
+SELECT COUNT(*)
+FROM findings AS f
+JOIN step_executions AS se ON se.step_key = f.step_key
+WHERE se.state = 'completed'
+  AND (
+    NOT EXISTS (
+      SELECT 1
+      FROM finding_evidence AS evidence
+      WHERE evidence.step_key = f.step_key
+        AND evidence.finding_key = f.finding_key
+        AND evidence.revision = f.current_revision
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM finding_evidence AS fe
+      JOIN excerpts AS e ON e.excerpt_ref = fe.excerpt_ref
+      JOIN snapshots AS s ON s.snapshot_ref = e.snapshot_ref
+      WHERE fe.step_key = f.step_key
+        AND fe.finding_key = f.finding_key
+        AND fe.revision = f.current_revision
+        AND e.markdown_sha256 <> s.markdown_sha256
+    )
+  )
+|}
+  in
+  let%bind invalid_evidence =
+    with_statement
+      database
+      invalid_evidence_query
       ~f:(fun statement ->
         match Sqlite3.step statement with
         | Sqlite3.Rc.ROW -> Ok (Sqlite3.column_int statement 0)
@@ -6973,6 +7964,120 @@ ORDER BY p.position, f.finding_key, e.line_start, e.excerpt_ref, fe.relation
           in
           let%map () = check database return_code in
           List.rev !rows
+        with
+        | exn -> Error (Error.Database_error (Exn.to_string exn)))
+      ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
+  with
+  | exn -> Error (Error.Database_error (Exn.to_string exn))
+;;
+
+let read_writer_visuals
+      ?(busy_timeout_ms = 5_000)
+      ~database_path
+      ~expected_slug
+      ()
+  =
+  try
+    let database = Sqlite3.db_open ~mode:`READONLY database_path in
+    Exn.protect
+      ~f:(fun () ->
+        try
+          Sqlite3.busy_timeout database busy_timeout_ms;
+          let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
+          let%bind () =
+            if schema_version > current_schema_version
+            then Error (Error.Unsupported_schema_version schema_version)
+            else if schema_version < 26
+            then Ok ()
+            else Ok ()
+          in
+          let%bind slug_text, phase_text = query_workspace database in
+          let expected = Sandwalk_core.Slug.to_string expected_slug in
+          let%bind () =
+            if String.equal expected slug_text
+            then Ok ()
+            else Error (Error.Workspace_slug_mismatch { expected; actual = slug_text })
+          in
+          let%bind phase =
+            Sandwalk_core.Phase.of_string phase_text
+            |> Result.of_option ~error:(Error.Invalid_persisted_phase phase_text)
+          in
+          let%bind () =
+            if Sandwalk_core.Phase.equal phase Sandwalk_core.Phase.Evidence_review
+            then Ok ()
+            else Error (Error.Draft_wrong_phase phase)
+          in
+          let%bind () = check_draft_gate database in
+          if schema_version < 26
+          then Ok []
+          else (
+            let rows = ref [] in
+            let return_code =
+              Sqlite3.exec database
+                {|
+SELECT f.step_key, f.finding_key, r.verdict, fr.claim_text,
+       fe.relation, v.visual_ref, v.image_path, v.image_md5, v.image_sha256,
+       v.description_text, v.description_md5, s.snapshot_ref,
+       s.final_url, v.page_number, v.manifest_path, v.manifest_md5,
+       s.artifact_path, v.source_artifact, v.source_sha256, v.source_format
+FROM findings AS f
+JOIN step_executions AS se
+  ON se.step_key = f.step_key AND se.state = 'completed'
+JOIN finding_revisions AS fr
+  ON fr.step_key = f.step_key
+ AND fr.finding_key = f.finding_key
+ AND fr.revision = f.current_revision
+JOIN finding_reviews AS r
+  ON r.step_key = f.step_key
+ AND r.finding_key = f.finding_key
+ AND r.revision = f.current_revision
+JOIN finding_visual_evidence AS fe
+  ON fe.step_key = f.step_key
+ AND fe.finding_key = f.finding_key
+ AND fe.revision = f.current_revision
+JOIN visual_evidence AS v ON v.visual_ref = fe.visual_ref
+JOIN snapshots AS s ON s.snapshot_ref = v.snapshot_ref
+JOIN plan_steps AS p ON p.step_key = f.step_key
+ORDER BY p.position, f.finding_key, v.page_number, v.visual_ref, fe.relation
+|}
+                ~cb:(fun row _headers ->
+                  match row with
+                  | [| Some step; Some finding; Some verdict; Some claim;
+                       Some relation; Some visual; Some image_path; Some image_md5;
+                       Some image_sha256; Some description; Some description_md5; Some snapshot;
+                       Some source_url; Some page; Some manifest_path;
+                       Some manifest_md5; Some source_root;
+                       Some source_artifact; Some source_sha256;
+                       Some source_format |] ->
+                    rows :=
+                      { Writer_visual.step
+                      ; finding
+                      ; verdict
+                      ; claim
+                      ; relation
+                      ; visual
+                      ; image_path
+                      ; image_md5
+                      ; image_sha256
+                      ; manifest_path
+                      ; manifest_md5
+                      ; source_root
+                      ; source_artifact
+                      ; source_path = Filename.concat source_root source_artifact
+                      ; source_sha256
+                      ; source_format
+                      ; description
+                      ; description_md5
+                      ; snapshot
+                      ; source_url
+                      ; page = Int.of_string page
+                      }
+                      :: !rows
+                  | _ -> failwith "Invalid persisted writer visual evidence.")
+            in
+            let%map () = check database return_code in
+            List.rev !rows)
         with
         | exn -> Error (Error.Database_error (Exn.to_string exn)))
       ~finally:(fun () -> ignore (Sqlite3.db_close database : bool))
@@ -7505,14 +8610,40 @@ let query_report_citations database report_revision =
     ~finally:(fun () -> ignore (Sqlite3.finalize statement : Sqlite3.Rc.t))
 ;;
 
-let query_finding_sources database reference =
+let query_finding_sources database ~schema_version reference =
   match String.lsplit2 reference ~on:'/' with
   | None -> Error Error.Finalize_gate_failed
   | Some (step, finding) ->
     let sources = ref [] in
-    with_statement
-      database
-      {|
+    let query =
+      if schema_version >= 26
+      then
+        {|
+SELECT DISTINCT source_url FROM (
+  SELECT s.final_url AS source_url
+  FROM findings f
+  JOIN finding_evidence fe
+    ON fe.step_key = f.step_key
+   AND fe.finding_key = f.finding_key
+   AND fe.revision = f.current_revision
+  JOIN excerpts e ON e.excerpt_ref = fe.excerpt_ref
+  JOIN snapshots s ON s.snapshot_ref = e.snapshot_ref
+  WHERE f.step_key = ?1 AND f.finding_key = ?2 AND f.state = 'reviewed'
+  UNION ALL
+  SELECT s.final_url AS source_url
+  FROM findings f
+  JOIN finding_visual_evidence fe
+    ON fe.step_key = f.step_key
+   AND fe.finding_key = f.finding_key
+   AND fe.revision = f.current_revision
+  JOIN visual_evidence v ON v.visual_ref = fe.visual_ref
+  JOIN snapshots s ON s.snapshot_ref = v.snapshot_ref
+  WHERE f.step_key = ?1 AND f.finding_key = ?2 AND f.state = 'reviewed'
+)
+ORDER BY source_url
+|}
+      else
+        {|
 SELECT DISTINCT s.final_url
 FROM findings f
 JOIN finding_evidence fe
@@ -7524,6 +8655,10 @@ JOIN snapshots s ON s.snapshot_ref = e.snapshot_ref
 WHERE f.step_key = ?1 AND f.finding_key = ?2 AND f.state = 'reviewed'
 ORDER BY s.final_url
 |}
+    in
+    with_statement
+      database
+      query
       ~f:(fun statement ->
         let open Result.Let_syntax in
         let%bind () = bind_text database statement 1 step in
@@ -7557,6 +8692,7 @@ let read_finalization_state
         try
           Sqlite3.busy_timeout database busy_timeout_ms;
           let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
           let%bind slug_text, phase_text = query_workspace database in
           let expected = Sandwalk_core.Slug.to_string expected_slug in
           let%bind () =
@@ -7584,7 +8720,7 @@ let read_finalization_state
             query_report_citations database report_revision
           in
           let%map sources_by_finding =
-            List.map citations ~f:(query_finding_sources database)
+            List.map citations ~f:(query_finding_sources database ~schema_version)
             |> Result.all
           in
           { Finalization_state.report_revision
@@ -7786,6 +8922,7 @@ let read_raw_gc_candidates
         try
           Sqlite3.busy_timeout database busy_timeout_ms;
           let open Result.Let_syntax in
+          let%bind schema_version = query_schema_version database in
           let%bind slug_text, _ = query_workspace database in
           let expected = Sandwalk_core.Slug.to_string expected_slug in
           let%bind () =
@@ -7798,12 +8935,25 @@ let read_raw_gc_candidates
           in
           let%bind () = ensure_no_active_claims database in
           let paths = ref [] in
+          let query =
+            if schema_version >= 26
+            then
+              {|
+SELECT s.artifact_path
+FROM snapshots s
+WHERE NOT EXISTS (
+  SELECT 1 FROM visual_evidence v WHERE v.snapshot_ref = s.snapshot_ref
+)
+ORDER BY s.snapshot_ref
+|}
+            else "SELECT artifact_path FROM snapshots ORDER BY snapshot_ref"
+          in
           let%map () =
             check
               database
               (Sqlite3.exec
                  database
-                 "SELECT artifact_path FROM snapshots ORDER BY snapshot_ref"
+                 query
                  ~cb:(fun row _ ->
                    match row with
                    | [| Some path |] -> paths := path :: !paths

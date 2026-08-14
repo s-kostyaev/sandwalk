@@ -167,6 +167,27 @@ module Excerpt_id : sig
   val to_string : t -> string
 end
 
+module Visual_id : sig
+  type t
+
+  val maximum_per_finding : int
+  val of_string : string -> t option
+  val to_string : t -> string
+end
+
+module Visual_description : sig
+  type t
+
+  type error =
+    | Empty
+    | Too_large
+  [@@deriving sexp_of]
+
+  val maximum_bytes : int
+  val create : string -> (t, error) Result.t
+  val text : t -> string
+end
+
 module Excerpt : sig
   type t
 
@@ -243,6 +264,21 @@ module Writer_pack : sig
     -> line_start:int
     -> line_end:int
     -> text:string
+    -> item
+
+  val visual_item
+    :  step:string
+    -> finding:string
+    -> verdict:string
+    -> claim:string
+    -> relation:string
+    -> visual:string
+    -> snapshot:string
+    -> source_url:string
+    -> source_format:string
+    -> page:int
+    -> image_path:string
+    -> description:string
     -> item
 
   val render : slug:string -> item list -> string

@@ -1,5 +1,5 @@
   $ sandwalk init --slug dag-test --directory-prefix workspaces
-  {"ok":true,"result":{"slug":"dag-test","phase":"initialized","schema_version":25}}
+  {"ok":true,"result":{"slug":"dag-test","phase":"initialized","schema_version":26}}
   $ printf 'Determine a small, well-sourced answer.\n' > objective.md
 
   $ sandwalk plan set-objective \

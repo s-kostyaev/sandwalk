@@ -51,6 +51,16 @@ module Workspace = struct
       ("artifacts/excerpts/" ^ Sandwalk_core.Excerpt_id.to_string excerpt_id ^ ".md")
   ;;
 
+  let temporary_visual_path t ~invocation_id =
+    Filename.concat t.root ("artifacts/temporary/visual-" ^ invocation_id)
+  ;;
+
+  let visual_path t visual_id =
+    Filename.concat
+      t.root
+      ("artifacts/visuals/" ^ Sandwalk_core.Visual_id.to_string visual_id)
+  ;;
+
   let resolve ~directory_prefix ~slug =
     let root =
       Filename.concat directory_prefix (Sandwalk_core.Slug.to_string slug)
@@ -78,6 +88,7 @@ module Workspace = struct
       [ "database"
       ; "artifacts/snapshots"
       ; "artifacts/excerpts"
+      ; "artifacts/visuals"
       ; "artifacts/resume"
       ; "artifacts/work"
       ; "artifacts/temporary"
@@ -349,6 +360,49 @@ module File_input = struct
             maximum_bytes
             ();
         { path; content; size; md5 = Md5.digest_string content |> Md5.to_hex }))
+  ;;
+end
+
+module File_digest = struct
+  let sha256 ~path =
+    Deferred.Or_error.try_with (fun () ->
+      let search_path =
+        Sys.getenv "PATH"
+        |> Option.value ~default:""
+        |> String.split ~on:':'
+      in
+      let%bind process =
+        Process.create_exn
+          ~prog_search_path:search_path
+          ~prog:"shasum"
+          ~args:[ "-a"; "256"; "--"; path ]
+          ()
+      in
+      let output = Process.collect_output_and_wait process in
+      let%bind timed = Clock.with_timeout (Time_float.Span.of_sec 60.) output in
+      let%bind output =
+        match timed with
+        | `Result output -> Deferred.return output
+        | `Timeout ->
+          Process.send_signal process Signal.kill;
+          let%map _ = output in
+          failwith "SHA-256 process timed out"
+      in
+      Core_unix.Exit_or_signal.or_error output.exit_status |> Or_error.ok_exn;
+      let digest =
+        output.stdout
+        |> String.split ~on:' '
+        |> List.find ~f:(Fn.non String.is_empty)
+        |> Option.value_exn
+      in
+      if
+        String.length digest <> 64
+        || not
+             (String.for_all digest ~f:(function
+                | '0' .. '9' | 'a' .. 'f' -> true
+                | _ -> false))
+      then failwith "Invalid SHA-256 output";
+      Deferred.return digest)
   ;;
 end
 
@@ -689,4 +743,13 @@ let excerpt_id () =
       sprintf "%02x" (Char.to_int character))
   in
   Sandwalk_core.Excerpt_id.of_string ("excerpt_" ^ suffix) |> Option.value_exn
+;;
+
+let visual_id () =
+  let suffix =
+    random_bits ()
+    |> String.concat_map ~f:(fun character ->
+      sprintf "%02x" (Char.to_int character))
+  in
+  Sandwalk_core.Visual_id.of_string ("visual_" ^ suffix) |> Option.value_exn
 ;;

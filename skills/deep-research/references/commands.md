@@ -45,11 +45,16 @@ sandwalk search --slug <slug> --claim <claim_id> --query <query> \
 sandwalk fetch --slug <slug> --claim <claim_id> <hit_id>
 sandwalk excerpt create --slug <slug> --claim <claim_id> \
   --snapshot <snapshot_id> --lines <first:last>
+sandwalk visual create --slug <slug> --claim <claim_id> \
+  --snapshot <snapshot_id> --page <one-based-page> \
+  --description-file <observation.md>
 
 sandwalk finding create --slug <slug> --claim <claim_id> \
   --step <step> --key <finding> --claim-file <claim.md>
 sandwalk finding attach --slug <slug> --claim <claim_id> \
   --finding <step>/<finding> --excerpt <excerpt_id> --relation supports
+sandwalk finding attach --slug <slug> --claim <claim_id> \
+  --finding <step>/<finding> --visual <visual_id> --relation supports
 sandwalk finding seal --slug <slug> --claim <claim_id> \
   --finding <step>/<finding>
 sandwalk finding review --slug <slug> --claim <claim_id> \
@@ -124,8 +129,22 @@ It binds the immutable snapshot to the claimed step without fetching it again.
 Evidence relations are `supports`, `contradicts`, `qualifies`, and `context`.
 Attaching evidence to an already sealed finding creates a new revision that
 must be sealed and reviewed again.
-`context` cannot seal a finding by itself; at least one excerpt must use
-`supports`, `contradicts`, or `qualifies`.
+`context` cannot seal a finding by itself; at least one evidence artifact must
+use `supports`, `contradicts`, or `qualifies`.
+
+Use visual evidence only for a supported paginated rich-document artifact
+retained by the immutable snapshot manifest and only when layout or graphical
+content is material. `visual create` renders one complete page to a bounded PNG
+and records the original format/hash, conversion-and-render profile, transient
+PDF hash when applicable, implementation versions, and image hash. PDF is
+direct; Office, OpenDocument, RTF, EPUB/FB2, Visio, and Publisher inputs use a
+temporary LibreOffice conversion. Open the returned image with vision before
+attaching it, and use its displayed pagination for non-PDF inputs. Its
+description is an agent observation for navigation, not source text. The same
+snapshot page and render profile return the same durable visual reference. If
+this is done while a current excerpt or finding packet exists, do not apply that
+old packet after the mutation; run `sandwalk continue` to regenerate it from
+durable state.
 
 Checkpoint long work or handoffs:
 
@@ -156,6 +175,31 @@ Submit one bounded JSON object:
 Verdicts are `supported`, `partially-supported`, `unsupported`, or
 `contradicted`. Review the exact current finding revision and its excerpts.
 Do not review from the draft report.
+
+When a finding contains visual evidence, use v2 and enumerate every image that
+was actually inspected:
+
+```json
+{
+  "protocol": "sandwalk.finding-review.v2",
+  "verdict": "partially-supported",
+  "summary": "The rendered page supports the diagram-dependent portion.",
+  "source_quality": "Primary source page rendered from the retained original.",
+  "conflicts": "",
+  "qualifications": "The nearby prose was verified separately.",
+  "reviewed_visuals": [
+    "visual_0123456789abcdef0123456789abcdef"
+  ]
+}
+```
+
+Review packets expose each visual's `image_path`, source snapshot, page number,
+relation, and non-source description. Open every image path with vision, then
+copy the exact set of visual references into `reviewed_visuals`; a v1 review or
+an incomplete list is rejected.
+
+The bounded v2 protocol permits up to 256 distinct visual references per
+finding revision. Prefer narrow findings instead of approaching that ceiling.
 
 ## Draft and review the report
 

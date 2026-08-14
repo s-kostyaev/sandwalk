@@ -946,6 +946,42 @@ PRAGMA user_version = 24;
 |})
 ;;
 
+let create_v25 database slug =
+  create_v24 database slug;
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+ALTER TABLE search_queries
+ADD COLUMN adapter_metadata_json TEXT NOT NULL DEFAULT '{}'
+CHECK (
+  length(CAST(adapter_metadata_json AS BLOB)) BETWEEN 2 AND 16384
+  AND json_valid(adapter_metadata_json)
+  AND json_type(adapter_metadata_json) = 'object'
+);
+INSERT INTO schema_migrations (version, applied_at)
+VALUES (25, '2026-01-01 00:00:00Z');
+PRAGMA user_version = 25;
+|})
+;;
+
+let prepare_evidence_review database =
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+UPDATE step_executions
+SET state = 'completed', active_claim_id = NULL,
+    lease_expires_unix_seconds = NULL
+WHERE step_key = 'fixture-step';
+UPDATE findings SET state = 'reviewed'
+WHERE step_key = 'fixture-step' AND finding_key = 'sealed-finding';
+UPDATE workspaces SET phase = 'evidence-review';
+|})
+;;
+
 let inspect database =
   print_query database "SELECT slug, phase FROM workspaces";
   print_query database "PRAGMA user_version";
@@ -1140,6 +1176,73 @@ ORDER BY snapshot_ref
 |}
 ;;
 
+let fill_visual_limit database =
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+WITH RECURSIVE sequence(n) AS (
+  VALUES(1)
+  UNION ALL
+  SELECT n + 1 FROM sequence WHERE n < 256
+)
+INSERT INTO visual_evidence (
+  visual_ref, snapshot_ref, claim_id, step_key, image_path, manifest_path,
+  source_artifact, source_sha256, source_format, page_number, page_count,
+  image_sha256, image_md5, image_size, width, height, render_profile,
+  renderer_version, description_text, description_md5, description_size,
+  manifest_json, manifest_md5, created_at
+)
+SELECT
+  printf('visual_%032x', n), s.snapshot_ref,
+  'claim_00000000000000000000000000000001', 'fixture-step',
+  printf('fixture-visual-%d/page.png', n),
+  printf('fixture-visual-%d/manifest.json', n),
+  'original/source.pdf',
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  'pdf',
+  n + 1, 257,
+  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  'cccccccccccccccccccccccccccccccc', 1, 1, 1, 'fixture-profile',
+  'fixture-renderer', 'Fixture visual',
+  'dddddddddddddddddddddddddddddddd', 14, '{}',
+  'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', '2026-01-01 00:00:00Z'
+FROM sequence CROSS JOIN snapshots AS s
+ORDER BY s.snapshot_ref
+LIMIT 256;
+INSERT INTO finding_visual_evidence (
+  step_key, finding_key, revision, visual_ref, relation, attached_at
+)
+SELECT 'fixture-step', 'limit-finding', 1, visual_ref, 'supports',
+       '2026-01-01 00:00:00Z'
+FROM visual_evidence
+WHERE page_number BETWEEN 2 AND 256;
+|})
+;;
+
+let seed_raw_gc_plan database =
+  check
+    database
+    (Sqlite3.exec
+       database
+       {|
+INSERT INTO raw_gc_plan (
+  singleton, plan_path, plan_json, plan_md5, created_at, applied_at
+) VALUES (
+  1, 'stale-gc-plan.json',
+  '{"protocol":"sandwalk.gc-raw-plan.v1","artifacts":[]}',
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '2026-01-01 00:00:00Z', NULL
+)
+ON CONFLICT(singleton) DO UPDATE SET
+  plan_path = excluded.plan_path,
+  plan_json = excluded.plan_json,
+  plan_md5 = excluded.plan_md5,
+  created_at = excluded.created_at,
+  applied_at = NULL;
+|})
+;;
+
 let () =
   let action, path =
     match Sys.argv with
@@ -1167,6 +1270,9 @@ let () =
     | [| _; "--create-v22"; path; slug |] -> `Create (22, slug), path
     | [| _; "--create-v23"; path; slug |] -> `Create (23, slug), path
     | [| _; "--create-v24"; path; slug |] -> `Create (24, slug), path
+    | [| _; "--create-v25"; path; slug |] -> `Create (25, slug), path
+    | [| _; "--create-v25-evidence-review"; path; slug |] ->
+      `Create_v25_evidence_review slug, path
     | [| _; "--inspect-claims"; path |] -> `Inspect_claims, path
     | [| _; "--inspect-checkpoints"; path |] -> `Inspect_checkpoints, path
     | [| _; "--inspect-hits"; path |] -> `Inspect_hits, path
@@ -1184,6 +1290,8 @@ let () =
     | [| _; "--inspect-recon"; path |] -> `Inspect_recon, path
     | [| _; "--inspect-extensions"; path |] -> `Inspect_extensions, path
     | [| _; "--inspect-promotions"; path |] -> `Inspect_promotions, path
+    | [| _; "--fill-visual-limit"; path |] -> `Fill_visual_limit, path
+    | [| _; "--seed-raw-gc-plan"; path |] -> `Seed_raw_gc_plan, path
     | [| _; "--clear-findings"; path |] -> `Clear_findings, path
     | [| _; "--set-legacy-deadline"; path; step |] ->
       `Set_legacy_deadline step, path
@@ -1219,7 +1327,11 @@ let () =
       | `Create (22, slug) -> create_v22 database slug
       | `Create (23, slug) -> create_v23 database slug
       | `Create (24, slug) -> create_v24 database slug
+      | `Create (25, slug) -> create_v25 database slug
       | `Create _ -> assert false
+      | `Create_v25_evidence_review slug ->
+        create_v25 database slug;
+        prepare_evidence_review database
       | `Inspect -> inspect database
       | `Inspect_claims -> inspect_claims database
       | `Inspect_checkpoints -> inspect_checkpoints database
@@ -1237,6 +1349,8 @@ let () =
       | `Inspect_recon -> inspect_recon database
       | `Inspect_extensions -> inspect_extensions database
       | `Inspect_promotions -> inspect_promotions database
+      | `Fill_visual_limit -> fill_visual_limit database
+      | `Seed_raw_gc_plan -> seed_raw_gc_plan database
       | `Clear_findings ->
         check database (Sqlite3.exec database "DELETE FROM finding_evidence");
         check database (Sqlite3.exec database "DELETE FROM finding_reviews");

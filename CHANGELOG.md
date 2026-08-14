@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-08-14
+
+### Visual evidence
+
+- Add immutable full-page visual evidence for retained PDFs and paginated rich
+  documents, with direct Poppler rendering or an isolated temporary
+  LibreOffice-to-PDF conversion, versioned render manifests, independently
+  checked source/intermediate/image hashes, deterministic idempotency, audit
+  events, and schema-26 persistence.
+- Allow findings to attach visual evidence through the existing typed
+  relations. Require `sandwalk.finding-review.v2` to enumerate every inspected
+  visual, include image paths in review packets and writer packs, and preserve
+  backing rich-document originals during raw-payload garbage collection.
+
 ## 0.3.0 — 2026-08-14
 
 ### Web search

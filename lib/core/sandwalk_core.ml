@@ -393,6 +393,48 @@ module Excerpt_id = struct
   let to_string t = t
 end
 
+module Visual_id = struct
+  type t = string
+
+  let maximum_per_finding = 256
+
+  let of_string value =
+    if
+      String.length value = 39
+      && String.is_prefix value ~prefix:"visual_"
+      && String.drop_prefix value 7
+         |> String.for_all ~f:(function
+           | '0' .. '9' | 'a' .. 'f' -> true
+           | _ -> false)
+    then Some value
+    else None
+  ;;
+
+  let to_string t = t
+end
+
+module Visual_description = struct
+  type t = string
+
+  type error =
+    | Empty
+    | Too_large
+  [@@deriving sexp_of]
+
+  let maximum_bytes = 4_096
+
+  let create value =
+    let value = String.strip value in
+    if String.is_empty value
+    then Error Empty
+    else if String.length value > maximum_bytes
+    then Error Too_large
+    else Ok value
+  ;;
+
+  let text t = t
+end
+
 module Excerpt = struct
   type t =
     { text : string
@@ -562,7 +604,7 @@ module Finding_claim = struct
 end
 
 module Writer_pack = struct
-  type item =
+  type text_item =
     { step : string
     ; finding : string
     ; verdict : string
@@ -575,6 +617,25 @@ module Writer_pack = struct
     ; line_end : int
     ; text : string
     }
+
+  type visual_item =
+    { step : string
+    ; finding : string
+    ; verdict : string
+    ; claim : string
+    ; relation : string
+    ; visual : string
+    ; snapshot : string
+    ; source_url : string
+    ; source_format : string
+    ; page : int
+    ; image_path : string
+    ; description : string
+    }
+
+  type item =
+    | Text of text_item
+    | Visual of visual_item
 
   let item
         ~step
@@ -589,18 +650,49 @@ module Writer_pack = struct
         ~line_end
         ~text
     =
-    { step
-    ; finding
-    ; verdict
-    ; claim
-    ; relation
-    ; excerpt
-    ; snapshot
-    ; source_url
-    ; line_start
-    ; line_end
-    ; text
-    }
+    Text
+      { step
+      ; finding
+      ; verdict
+      ; claim
+      ; relation
+      ; excerpt
+      ; snapshot
+      ; source_url
+      ; line_start
+      ; line_end
+      ; text
+      }
+  ;;
+
+  let visual_item
+        ~step
+        ~finding
+        ~verdict
+        ~claim
+        ~relation
+        ~visual
+        ~snapshot
+        ~source_url
+        ~source_format
+        ~page
+        ~image_path
+        ~description
+    =
+    Visual
+      { step
+      ; finding
+      ; verdict
+      ; claim
+      ; relation
+      ; visual
+      ; snapshot
+      ; source_url
+      ; source_format
+      ; page
+      ; image_path
+      ; description
+      }
   ;;
 
   let quote text =
@@ -622,8 +714,9 @@ module Writer_pack = struct
       ]
     in
     let sections =
-      List.concat_map items ~f:(fun item ->
-        [ "## " ^ item.step ^ "/" ^ item.finding
+      List.concat_map items ~f:(function
+        | Text item ->
+          [ "## " ^ item.step ^ "/" ^ item.finding
         ; ""
         ; "- Verdict: " ^ item.verdict
         ; "- Citation: `[cite:" ^ item.step ^ "/" ^ item.finding ^ "]`"
@@ -641,7 +734,24 @@ module Writer_pack = struct
         ; ""
         ; quote item.text
         ; ""
-        ])
+          ]
+        | Visual item ->
+          [ "## " ^ item.step ^ "/" ^ item.finding
+          ; ""
+          ; "- Verdict: " ^ item.verdict
+          ; "- Citation: `[cite:" ^ item.step ^ "/" ^ item.finding ^ "]`"
+          ; "- Claim: " ^ String.strip item.claim
+          ; ""
+          ; "### Visual evidence: " ^ item.visual ^ " (" ^ item.relation ^ ")"
+          ; ""
+          ; "- Source: " ^ item.source_url
+          ; "- Snapshot: " ^ item.snapshot
+          ; "- Source format: " ^ String.uppercase item.source_format
+          ; sprintf "- Source page: %d" item.page
+          ; "- Image: " ^ item.image_path
+          ; "- Agent observation (not source text): " ^ String.strip item.description
+          ; ""
+          ])
     in
     String.concat_lines (header @ sections)
   ;;
@@ -977,6 +1087,19 @@ let%test_unit "claim references require a canonical 128-bit suffix" =
   ]
   |> List.iter ~f:(fun value ->
     assert (Option.is_none (Claim_id.of_string value)))
+;;
+
+let%test_unit "visual references and observations are bounded" =
+  let valid = "visual_0123456789abcdef0123456789abcdef" in
+  assert (Visual_id.maximum_per_finding = 256);
+  assert (Option.is_some (Visual_id.of_string valid));
+  assert (Option.is_none (Visual_id.of_string (String.uppercase valid)));
+  assert (Result.is_ok (Visual_description.create "Diagram inspected."));
+  assert (Result.is_error (Visual_description.create "   "));
+  assert
+    (Result.is_error
+       (Visual_description.create
+          (String.make (Visual_description.maximum_bytes + 1) 'x')))
 ;;
 
 let%expect_test "candidate kinds have stable protocol names" =

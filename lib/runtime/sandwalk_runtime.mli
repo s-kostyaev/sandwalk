@@ -31,6 +31,8 @@ module Workspace : sig
   val temporary_export_path : t -> invocation_id:string -> string
   val snapshot_path : t -> Sandwalk_core.Snapshot_id.t -> string
   val excerpt_path : t -> Sandwalk_core.Excerpt_id.t -> string
+  val temporary_visual_path : t -> invocation_id:string -> string
+  val visual_path : t -> Sandwalk_core.Visual_id.t -> string
 end
 
 module Audit : sig
@@ -78,6 +80,10 @@ module File_input : sig
   val content : t -> string
   val size : t -> int
   val md5 : t -> string
+end
+
+module File_digest : sig
+  val sha256 : path:string -> string Deferred.Or_error.t
 end
 
 module Adapter : sig
@@ -130,3 +136,4 @@ val claim_id : unit -> Sandwalk_core.Claim_id.t
 val hit_id : unit -> Sandwalk_core.Hit_id.t
 val snapshot_id : unit -> Sandwalk_core.Snapshot_id.t
 val excerpt_id : unit -> Sandwalk_core.Excerpt_id.t
+val visual_id : unit -> Sandwalk_core.Visual_id.t

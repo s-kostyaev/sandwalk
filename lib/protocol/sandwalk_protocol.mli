@@ -162,6 +162,8 @@ module Finding_review : sig
 
   type t
 
+  val maximum_reviewed_visuals : int
+
   type error =
     | Invalid_review
     | Unsupported_protocol
@@ -174,6 +176,39 @@ module Finding_review : sig
   val source_quality : t -> string
   val conflicts : t -> string
   val qualifications : t -> string
+  val reviewed_visuals : t -> string list
+end
+
+module Visual_render : sig
+  type t
+
+  type error =
+    | Invalid_result
+    | Unsupported_protocol
+  [@@deriving sexp_of]
+
+  val request
+    :  source_document:string
+    -> source_format:string
+    -> output_directory:string
+    -> page:int
+    -> Yojson.Safe.t
+
+  val decode : Yojson.Safe.t -> (t, error) Result.t
+  val image_path : t -> string
+  val manifest_path : t -> string
+  val render_input_path : t -> string
+  val source_sha256 : t -> string
+  val source_format : t -> string
+  val render_input_sha256 : t -> string
+  val image_sha256 : t -> string
+  val image_size : t -> int
+  val width : t -> int
+  val height : t -> int
+  val page : t -> int
+  val page_count : t -> int
+  val render_profile : t -> string
+  val renderer_version : t -> string
 end
 
 module Report_review : sig

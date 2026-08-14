@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "-v" ]; then
+  printf '%s\n' 'pdftocairo fake-1.0' >&2
+  exit 0
+fi
+
+output_prefix=
+for argument in "$@"; do
+  output_prefix=$argument
+done
+
+printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' \
+  | base64 --decode >"$output_prefix.png"

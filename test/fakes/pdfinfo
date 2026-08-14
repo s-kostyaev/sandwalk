@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+page=1
+previous=
+for argument in "$@"; do
+  if [ "$previous" = "-f" ]; then
+    page=$argument
+  fi
+  previous=$argument
+done
+
+printf 'Pages:           3\n'
+printf 'Page %s size:   612 x 792 pts\n' "$page"

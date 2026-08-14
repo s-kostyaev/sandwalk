@@ -1,2 +1,2 @@
   $ sandwalk about
-  {"ok":true,"result":{"name":"sandwalk","version":"0.3.0"}}
+  {"ok":true,"result":{"name":"sandwalk","version":"0.4.0"}}

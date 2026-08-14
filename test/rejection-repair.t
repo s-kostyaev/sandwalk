@@ -143,4 +143,4 @@ Released schema 21 migrates candidate rejection and finding repair state.
   $ sandwalk continue --slug legacy21 --directory-prefix legacy21 >/dev/null
   $ sqlite3 legacy21/legacy21/database/sandwalk.sqlite3 \
   >   "SELECT (SELECT COUNT(*) FROM candidate_rejections), (SELECT COUNT(*) FROM finding_repairs), user_version FROM pragma_user_version;"
-  0|0|25
+  0|0|26

@@ -38,6 +38,10 @@ concurrently against the same claim. Then repeat this loop:
    If it reports phase `completed`, stop and report the exported result.
 2. Read the returned `artifacts/work/current.json` and every artifact it
    explicitly asks you to inspect.
+   For review evidence with `kind: "visual"`, open every `image_path` with the
+   available vision tool. Treat `description` only as an agent observation,
+   never as source text, and put every inspected visual reference into the
+   review's `reviewed_visuals` list exactly once.
 3. Edit only fields inside `editable`. Never change `fixed`, `workspace`,
    `action`, identifiers, or `integrity_md5`. The integrity hash excludes
    `editable`, so it remains valid after the intended edit and must never be
@@ -110,6 +114,23 @@ for the user; an unusable HTML representation falls back to Docling
 automatically. Inspect the returned primary document according to its declared
 media type; never treat the search snippet as document content.
 
+When the source meaning depends on a diagram, page layout, handwriting, or
+another visual feature that normalized text does not preserve, use
+`sandwalk visual create` on the retained rich-document snapshot page. It accepts
+only a supported paginated artifact named by the immutable snapshot manifest,
+renders one full page with a bounded fixed profile, and never invokes a model.
+PDF is direct; Office, OpenDocument, RTF, EPUB/FB2, Visio, and Publisher inputs
+use a temporary LibreOffice-to-PDF conversion before Poppler. Treat the returned
+PNG—not page numbering from another native viewer—as authoritative visual
+evidence, because font availability and renderer differences can affect
+non-PDF pagination. Inspect the PNG with vision before attaching it. The
+required description is your short observation for navigation; it is not a
+quotation and cannot substitute for inspecting the image. Prefer exact excerpts
+for ordinary textual claims. Visual capture is a permitted bounded detour from
+a current excerpt/finding packet: create and attach the visual with the current
+claim, do not apply the now-stale packet, then run `sandwalk continue` to derive
+a fresh packet from durable state.
+
 The explicit `sandwalk-fetch-xberg` alternative targets the Xberg v1 CLI and
 is intended for simple local documents where its lower operational cost is
 useful. Its bundled profile disables result caching, layout-to-Markdown,
@@ -161,8 +182,10 @@ audio, or captions outside Sandwalk.
 5. Search, select relevant hit identifiers from the JSON response, fetch those
    hits, and read only the necessary portions of the returned immutable
    primary documents.
-6. Create exact excerpts. Write narrow findings, attach excerpts with typed
-   relations, seal each finding revision, and review it against its evidence.
+6. Create exact excerpts and, only when material visual content requires it,
+   bounded rich-document page visuals. Write narrow findings, attach evidence
+   with typed relations, seal each finding revision, and review it against every
+   attached artifact.
    Prefer an independent validation worker; with one worker, perform the review
    as a separate evidence-only pass.
 7. Complete the claim only after its current findings pass review. Repeat until
@@ -186,11 +209,12 @@ the SQLite database, projections, snapshots, excerpts, or audit log.
 - Keep claims narrower than their evidence.
 - Preserve source disagreement using `contradicts` or `qualifies`; never erase
   it to force consensus.
-- Cite exact excerpts, not search snippets or remembered page content.
+- Cite exact excerpts or inspected immutable visual pages, not search snippets,
+  uninspected descriptions, or remembered page content.
 - Never query or edit the Sandwalk SQLite database directly. Candidate
   selection and recovery must go through the current packet.
-- Never fabricate or manually alter `hit_`, `snap_`, `excerpt_`, or `claim_`
-  identifiers.
+- Never fabricate or manually alter `hit_`, `snap_`, `excerpt_`, `visual_`, or
+  `claim_` identifiers.
 - Never rewrite citation numbering. Use
   `[cite:step-key/finding-key]`; Sandwalk renders final citations.
 - If a manual command fails, execute its `next` command when present. Otherwise
@@ -201,4 +225,5 @@ the SQLite database, projections, snapshots, excerpts, or audit log.
   existing claim through `continue` after interruption, and checkpoint before
   handing work off.
 - Relation `context` is supplemental. Every finding needs at least one
-  `supports`, `contradicts`, or `qualifies` excerpt before sealing.
+  `supports`, `contradicts`, or `qualifies` text or visual artifact before
+  sealing.

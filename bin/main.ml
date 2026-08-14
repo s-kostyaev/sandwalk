@@ -1,7 +1,7 @@
 open! Core
 open! Async
 
-let version = "0.3.0"
+let version = "0.4.0"
 
 let about_command =
   Async.Command.async
@@ -73,10 +73,12 @@ let compact_hint code =
   | "SEARCH_REQUIRES_CLAIM"
   | "FETCH_REQUIRES_CLAIM"
   | "EXCERPT_REQUIRES_CLAIM"
+  | "VISUAL_REQUIRES_CLAIM"
   | "SEARCH_NOT_ALLOWED"
   | "FETCH_NOT_ALLOWED"
   | "SNAPSHOT_PROMOTION_NOT_ALLOWED"
   | "EXCERPT_NOT_ALLOWED"
+  | "VISUAL_NOT_ALLOWED"
   | "FINDING_NOT_ALLOWED"
   | "DRAFT_NOT_ALLOWED"
   | "REPORT_NOT_ALLOWED"
@@ -138,6 +140,10 @@ let explanation = function
     Some
       ( "The fetch adapter exited unsuccessfully, timed out, or returned invalid JSON."
       , "Verify the selected adapter and its normalizer are on PATH. Info hits require `texiq`; semantic hits require an unchanged Sandwalk QMD index; the default web fallback requires the pinned Playwright Chromium runtime; local rich documents require Docling and a sandbox-readable source root." )
+  | "VISUAL_RENDER_FAILED" ->
+    Some
+      ( "The retained document page could not be rendered into bounded visual evidence."
+      , "Verify `pdfinfo` and `pdftocairo` are on PATH. Non-PDF rich documents also require LibreOffice (`soffice`) and a supported paginated source format." )
   | "INDEX_ADAPTER_FAILED" ->
     Some
       ( "The local ingest or QMD indexing process exited unsuccessfully or timed out."
@@ -473,7 +479,13 @@ let status_error = function
   | Recon_not_active _
   | Gc_active_claims
   | Gc_no_plan
-  | Gc_plan_stale ->
+  | Gc_plan_stale
+  | Visual_id_collision
+  | Finding_visual_step_mismatch
+  | Visual_wrong_phase _
+  | Visual_not_found _
+  | Finding_visual_limit_exceeded _
+  | Finding_visual_review_incomplete _ ->
     "DATABASE_ERROR", "Could not read workspace database."
 ;;
 
@@ -1196,14 +1208,46 @@ let work_packet
       Sandwalk_store.Finding_review_context.evidence finding_review_context
       |> List.map ~f:(fun (excerpt, path, relation) ->
         `Assoc
-          [ "excerpt", `String excerpt
+          [ "kind", `String "text"
+          ; "excerpt", `String excerpt
           ; "path", `String path
           ; "relation", `String relation
           ])
     in
+    let visuals =
+      Sandwalk_store.Finding_review_context.visuals finding_review_context
+    in
+    let visual_references =
+      List.map visuals ~f:(fun (visual, _) ->
+        Sandwalk_store.Visual_evidence.visual_id visual
+        |> Sandwalk_core.Visual_id.to_string)
+      |> List.dedup_and_sort ~compare:String.compare
+    in
+    let evidence =
+      evidence
+      @ List.map visuals ~f:(fun (visual, relation) ->
+          `Assoc
+            [ "kind", `String "visual"
+            ; ( "visual"
+              , `String
+                  (Sandwalk_store.Visual_evidence.visual_id visual
+                   |> Sandwalk_core.Visual_id.to_string) )
+            ; "image_path", `String (Sandwalk_store.Visual_evidence.image_path visual)
+            ; "snapshot", `String (Sandwalk_store.Visual_evidence.snapshot_id visual |> Sandwalk_core.Snapshot_id.to_string)
+            ; "page", `Int (Sandwalk_store.Visual_evidence.page visual)
+            ; "relation", `String relation
+            ; ( "description"
+              , `String (Sandwalk_store.Visual_evidence.description visual) )
+            ; "description_is_source_text", `Bool false
+            ])
+    in
     base
       "review-finding"
-      "Review every material assertion in fixed.statement against fixed.evidence and the current research context. Do not infer missing dates, status, or provenance. Use partially-supported or unsupported when any material assertion lacks exact support. Fill every review field without wrappers."
+      (if List.is_empty visual_references
+       then
+         "Review every material assertion in fixed.statement against fixed.evidence and the current research context. Do not infer missing dates, status, or provenance. Use partially-supported or unsupported when any material assertion lacks exact support. Fill every review field without wrappers."
+       else
+         "Review every material assertion against all fixed.evidence, opening each visual image_path with vision. Treat its description only as an agent observation, not source text. Put the exact fixed visual references into reviewed_visuals after inspecting them. Use partially-supported or unsupported when any material assertion lacks exact support.")
       [ "claim", `String (recommendation_detail_string_exn recommendation "claim")
       ; "finding", `String (recommendation_detail_string_exn recommendation "finding")
       ; ( "statement"
@@ -1223,13 +1267,20 @@ let work_packet
       ]
       [ ( "review"
         , `Assoc
-            [ "protocol", `String "sandwalk.finding-review.v1"
+            ([ ( "protocol"
+               , `String
+                   (if List.is_empty visual_references
+                    then "sandwalk.finding-review.v1"
+                    else "sandwalk.finding-review.v2") )
             ; "verdict", `String ""
             ; "summary", `String ""
             ; "source_quality", `String ""
             ; "conflicts", `String ""
             ; "qualifications", `String ""
-            ] )
+            ]
+             @ if List.is_empty visual_references
+               then []
+               else [ "reviewed_visuals", `List [] ]) )
       ]
   | "submit-draft" ->
     base
@@ -4643,6 +4694,254 @@ let excerpt_store_error = function
   | error -> fetch_error error
 ;;
 
+let visual_store_error = function
+  | Sandwalk_store.Error.Visual_wrong_phase phase ->
+    "VISUAL_NOT_ALLOWED", phase_error_message "Visual evidence creation" phase
+  | Visual_id_collision ->
+    "VISUAL_ID_COLLISION", "Could not allocate a unique visual reference."
+  | Visual_not_found reference ->
+    "VISUAL_NOT_FOUND", sprintf "Visual evidence %S does not exist." reference
+  | error -> excerpt_store_error error
+;;
+
+let visual_source_formats =
+  String.Set.of_list
+    [ "pdf"
+    ; "rtf"
+    ; "doc"
+    ; "dot"
+    ; "docm"
+    ; "docx"
+    ; "dotx"
+    ; "dotm"
+    ; "ppt"
+    ; "pps"
+    ; "pot"
+    ; "pptx"
+    ; "pptm"
+    ; "ppsx"
+    ; "ppsm"
+    ; "potx"
+    ; "potm"
+    ; "xls"
+    ; "xlt"
+    ; "xlsm"
+    ; "xlsx"
+    ; "xltx"
+    ; "xltm"
+    ; "xlsb"
+    ; "odt"
+    ; "ott"
+    ; "odp"
+    ; "otp"
+    ; "ods"
+    ; "ots"
+    ; "odg"
+    ; "otg"
+    ; "odf"
+    ; "epub"
+    ; "fb2"
+    ; "vsd"
+    ; "vsdx"
+    ; "pub"
+    ]
+;;
+
+let visual_source_format value =
+  let safe =
+    (not (String.is_empty value))
+    && String.length value <= 4_096
+    && not (Filename.is_absolute value)
+    && not (String.mem value '\\')
+    && List.for_all (String.split value ~on:'/') ~f:(fun component ->
+      not (String.is_empty component)
+      && not (String.equal component ".")
+      && not (String.equal component ".."))
+  in
+  if not safe
+  then None
+  else (
+    match String.rsplit2 (Filename.basename value) ~on:'.' with
+    | Some (_, extension) ->
+      let extension = String.lowercase extension in
+      if Set.mem visual_source_formats extension then Some extension else None
+    | None -> None)
+;;
+
+let snapshot_visual_source manifest_json =
+  Or_error.try_with (fun () ->
+    let manifest = Yojson.Safe.from_string manifest_json in
+    let artifacts =
+      match manifest with
+      | `Assoc fields ->
+        (match List.Assoc.find fields "artifacts" ~equal:String.equal with
+         | Some (`Assoc artifacts) -> artifacts
+         | _ -> failwith "snapshot manifest has no artifact map")
+      | _ -> failwith "snapshot manifest is not an object"
+    in
+    let candidate name =
+      match List.Assoc.find artifacts name ~equal:String.equal with
+      | Some (`String value) ->
+        Option.map (visual_source_format value) ~f:(fun format -> value, format)
+      | Some _ | None -> None
+    in
+    Option.first_some (candidate "pdf") (candidate "original")
+    |> Option.value_exn)
+;;
+
+let visual_manifest_matches
+      manifest
+      (rendered : Sandwalk_protocol.Visual_render.t)
+  =
+  match manifest with
+  | `Assoc fields ->
+    let string name =
+      match List.Assoc.find fields name ~equal:String.equal with
+      | Some (`String value) -> Some value
+      | Some _ | None -> None
+    in
+    let int name =
+      match List.Assoc.find fields name ~equal:String.equal with
+      | Some (`Int value) -> Some value
+      | Some _ | None -> None
+    in
+    Option.value_map (string "protocol") ~default:false ~f:(String.equal "sandwalk.visual-render-manifest.v1")
+    && Option.value_map (string "artifact") ~default:false ~f:(String.equal "page.png")
+    && Option.value_map (string "source_sha256") ~default:false
+         ~f:(String.equal (Sandwalk_protocol.Visual_render.source_sha256 rendered))
+    && Option.value_map (string "source_format") ~default:false
+         ~f:(String.equal (Sandwalk_protocol.Visual_render.source_format rendered))
+    && Option.value_map (string "render_input_sha256") ~default:false
+         ~f:
+           (String.equal
+              (Sandwalk_protocol.Visual_render.render_input_sha256 rendered))
+    && Option.value_map (string "image_sha256") ~default:false
+         ~f:(String.equal (Sandwalk_protocol.Visual_render.image_sha256 rendered))
+    && Option.value_map (string "render_profile") ~default:false
+         ~f:(String.equal (Sandwalk_protocol.Visual_render.render_profile rendered))
+    && Option.value_map (string "renderer_version") ~default:false
+         ~f:(String.equal (Sandwalk_protocol.Visual_render.renderer_version rendered))
+    && Option.value_map
+         (int "image_size")
+         ~default:false
+         ~f:(Int.equal (Sandwalk_protocol.Visual_render.image_size rendered))
+    && Option.value_map
+         (int "width")
+         ~default:false
+         ~f:(Int.equal (Sandwalk_protocol.Visual_render.width rendered))
+    && Option.value_map
+         (int "height")
+         ~default:false
+         ~f:(Int.equal (Sandwalk_protocol.Visual_render.height rendered))
+    && Option.value_map
+         (int "page")
+         ~default:false
+         ~f:(Int.equal (Sandwalk_protocol.Visual_render.page rendered))
+    && Option.value_map
+         (int "page_count")
+         ~default:false
+         ~f:(Int.equal (Sandwalk_protocol.Visual_render.page_count rendered))
+  | _ -> false
+;;
+
+let cleanup_visual_directory path =
+  let%map _ =
+    Monitor.try_with (fun () ->
+      In_thread.run (fun () ->
+        let rec remove entry =
+          match (Core_unix.lstat entry).st_kind with
+          | S_DIR ->
+            Stdlib.Sys.readdir entry
+            |> Array.iter ~f:(fun name -> remove (Filename.concat entry name));
+            Core_unix.rmdir entry
+          | S_REG | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK ->
+            Core_unix.unlink entry
+        in
+        remove path))
+  in
+  ()
+;;
+
+let regular_nonsymlink path =
+  Deferred.Or_error.try_with (fun () ->
+    In_thread.run (fun () ->
+      match (Core_unix.lstat path).st_kind with
+      | S_REG -> true
+      | S_DIR | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> false))
+;;
+
+let bounded_visual_source_descendant_nonsymlink
+      ~directory
+      ~relative
+      ~source_format
+  =
+  Deferred.Or_error.try_with (fun () ->
+    In_thread.run (fun () ->
+      let rec descend parent = function
+        | [] -> None
+        | [ component ] ->
+          let path = Filename.concat parent component in
+          (match (Core_unix.lstat path).st_kind with
+           | S_REG -> Some path
+           | S_DIR | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> None)
+        | component :: remaining ->
+          let child = Filename.concat parent component in
+          (match (Core_unix.lstat child).st_kind with
+           | S_DIR -> descend child remaining
+           | S_REG | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> None)
+      in
+      let path =
+        match (Core_unix.lstat directory).st_kind with
+        | S_DIR -> descend directory (String.split relative ~on:'/')
+        | S_REG | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> None
+      in
+      Option.value_map path ~default:false ~f:(fun path ->
+        let channel = Stdlib.open_in_bin path in
+        Exn.protect
+          ~f:(fun () ->
+            let size = Stdlib.in_channel_length channel in
+            size >= 1
+            && size <= 536_870_912
+            && (if String.equal source_format "pdf"
+                then
+                  size >= 5
+                  && String.equal (Stdlib.really_input_string channel 5) "%PDF-"
+                else true))
+          ~finally:(fun () -> Stdlib.close_in_noerr channel))))
+;;
+
+let bounded_pdf_nonsymlink path =
+  Deferred.Or_error.try_with (fun () ->
+    In_thread.run (fun () ->
+      match (Core_unix.lstat path).st_kind with
+      | S_REG ->
+        let channel = Stdlib.open_in_bin path in
+        Exn.protect
+          ~f:(fun () ->
+            let size = Stdlib.in_channel_length channel in
+            size >= 5
+            && size <= 536_870_912
+            && String.equal (Stdlib.really_input_string channel 5) "%PDF-")
+          ~finally:(fun () -> Stdlib.close_in_noerr channel)
+      | S_DIR | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> false))
+;;
+
+let exact_visual_directory ~includes_render_input path =
+  Deferred.Or_error.try_with (fun () ->
+    In_thread.run (fun () ->
+      match (Core_unix.lstat path).st_kind with
+      | S_DIR ->
+        Stdlib.Sys.readdir path
+        |> Array.to_list
+        |> List.sort ~compare:String.compare
+        |> List.equal
+             String.equal
+             (if includes_render_input
+              then [ "manifest.json"; "page.png"; "render-input.pdf" ]
+              else [ "manifest.json"; "page.png" ])
+      | S_REG | S_CHR | S_BLK | S_LNK | S_FIFO | S_SOCK -> false))
+;;
+
 let snapshot_promotion_error = function
   | Sandwalk_store.Error.Snapshot_not_found reference ->
     "SNAPSHOT_NOT_FOUND", sprintf "Snapshot %S does not exist." reference
@@ -5825,6 +6124,750 @@ let excerpt_command =
     [ "create", excerpt_create_command ]
 ;;
 
+let visual_create_command =
+  Async.Command.async
+    ~summary:"Render one retained rich-document page as immutable visual evidence."
+    (let%map_open.Command slug_text =
+       flag "--slug" (required string) ~doc:"SLUG Workspace slug"
+     and directory_prefix =
+       flag "--directory-prefix" (optional string) ~doc:"PATH Workspace parent"
+     and claim_text =
+       flag "--claim" (required string) ~doc:"CLAIM Active execution claim"
+    and snapshot_text =
+       flag "--snapshot" (required string) ~doc:"SNAPSHOT Immutable rich-document snapshot"
+     and page =
+       flag "--page" (required int) ~doc:"N One-based source page number"
+     and description_path =
+       flag
+         "--description-file"
+         (required string)
+         ~doc:"PATH Bounded agent-authored visual observation"
+     and adapter =
+       flag
+         "--adapter"
+         (optional_with_default "sandwalk-render-document-page" string)
+         ~doc:"PATH Offline rich-document page renderer"
+     in
+     fun () ->
+       match
+         Sandwalk_core.Slug.of_string slug_text,
+         Sandwalk_core.Claim_id.of_string claim_text,
+         Sandwalk_core.Snapshot_id.of_string snapshot_text
+       with
+       | Error error, _, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_SLUG"
+           ~message:(Sandwalk_core.Slug.Error.message error)
+       | _, None, _ ->
+         print_failure_and_exit
+           ~code:"INVALID_CLAIM"
+           ~message:"Claim identifier is invalid."
+       | _, _, None ->
+         print_failure_and_exit
+           ~code:"INVALID_SNAPSHOT"
+           ~message:"Snapshot reference is invalid."
+       | Ok _, Some _, Some _ when page < 1 || page > 100_000 ->
+         print_failure_and_exit
+           ~code:"INVALID_PAGE"
+           ~message:"Document page must be between 1 and 100000."
+       | Ok slug, Some claim_id, Some snapshot_id ->
+         let directory_prefix =
+           Sandwalk_runtime.resolve_directory_prefix ~command_line:directory_prefix
+         in
+         let workspace = Sandwalk_runtime.Workspace.resolve ~directory_prefix ~slug in
+         let%bind database_exists =
+           Async.Sys.file_exists_exn (Sandwalk_runtime.Workspace.database_path workspace)
+         in
+         if not database_exists
+         then
+           print_failure_and_exit
+             ~code:"WORKSPACE_NOT_FOUND"
+             ~message:"Workspace does not exist."
+         else (
+           let%bind description_input =
+             Sandwalk_runtime.File_input.read
+               ~path:description_path
+               ~maximum_bytes:Sandwalk_core.Visual_description.maximum_bytes
+           in
+           match description_input with
+           | Error _ ->
+             print_failure_and_exit
+               ~code:"VISUAL_DESCRIPTION_READ_ERROR"
+               ~message:"Could not read the bounded visual description file."
+           | Ok description_input ->
+             (match
+                Sandwalk_core.Visual_description.create
+                  (Sandwalk_runtime.File_input.content description_input)
+              with
+              | Error Sandwalk_core.Visual_description.Empty ->
+                print_failure_and_exit
+                  ~code:"EMPTY_VISUAL_DESCRIPTION"
+                  ~message:"Visual description must not be empty."
+              | Error Too_large ->
+                print_failure_and_exit
+                  ~code:"VISUAL_DESCRIPTION_TOO_LARGE"
+                  ~message:
+                    (sprintf
+                       "Visual description exceeds the maximum of %d bytes."
+                       Sandwalk_core.Visual_description.maximum_bytes)
+              | Ok description ->
+                let%bind snapshot =
+                  In_thread.run (fun () ->
+                    Sandwalk_store.snapshot_for_visual
+                      ~database_path:(Sandwalk_runtime.Workspace.database_path workspace)
+                      ~expected_slug:slug
+                      ~claim_id
+                      ~snapshot_id
+                      ())
+                in
+                (match snapshot with
+                 | Error error ->
+                   let code, message = visual_store_error error in
+                   print_failure_and_exit ~code ~message
+                 | Ok snapshot ->
+                   (match
+                      snapshot_visual_source
+                        (Sandwalk_store.Snapshot_for_visual.manifest_json snapshot)
+                    with
+                    | Error _ ->
+                      print_failure_and_exit
+                        ~code:"SNAPSHOT_VISUAL_SOURCE_NOT_FOUND"
+                        ~message:
+                          (sprintf
+                             "Snapshot %S does not retain a supported paginated source artifact."
+                             snapshot_text)
+                    | Ok (source_artifact, source_format) ->
+                      let snapshot_artifact_path =
+                        Sandwalk_store.Snapshot_for_visual.artifact_path snapshot
+                      in
+                      let source_document =
+                        Filename.concat snapshot_artifact_path source_artifact
+                      in
+                      let started_at = Time_float_unix.now () in
+                      let%bind invocation_id, visual_id =
+                        Deferred.both
+                          (In_thread.run (fun () ->
+                             Sandwalk_runtime.invocation_id ~now:started_at))
+                          (In_thread.run Sandwalk_runtime.visual_id)
+                      in
+                      let temporary_path =
+                        Sandwalk_runtime.Workspace.temporary_visual_path
+                          workspace
+                          ~invocation_id
+                      in
+                      let visual_path =
+                        Sandwalk_runtime.Workspace.visual_path workspace visual_id
+                      in
+                      let arguments =
+                        `Assoc
+                          [ "slug", `String (Sandwalk_core.Slug.to_string slug)
+                          ; "directory_prefix", `String directory_prefix
+                          ; "claim", `String claim_text
+                          ; "snapshot", `String snapshot_text
+                          ; "page", `Int page
+                          ; ( "description_file"
+                            , `Assoc
+                                [ "path", `String description_path
+                                ; ( "size"
+                                  , `Int
+                                      (Sandwalk_runtime.File_input.size
+                                         description_input) )
+                                ; ( "md5"
+                                  , `String
+                                      (Sandwalk_runtime.File_input.md5
+                                         description_input) )
+                                ] )
+                          ; "adapter", `String adapter
+                          ]
+                      in
+                      let append_event
+                            ~kind
+                            ~timestamp
+                            ~state_changes
+                            ?created_references
+                            ?duration_ms
+                            ?outcome
+                            ?error_code
+                            ()
+                        =
+                        Sandwalk_runtime.Audit.append
+                          ~path:(Sandwalk_runtime.Workspace.events_path workspace)
+                          (Sandwalk_protocol.Audit_event.create
+                             ~invocation_id
+                             ~timestamp
+                             ~kind
+                             ~command:"visual create"
+                             ~arguments
+                             ~phase:(Some "researching")
+                             ~step:
+                               (Sandwalk_core.Plan_step.Key.to_string
+                                  (Sandwalk_store.Snapshot_for_visual.step_key snapshot))
+                             ~claim:claim_text
+                             ~raw_argv:(Sys.get_argv () |> Array.to_list)
+                             ~state_changes
+                             ~consumed_references:[ claim_text; snapshot_text ]
+                             ?created_references
+                             ?duration_ms
+                             ?outcome
+                             ?error_code
+                             ())
+                      in
+                      let fail_with_audit ~code ~message =
+                        let%bind () = cleanup_visual_directory temporary_path in
+                        let finished_at = Time_float_unix.now () in
+                        let duration_ms =
+                          Time_float.diff finished_at started_at
+                          |> Time_float.Span.to_ms
+                          |> Float.iround_nearest_exn
+                        in
+                        let%bind logged =
+                          append_event
+                            ~kind:`Failed
+                            ~timestamp:(Sandwalk_runtime.timestamp_utc finished_at)
+                            ~state_changes:[]
+                            ~duration_ms
+                            ~outcome:"failure"
+                            ~error_code:code
+                            ()
+                        in
+                        match logged with
+                        | Error _ ->
+                          print_failure_and_exit
+                            ~code:"AUDIT_LOG_ERROR"
+                            ~message:"Could not append workspace audit log."
+                        | Ok () -> print_failure_and_exit ~code ~message
+                      in
+                      let%bind started =
+                        append_event
+                          ~kind:`Started
+                          ~timestamp:(Sandwalk_runtime.timestamp_utc started_at)
+                          ~state_changes:[]
+                          ()
+                      in
+                      (match started with
+                       | Error _ ->
+                         print_failure_and_exit
+                           ~code:"AUDIT_LOG_ERROR"
+                           ~message:"Could not append workspace audit log."
+                       | Ok () ->
+                         let%bind source_safe_before_render =
+                           bounded_visual_source_descendant_nonsymlink
+                             ~directory:snapshot_artifact_path
+                             ~relative:source_artifact
+                             ~source_format
+                         in
+                         if
+                           not
+                             (Option.value
+                                (Or_error.ok source_safe_before_render)
+                                ~default:false)
+                         then
+                           fail_with_audit
+                             ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
+                             ~message:
+                               "Retained source must be a bounded regular non-symlink snapshot artifact."
+                         else
+                         let%bind () =
+                           Unix.mkdir ~p:() (Filename.dirname visual_path)
+                         in
+                         let request =
+                           Sandwalk_protocol.Visual_render.request
+                             ~source_document
+                             ~source_format
+                             ~output_directory:temporary_path
+                             ~page
+                         in
+                         let%bind adapter_output =
+                           Sandwalk_runtime.Adapter.run_json
+                             ~executable:adapter
+                             ~request
+                             ~timeout:(Time_float.Span.of_min 5.)
+                             ~maximum_output_bytes:65_536
+                             ()
+                         in
+                         (match adapter_output with
+                          | Error _ ->
+                            fail_with_audit
+                              ~code:"VISUAL_RENDER_FAILED"
+                              ~message:"Document page renderer failed."
+                          | Ok adapter_output ->
+                            (match Sandwalk_protocol.Visual_render.decode adapter_output with
+                             | Error _ ->
+                               fail_with_audit
+                                 ~code:"VISUAL_RENDER_PROTOCOL_ERROR"
+                                 ~message:"Document page renderer returned an invalid result."
+                             | Ok rendered ->
+                               let expected_image = Filename.concat temporary_path "page.png" in
+                               let expected_manifest =
+                                 Filename.concat temporary_path "manifest.json"
+                               in
+                               let converted = not (String.equal source_format "pdf") in
+                               let expected_render_input =
+                                 if converted
+                                 then Filename.concat temporary_path "render-input.pdf"
+                                 else source_document
+                               in
+                               if
+                                 not
+                                   (String.equal
+                                      expected_image
+                                      (Sandwalk_protocol.Visual_render.image_path rendered)
+                                    && String.equal
+                                         expected_manifest
+                                         (Sandwalk_protocol.Visual_render.manifest_path rendered)
+                                    && String.equal
+                                         expected_render_input
+                                         (Sandwalk_protocol.Visual_render
+                                          .render_input_path rendered)
+                                    && Int.equal
+                                         page
+                                         (Sandwalk_protocol.Visual_render.page rendered))
+                               then
+                                 fail_with_audit
+                                   ~code:"VISUAL_RENDER_PROTOCOL_ERROR"
+                                   ~message:"Document renderer escaped its assigned output or changed the requested page."
+                               else (
+                                 let%bind
+                                   source_safe,
+                                   (render_input_safe, (safe_outputs, exact_directory))
+                                   =
+                                   Deferred.both
+                                     (bounded_visual_source_descendant_nonsymlink
+                                        ~directory:snapshot_artifact_path
+                                        ~relative:source_artifact
+                                        ~source_format)
+                                     (Deferred.both
+                                        (bounded_pdf_nonsymlink expected_render_input)
+                                        (Deferred.both
+                                           (Deferred.List.map
+                                              ([ expected_image; expected_manifest ]
+                                               @ if converted
+                                                 then [ expected_render_input ]
+                                                 else [])
+                                              ~how:`Parallel
+                                              ~f:regular_nonsymlink)
+                                           (exact_visual_directory
+                                              ~includes_render_input:converted
+                                              temporary_path)))
+                                 in
+                                 if
+                                   not
+                                     (Option.value
+                                        (Or_error.ok source_safe)
+                                        ~default:false)
+                                 then
+                                   fail_with_audit
+                                     ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
+                                     ~message:
+                                       "Retained source must be a bounded regular non-symlink snapshot artifact."
+                                 else if
+                                   not
+                                     (Option.value
+                                        (Or_error.ok render_input_safe)
+                                        ~default:false)
+                                   || not
+                                     (List.for_all safe_outputs ~f:(function
+                                        | Ok true -> true
+                                        | Ok false | Error _ -> false))
+                                   || not
+                                        (Option.value
+                                           (Or_error.ok exact_directory)
+                                           ~default:false)
+                                 then
+                                   fail_with_audit
+                                     ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
+                                     ~message:
+                                       "Visual render output must contain only the bounded regular artifacts."
+                                 else
+                                 let%bind
+                                   image_input,
+                                   ( manifest_input
+                                   , ( image_sha256
+                                     , (source_sha256, render_input_sha256) ) )
+                                   =
+                                   Deferred.both
+                                     (Sandwalk_runtime.File_input.read
+                                        ~path:expected_image
+                                        ~maximum_bytes:16_777_216)
+                                     (Deferred.both
+                                        (Sandwalk_runtime.File_input.read
+                                           ~path:expected_manifest
+                                           ~maximum_bytes:16_384)
+                                        (Deferred.both
+                                           (Sandwalk_runtime.File_digest.sha256
+                                              ~path:expected_image)
+                                           (Deferred.both
+                                              (Sandwalk_runtime.File_digest.sha256
+                                                 ~path:source_document)
+                                              (Sandwalk_runtime.File_digest.sha256
+                                                 ~path:expected_render_input))))
+                                 in
+                                 match
+                                   image_input,
+                                   manifest_input,
+                                   image_sha256,
+                                   source_sha256,
+                                   render_input_sha256
+                                 with
+                                 | Error _, _, _, _, _
+                                 | _, Error _, _, _, _
+                                 | _, _, Error _, _, _
+                                 | _, _, _, Error _, _
+                                 | _, _, _, _, Error _ ->
+                                   fail_with_audit
+                                     ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
+                                     ~message:"Document renderer omitted a bounded visual artifact."
+                                 | ( Ok image_input
+                                   , Ok manifest_input
+                                   , Ok image_sha256
+                                   , Ok source_sha256
+                                   , Ok render_input_sha256 ) ->
+                                   let manifest =
+                                     Or_error.try_with (fun () ->
+                                       Yojson.Safe.from_string
+                                         (Sandwalk_runtime.File_input.content
+                                            manifest_input))
+                                   in
+                                   let valid =
+                                     String.equal
+                                       (Sandwalk_runtime.File_input.md5 image_input)
+                                       (Md5.digest_string
+                                          (Sandwalk_runtime.File_input.content image_input)
+                                        |> Md5.to_hex)
+                                     && Int.equal
+                                          (Sandwalk_runtime.File_input.size image_input)
+                                          (Sandwalk_protocol.Visual_render.image_size rendered)
+                                     && String.equal
+                                          image_sha256
+                                          (Sandwalk_protocol.Visual_render
+                                           .image_sha256 rendered)
+                                     && String.equal
+                                          source_sha256
+                                          (Sandwalk_protocol.Visual_render
+                                           .source_sha256 rendered)
+                                     && String.equal
+                                          source_format
+                                          (Sandwalk_protocol.Visual_render
+                                           .source_format rendered)
+                                     && String.equal
+                                          render_input_sha256
+                                          (Sandwalk_protocol.Visual_render
+                                           .render_input_sha256 rendered)
+                                     && Option.value_map
+                                          (Or_error.ok manifest)
+                                          ~default:false
+                                          ~f:(fun manifest ->
+                                            visual_manifest_matches manifest rendered)
+                                   in
+                                   if not valid
+                                   then
+                                     fail_with_audit
+                                       ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
+                                       ~message:"Rendered visual does not match its manifest."
+                                   else
+                                     let%bind removed_render_input =
+                                       if converted
+                                       then
+                                         Deferred.Or_error.try_with (fun () ->
+                                           Unix.unlink expected_render_input)
+                                       else Deferred.Or_error.return ()
+                                     in
+                                     (match removed_render_input with
+                                      | Error _ ->
+                                        fail_with_audit
+                                          ~code:"VISUAL_RENDER_ARTIFACT_ERROR"
+                                          ~message:
+                                            "Could not discard the verified temporary render input."
+                                      | Ok () ->
+                                     let%bind published =
+                                       Deferred.Or_error.try_with (fun () ->
+                                         Unix.rename
+                                           ~src:temporary_path
+                                           ~dst:visual_path)
+                                     in
+                                     match published with
+                                     | Error _ ->
+                                       fail_with_audit
+                                         ~code:"WORKSPACE_IO_ERROR"
+                                         ~message:"Could not publish immutable visual evidence."
+                                     | Ok () ->
+                                       let final_image =
+                                         Filename.concat visual_path "page.png"
+                                       in
+                                       let final_manifest =
+                                         Filename.concat visual_path "manifest.json"
+                                       in
+                                       let description_text =
+                                         Sandwalk_core.Visual_description.text description
+                                       in
+                                       let%bind persisted =
+                                         In_thread.run (fun () ->
+                                           Sandwalk_store.record_visual
+                                             ~database_path:
+                                               (Sandwalk_runtime.Workspace.database_path
+                                                  workspace)
+                                             ~expected_slug:slug
+                                             ~claim_id
+                                             ~snapshot_id
+                                             ~visual_id
+                                             ~image_path:final_image
+                                             ~manifest_path:final_manifest
+                                             ~source_artifact
+                                             ~source_sha256:
+                                               (Sandwalk_protocol.Visual_render
+                                                .source_sha256 rendered)
+                                             ~source_format
+                                             ~page
+                                             ~page_count:
+                                               (Sandwalk_protocol.Visual_render
+                                                .page_count rendered)
+                                             ~image_sha256:
+                                               (Sandwalk_protocol.Visual_render
+                                                .image_sha256 rendered)
+                                             ~image_md5:
+                                               (Sandwalk_runtime.File_input.md5
+                                                  image_input)
+                                             ~image_size:
+                                               (Sandwalk_runtime.File_input.size
+                                                  image_input)
+                                             ~width:
+                                               (Sandwalk_protocol.Visual_render.width
+                                                  rendered)
+                                             ~height:
+                                               (Sandwalk_protocol.Visual_render.height
+                                                  rendered)
+                                             ~render_profile:
+                                               (Sandwalk_protocol.Visual_render
+                                                .render_profile rendered)
+                                             ~renderer_version:
+                                               (Sandwalk_protocol.Visual_render
+                                                .renderer_version rendered)
+                                             ~description:description_text
+                                             ~description_md5:
+                                               (Md5.digest_string description_text
+                                                |> Md5.to_hex)
+                                             ~description_size:
+                                               (String.length description_text)
+                                             ~manifest_json:
+                                               (Sandwalk_runtime.File_input.content
+                                                  manifest_input)
+                                             ~manifest_md5:
+                                               (Sandwalk_runtime.File_input.md5
+                                                  manifest_input)
+                                             ~now:
+                                               (Sandwalk_runtime.timestamp_utc
+                                                  (Time_float_unix.now ()))
+                                             ())
+                                       in
+                                       (match persisted with
+                                        | Error error ->
+                                          let%bind () =
+                                            cleanup_visual_directory visual_path
+                                          in
+                                          let code, message =
+                                            visual_store_error error
+                                          in
+                                          fail_with_audit ~code ~message
+                                        | Ok persisted ->
+                                          let stored_id =
+                                            Sandwalk_store.Record_visual_result
+                                            .visual_id persisted
+                                          in
+                                          let created =
+                                            Sandwalk_store.Record_visual_result
+                                            .created persisted
+                                          in
+                                          let%bind () =
+                                            if created
+                                            then Deferred.unit
+                                            else cleanup_visual_directory visual_path
+                                          in
+                                          let reference =
+                                            Sandwalk_core.Visual_id.to_string
+                                              stored_id
+                                          in
+                                          let%bind stored_visual =
+                                            In_thread.run (fun () ->
+                                              Sandwalk_store.read_visual
+                                                ~database_path:
+                                                  (Sandwalk_runtime.Workspace
+                                                   .database_path workspace)
+                                                ~visual_id:stored_id
+                                                ())
+                                          in
+                                          (match stored_visual with
+                                           | Error error ->
+                                             let code, message =
+                                               visual_store_error error
+                                             in
+                                             fail_with_audit ~code ~message
+                                           | Ok stored_visual ->
+                                             let stored_image_path =
+                                               Sandwalk_store.Visual_evidence
+                                               .image_path stored_visual
+                                             in
+                                             let stored_manifest_path =
+                                               Sandwalk_store.Visual_evidence
+                                               .manifest_path stored_visual
+                                             in
+                                             let%bind stored_files_safe =
+                                               if created
+                                               then Deferred.return [ Ok true ]
+                                               else
+                                                 Deferred.List.map
+                                                   [ source_document
+                                                   ; stored_image_path
+                                                   ; stored_manifest_path
+                                                   ]
+                                                   ~how:`Parallel
+                                                   ~f:regular_nonsymlink
+                                             in
+                                             if
+                                               not
+                                                 (List.for_all
+                                                    stored_files_safe
+                                                    ~f:(function
+                                                      | Ok true -> true
+                                                      | Ok false | Error _ ->
+                                                        false))
+                                             then
+                                               fail_with_audit
+                                                 ~code:
+                                                   "VISUAL_RENDER_ARTIFACT_ERROR"
+                                                 ~message:
+                                                   "Stored visual evidence contains an unsafe artifact."
+                                             else
+                                             let%bind
+                                               stored_image,
+                                               ( stored_manifest
+                                               , stored_source_sha256 )
+                                               =
+                                               if created
+                                               then
+                                                 Deferred.return
+                                                   ( Ok image_input
+                                                   , ( Ok manifest_input
+                                                     , Ok source_sha256 ) )
+                                               else
+                                                 Deferred.both
+                                                   (Sandwalk_runtime.File_input.read
+                                                      ~path:stored_image_path
+                                                      ~maximum_bytes:16_777_216)
+                                                   (Deferred.both
+                                                      (Sandwalk_runtime.File_input.read
+                                                         ~path:stored_manifest_path
+                                                         ~maximum_bytes:16_384)
+                                                      (Sandwalk_runtime.File_digest
+                                                       .sha256 ~path:source_document))
+                                             in
+                                             let stored_valid =
+                                               match
+                                                 stored_image,
+                                                 stored_manifest,
+                                                 stored_source_sha256
+                                               with
+                                               | Ok image, Ok manifest, Ok source_sha256 ->
+                                                 String.equal
+                                                   (Sandwalk_runtime.File_input.md5 image)
+                                                   (Sandwalk_store.Visual_evidence
+                                                    .image_md5 stored_visual)
+                                                 && String.equal
+                                                      (Sandwalk_runtime.File_input.md5
+                                                         manifest)
+                                                      (Sandwalk_store.Visual_evidence
+                                                       .manifest_md5 stored_visual)
+                                                 && String.equal
+                                                      source_sha256
+                                                      (Sandwalk_store.Visual_evidence
+                                                       .source_sha256 stored_visual)
+                                                 && String.equal
+                                                      source_format
+                                                      (Sandwalk_store.Visual_evidence
+                                                       .source_format stored_visual)
+                                               | _ -> false
+                                             in
+                                             if not stored_valid
+                                             then
+                                               fail_with_audit
+                                                 ~code:
+                                                   "VISUAL_RENDER_ARTIFACT_ERROR"
+                                                 ~message:
+                                                   "Stored visual evidence no longer matches its durable hashes."
+                                             else
+                                             let finished_at =
+                                               Time_float_unix.now ()
+                                             in
+                                             let duration_ms =
+                                               Time_float.diff finished_at started_at
+                                               |> Time_float.Span.to_ms
+                                               |> Float.iround_nearest_exn
+                                             in
+                                             let%bind logged =
+                                               append_event
+                                                 ~kind:`Finished
+                                                 ~timestamp:
+                                                   (Sandwalk_runtime.timestamp_utc
+                                                      finished_at)
+                                                 ~state_changes:
+                                                   (if created
+                                                    then
+                                                      [ `Assoc
+                                                          [ "entity", `String "visual"
+                                                          ; "from", `Null
+                                                          ; "to", `String reference
+                                                          ]
+                                                      ]
+                                                    else [])
+                                                 ~created_references:
+                                                   (if created then [ reference ] else [])
+                                                 ~duration_ms
+                                                 ~outcome:"success"
+                                                 ()
+                                             in
+                                             (match logged with
+                                              | Error _ ->
+                                                print_failure_and_exit
+                                                  ~code:"AUDIT_LOG_ERROR"
+                                                  ~message:"Could not append workspace audit log."
+                                              | Ok () ->
+                                                Sandwalk_protocol.Envelope.success
+                                                  ~result:
+                                                    (`Assoc
+                                                       [ "visual", `String reference
+                                                       ; "created", `Bool created
+                                                       ; "snapshot", `String snapshot_text
+                                                       ; "page", `Int page
+                                                       ; ( "page_count"
+                                                         , `Int
+                                                             (Sandwalk_store
+                                                              .Visual_evidence
+                                                              .page_count
+                                                                stored_visual) )
+                                                       ; ( "image"
+                                                         , `String
+                                                             (Sandwalk_store
+                                                              .Visual_evidence
+                                                              .image_path
+                                                                stored_visual) )
+                                                       ; ( "render_profile"
+                                                         , `String
+                                                             (Sandwalk_store
+                                                              .Visual_evidence
+                                                              .render_profile
+                                                                stored_visual) )
+                                                       ])
+                                                  ()
+                                                |> Sandwalk_protocol.Envelope.render
+                                                |> print_endline;
+                                                Deferred.unit)))))))))))))
+;;
+
+let visual_command =
+  Async.Command.group
+    ~summary:"Create and manage rich-document page visual evidence."
+    [ "create", visual_create_command ]
+;;
+
 let default_qmd_embedding_model =
   "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
 ;;
@@ -6636,6 +7679,16 @@ let finding_error = function
     "EXCERPT_NOT_FOUND", sprintf "Excerpt %S does not exist." reference
   | Finding_excerpt_step_mismatch ->
     "EVIDENCE_STEP_MISMATCH", "Excerpt belongs to another plan step."
+  | Finding_visual_step_mismatch ->
+    "EVIDENCE_STEP_MISMATCH", "Visual evidence belongs to another plan step."
+  | Finding_visual_limit_exceeded reference ->
+    "FINDING_VISUAL_LIMIT_EXCEEDED",
+    sprintf
+      "Finding %S cannot attach more than %d distinct visuals."
+      reference
+      Sandwalk_core.Visual_id.maximum_per_finding
+  | Visual_not_found reference ->
+    "VISUAL_NOT_FOUND", sprintf "Visual evidence %S does not exist." reference
   | Excerpt_stale reference ->
     "EXCERPT_STALE", sprintf "Excerpt %S no longer matches its snapshot." reference
   | Finding_has_no_evidence reference ->
@@ -6648,6 +7701,11 @@ let finding_error = function
   | Finding_review_conflict reference ->
     "FINDING_REVIEW_EXISTS",
     sprintf "Finding %S already has a different current review." reference
+  | Finding_visual_review_incomplete reference ->
+    "FINDING_VISUAL_REVIEW_INCOMPLETE",
+    sprintf
+      "Finding %S review must enumerate every attached visual reference."
+      reference
   | error -> claim_error error
 ;;
 
@@ -7009,7 +8067,7 @@ let finding_create_command =
 
 let finding_attach_command =
   Async.Command.async
-    ~summary:"Attach a typed exact excerpt to a finding."
+    ~summary:"Attach typed text or visual evidence to a finding."
     (let%map_open.Command slug_text =
        flag "--slug" (required string) ~doc:"SLUG Workspace slug"
      and directory_prefix =
@@ -7017,13 +8075,25 @@ let finding_attach_command =
      and finding_text =
        flag "--finding" (required string) ~doc:"STEP/KEY Finding reference"
      and excerpt_text =
-       flag "--excerpt" (required string) ~doc:"EXCERPT Exact excerpt"
+       flag "--excerpt" (optional string) ~doc:"EXCERPT Exact text excerpt"
+     and visual_text =
+       flag "--visual" (optional string) ~doc:"VISUAL Document-page visual evidence"
      and relation_text =
        flag "--relation" (required string) ~doc:"RELATION Evidence relation"
      and claim_text =
        flag "--claim" (required string) ~doc:"CLAIM Active execution claim"
      in
      fun () ->
+       let evidence =
+         match excerpt_text, visual_text with
+         | Some reference, None ->
+           Sandwalk_core.Excerpt_id.of_string reference
+           |> Option.map ~f:(fun excerpt_id -> `Excerpt (excerpt_id, reference))
+         | None, Some reference ->
+           Sandwalk_core.Visual_id.of_string reference
+           |> Option.map ~f:(fun visual_id -> `Visual (visual_id, reference))
+         | None, None | Some _, Some _ -> None
+       in
        let finding =
          match String.lsplit2 finding_text ~on:'/' with
          | Some (step, key) ->
@@ -7038,7 +8108,7 @@ let finding_attach_command =
        match
          Sandwalk_core.Slug.of_string slug_text,
          finding,
-         Sandwalk_core.Excerpt_id.of_string excerpt_text,
+         evidence,
          Sandwalk_core.Finding_relation.of_string relation_text,
          Sandwalk_core.Claim_id.of_string claim_text
        with
@@ -7052,8 +8122,8 @@ let finding_attach_command =
            ~message:"Finding reference must be STEP/KEY."
        | _, _, None, _, _ ->
          print_failure_and_exit
-           ~code:"INVALID_EXCERPT"
-           ~message:"Excerpt reference is invalid."
+           ~code:"INVALID_EVIDENCE"
+           ~message:"Specify exactly one valid --excerpt or --visual reference."
        | _, _, _, None, _ ->
          print_failure_and_exit
            ~code:"INVALID_RELATION"
@@ -7065,9 +8135,14 @@ let finding_attach_command =
            ~message:"Claim identifier is invalid."
        | ( Ok slug
          , Some (step_key, finding_key)
-         , Some excerpt_id
+         , Some evidence
          , Some relation
          , Some claim_id ) ->
+         let evidence_kind, evidence_text =
+           match evidence with
+           | `Excerpt (_, reference) -> "excerpt", reference
+           | `Visual (_, reference) -> "visual", reference
+         in
          let directory_prefix =
            Sandwalk_runtime.resolve_directory_prefix
              ~command_line:directory_prefix
@@ -7095,7 +8170,7 @@ let finding_attach_command =
                [ "slug", `String (Sandwalk_core.Slug.to_string slug)
                ; "directory_prefix", `String directory_prefix
                ; "finding", `String finding_text
-               ; "excerpt", `String excerpt_text
+               ; evidence_kind, `String evidence_text
                ; "relation", `String relation_text
                ; "claim", `String claim_text
                ]
@@ -7123,7 +8198,7 @@ let finding_attach_command =
                   ~raw_argv:(Sys.get_argv () |> Array.to_list)
                   ~state_changes
                   ~consumed_references:
-                    [ claim_text; finding_text; excerpt_text ]
+                    [ claim_text; finding_text; evidence_text ]
                   ?duration_ms
                   ?outcome
                   ?error_code
@@ -7144,17 +8219,31 @@ let finding_attach_command =
             | Ok () ->
               let%bind attached =
                 In_thread.run (fun () ->
-                  Sandwalk_store.attach_evidence
-                    ~database_path:
-                      (Sandwalk_runtime.Workspace.database_path workspace)
-                    ~expected_slug:slug
-                    ~claim_id
-                    ~step_key
-                    ~finding_key
-                    ~excerpt_id
-                    ~relation
-                    ~now:(Sandwalk_runtime.timestamp_utc started_at)
-                    ())
+                  match evidence with
+                  | `Excerpt (excerpt_id, _) ->
+                    Sandwalk_store.attach_evidence
+                      ~database_path:
+                        (Sandwalk_runtime.Workspace.database_path workspace)
+                      ~expected_slug:slug
+                      ~claim_id
+                      ~step_key
+                      ~finding_key
+                      ~excerpt_id
+                      ~relation
+                      ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                      ()
+                  | `Visual (visual_id, _) ->
+                    Sandwalk_store.attach_visual_evidence
+                      ~database_path:
+                        (Sandwalk_runtime.Workspace.database_path workspace)
+                      ~expected_slug:slug
+                      ~claim_id
+                      ~step_key
+                      ~finding_key
+                      ~visual_id
+                      ~relation
+                      ~now:(Sandwalk_runtime.timestamp_utc started_at)
+                      ())
               in
               let finished_at = Time_float_unix.now () in
               let duration_ms =
@@ -7198,7 +8287,7 @@ let finding_attach_command =
                           [ `Assoc
                               [ "entity", `String "finding.evidence"
                               ; "from", `Null
-                              ; "to", `String excerpt_text
+                              ; "to", `String evidence_text
                               ]
                           ]
                         else [])
@@ -7604,6 +8693,9 @@ let finding_review_command =
                            (Sandwalk_protocol.Finding_review.conflicts review)
                          ~qualifications:
                            (Sandwalk_protocol.Finding_review.qualifications
+                              review)
+                         ~reviewed_visuals:
+                           (Sandwalk_protocol.Finding_review.reviewed_visuals
                               review)
                          ~review_json:
                            (Sandwalk_runtime.File_input.content input)
@@ -8156,8 +9248,22 @@ let draft_prepare_command =
              let code, message = draft_error error in
              print_failure_and_exit ~code ~message
            | Ok evidence ->
-             let%bind loaded =
-               Deferred.List.map evidence ~how:`Sequential ~f:(fun row ->
+             let%bind visuals =
+               In_thread.run (fun () ->
+                 Sandwalk_store.read_writer_visuals
+                   ~database_path:
+                     (Sandwalk_runtime.Workspace.database_path workspace)
+                   ~expected_slug:slug
+                   ())
+             in
+             (match visuals with
+              | Error error ->
+                let code, message = draft_error error in
+                print_failure_and_exit ~code ~message
+              | Ok visuals ->
+             let%bind loaded, loaded_visuals =
+               Deferred.both
+                 (Deferred.List.map evidence ~how:`Sequential ~f:(fun row ->
                  let%map input =
                    Sandwalk_runtime.File_input.read
                      ~path:(Sandwalk_store.Writer_evidence.excerpt_path row)
@@ -8171,14 +9277,101 @@ let draft_prepare_command =
                    then Ok (row, input)
                    else
                      Or_error.error_string
-                       "Excerpt artifact hash does not match durable state."))
+                       "Excerpt artifact hash does not match durable state.")))
+                 (Deferred.List.map visuals ~how:`Sequential ~f:(fun row ->
+                    let image_path =
+                      Sandwalk_store.Writer_visual.image_path row
+                    in
+                    let manifest_path =
+                      Sandwalk_store.Writer_visual.manifest_path row
+                    in
+                    let source_path =
+                      Sandwalk_store.Writer_visual.source_path row
+                    in
+                    let%bind source_safe, safe_outputs =
+                      Deferred.both
+                        (bounded_visual_source_descendant_nonsymlink
+                           ~directory:
+                             (Sandwalk_store.Writer_visual.source_root row)
+                           ~relative:
+                             (Sandwalk_store.Writer_visual.source_artifact row)
+                           ~source_format:
+                             (Sandwalk_store.Writer_visual.source_format row))
+                        (Deferred.List.map
+                           [ image_path; manifest_path ]
+                           ~how:`Parallel
+                           ~f:regular_nonsymlink)
+                    in
+                    if
+                      not (Option.value (Or_error.ok source_safe) ~default:false)
+                      || not
+                           (List.for_all safe_outputs ~f:(function
+                           | Ok true -> true
+                           | Ok false | Error _ -> false))
+                    then
+                      Deferred.return
+                        (Or_error.error_string
+                           "Visual evidence contains an unsafe artifact.")
+                    else (
+                      let%map
+                        image_input,
+                        (manifest_input, (image_sha256, source_sha256))
+                        =
+                        Deferred.both
+                          (Sandwalk_runtime.File_input.read
+                             ~path:image_path
+                             ~maximum_bytes:16_777_216)
+                          (Deferred.both
+                             (Sandwalk_runtime.File_input.read
+                                ~path:manifest_path
+                                ~maximum_bytes:16_384)
+                             (Deferred.both
+                                (Sandwalk_runtime.File_digest.sha256
+                                   ~path:image_path)
+                                (Sandwalk_runtime.File_digest.sha256
+                                   ~path:source_path)))
+                      in
+                      match
+                        image_input,
+                        manifest_input,
+                        image_sha256,
+                        source_sha256
+                      with
+                      | ( Ok image_input
+                        , Ok manifest_input
+                        , Ok image_sha256
+                        , Ok source_sha256 )
+                        when String.equal
+                               (Sandwalk_runtime.File_input.md5 image_input)
+                               (Sandwalk_store.Writer_visual.image_md5 row)
+                             && String.equal
+                                  image_sha256
+                                  (Sandwalk_store.Writer_visual.image_sha256
+                                     row)
+                             && String.equal
+                                  (Sandwalk_runtime.File_input.md5 manifest_input)
+                                  (Sandwalk_store.Writer_visual.manifest_md5 row)
+                             && String.equal
+                                  source_sha256
+                                  (Sandwalk_store.Writer_visual.source_sha256 row)
+                             && String.equal
+                                  (Md5.digest_string
+                                     (Sandwalk_store.Writer_visual.description
+                                        row)
+                                   |> Md5.to_hex)
+                                  (Sandwalk_store.Writer_visual.description_md5
+                                     row) ->
+                        Ok (row, image_input)
+                      | _ ->
+                        Or_error.error_string
+                          "Visual artifact hash does not match durable state.")))
              in
-             (match Result.all loaded with
-              | Error _ ->
+             (match Result.all loaded, Result.all loaded_visuals with
+              | Error _, _ | _, Error _ ->
                 print_failure_and_exit
                   ~code:"WRITER_PACK_ARTIFACT_ERROR"
-                  ~message:"Could not validate bounded excerpt artifacts."
-              | Ok loaded ->
+                  ~message:"Could not validate bounded evidence artifacts."
+              | Ok loaded, Ok loaded_visuals ->
                 let items =
                   List.map loaded ~f:(fun (row, input) ->
                     Sandwalk_core.Writer_pack.item
@@ -8194,6 +9387,22 @@ let draft_prepare_command =
                         (Sandwalk_store.Writer_evidence.line_start row)
                       ~line_end:(Sandwalk_store.Writer_evidence.line_end row)
                       ~text:(Sandwalk_runtime.File_input.content input))
+                  @ List.map loaded_visuals ~f:(fun (row, _input) ->
+                      Sandwalk_core.Writer_pack.visual_item
+                        ~step:(Sandwalk_store.Writer_visual.step row)
+                        ~finding:(Sandwalk_store.Writer_visual.finding row)
+                        ~verdict:(Sandwalk_store.Writer_visual.verdict row)
+                        ~claim:(Sandwalk_store.Writer_visual.claim row)
+                        ~relation:(Sandwalk_store.Writer_visual.relation row)
+                        ~visual:(Sandwalk_store.Writer_visual.visual row)
+                        ~snapshot:(Sandwalk_store.Writer_visual.snapshot row)
+                        ~source_url:(Sandwalk_store.Writer_visual.source_url row)
+                        ~source_format:
+                          (Sandwalk_store.Writer_visual.source_format row)
+                        ~page:(Sandwalk_store.Writer_visual.page row)
+                        ~image_path:(Sandwalk_store.Writer_visual.image_path row)
+                        ~description:
+                          (Sandwalk_store.Writer_visual.description row))
                 in
                 let writer_pack =
                   Sandwalk_core.Writer_pack.render
@@ -8243,7 +9452,9 @@ let draft_prepare_command =
                          ~state_changes
                          ~consumed_references:
                            (List.map evidence ~f:(fun row ->
-                              Sandwalk_store.Writer_evidence.excerpt row))
+                              Sandwalk_store.Writer_evidence.excerpt row)
+                            @ List.map visuals ~f:(fun row ->
+                                Sandwalk_store.Writer_visual.visual row))
                          ?duration_ms
                          ?outcome
                          ?error_code
@@ -8360,7 +9571,7 @@ let draft_prepare_command =
                               Sandwalk_protocol.Envelope.success ~result ()
                               |> Sandwalk_protocol.Envelope.render
                               |> print_endline;
-                              Deferred.unit))))))))
+                              Deferred.unit)))))))))
 ;;
 
 let draft_submit_command =
@@ -10908,6 +12119,7 @@ let command =
     ; "snapshot", snapshot_command
     ; "status", status_command
     ; "step", step_command
+    ; "visual", visual_command
     ]
 ;;
 

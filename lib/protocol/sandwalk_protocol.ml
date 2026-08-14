@@ -710,6 +710,8 @@ module Export_adapter = struct
 end
 
 module Finding_review = struct
+  let maximum_reviewed_visuals = 256
+
   type verdict =
     | Supported
     | Partially_supported
@@ -722,6 +724,7 @@ module Finding_review = struct
     ; source_quality : string
     ; conflicts : string
     ; qualifications : string
+    ; reviewed_visuals : string list
     }
 
   type error =
@@ -750,10 +753,38 @@ module Finding_review = struct
     | Contradicted -> "contradicted"
   ;;
 
+  let valid_visual_id value =
+    String.length value = 39
+    && String.is_prefix value ~prefix:"visual_"
+    && String.for_all (String.drop_prefix value 7) ~f:(function
+      | '0' .. '9' | 'a' .. 'f' -> true
+      | _ -> false)
+  ;;
+
+  let reviewed_visuals fields =
+    match List.Assoc.find fields "reviewed_visuals" ~equal:String.equal with
+    | Some (`List values) when List.length values <= maximum_reviewed_visuals ->
+      let values =
+        List.map values ~f:(function
+          | `String value when valid_visual_id value -> Some value
+          | _ -> None)
+      in
+      if List.for_all values ~f:Option.is_some
+      then (
+        let values = List.filter_map values ~f:Fn.id in
+        if List.contains_dup values ~compare:String.compare
+        then None
+        else Some values)
+      else None
+    | Some _ | None -> None
+  ;;
+
   let decode = function
     | `Assoc fields ->
       (match List.Assoc.find fields "protocol" ~equal:String.equal with
-       | Some (`String "sandwalk.finding-review.v1") ->
+       | Some (`String protocol)
+         when String.equal protocol "sandwalk.finding-review.v1"
+              || String.equal protocol "sandwalk.finding-review.v2" ->
          let open Option.Let_syntax in
          let parsed =
            let%bind verdict_text = bounded_string fields "verdict" in
@@ -762,11 +793,22 @@ module Finding_review = struct
            let%bind source_quality = bounded_string fields "source_quality" in
            let%bind conflicts = bounded_string fields "conflicts" in
            let%bind qualifications = bounded_string fields "qualifications" in
+           let%bind reviewed_visuals =
+             if String.equal protocol "sandwalk.finding-review.v1"
+             then Some []
+             else reviewed_visuals fields
+           in
            if String.is_empty (String.strip summary)
            then None
            else
              Some
-               { verdict; summary; source_quality; conflicts; qualifications }
+               { verdict
+               ; summary
+               ; source_quality
+               ; conflicts
+               ; qualifications
+               ; reviewed_visuals
+               }
          in
          Result.of_option parsed ~error:Invalid_review
        | Some (`String _) -> Error Unsupported_protocol
@@ -779,6 +821,159 @@ module Finding_review = struct
   let source_quality t = t.source_quality
   let conflicts t = t.conflicts
   let qualifications t = t.qualifications
+  let reviewed_visuals t = t.reviewed_visuals
+end
+
+module Visual_render = struct
+  type t =
+    { image_path : string
+    ; manifest_path : string
+    ; render_input_path : string
+    ; source_sha256 : string
+    ; render_input_sha256 : string
+    ; source_format : string
+    ; image_sha256 : string
+    ; image_size : int
+    ; width : int
+    ; height : int
+    ; page : int
+    ; page_count : int
+    ; render_profile : string
+    ; renderer_version : string
+    }
+
+  type error =
+    | Invalid_result
+    | Unsupported_protocol
+  [@@deriving sexp_of]
+
+  let request ~source_document ~source_format ~output_directory ~page =
+    `Assoc
+      [ "protocol", `String "sandwalk.visual-render.v1"
+      ; "source_document", `String source_document
+      ; "source_format", `String source_format
+      ; "output_directory", `String output_directory
+      ; "page", `Int page
+      ]
+  ;;
+
+  let sha256 value =
+    String.length value = 64
+    && String.for_all value ~f:(function
+      | '0' .. '9' | 'a' .. 'f' -> true
+      | _ -> false)
+  ;;
+
+  let bounded_string fields name ~maximum =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`String value)
+      when not (String.is_empty value) && String.length value <= maximum ->
+      Some value
+    | Some _ | None -> None
+  ;;
+
+  let positive_int fields name ~maximum =
+    match List.Assoc.find fields name ~equal:String.equal with
+    | Some (`Int value) when value > 0 && value <= maximum -> Some value
+    | Some _ | None -> None
+  ;;
+
+  let valid_source_format value =
+    let length = String.length value in
+    length >= 1
+    && length <= 16
+    && String.for_all value ~f:(function
+      | '0' .. '9' | 'a' .. 'z' -> true
+      | _ -> false)
+  ;;
+
+  let decode = function
+    | `Assoc fields ->
+      (match List.Assoc.find fields "protocol" ~equal:String.equal with
+       | Some (`String "sandwalk.visual-render-result.v1") ->
+         let open Option.Let_syntax in
+         let parsed =
+           let%bind image_path = bounded_string fields "image_path" ~maximum:16_384 in
+           let%bind manifest_path =
+             bounded_string fields "manifest_path" ~maximum:16_384
+           in
+           let%bind render_input_path =
+             bounded_string fields "render_input_path" ~maximum:16_384
+           in
+           let%bind source_sha256 =
+             bounded_string fields "source_sha256" ~maximum:64
+           in
+           let%bind source_format =
+             bounded_string fields "source_format" ~maximum:16
+           in
+           let%bind image_sha256 =
+             bounded_string fields "image_sha256" ~maximum:64
+           in
+           let%bind render_input_sha256 =
+             bounded_string fields "render_input_sha256" ~maximum:64
+           in
+           let%bind () =
+             if sha256 source_sha256
+                && valid_source_format source_format
+                && sha256 image_sha256
+                && sha256 render_input_sha256
+             then Some ()
+             else None
+           in
+           let%bind image_size =
+             positive_int fields "image_size" ~maximum:16_777_216
+           in
+           let%bind width = positive_int fields "width" ~maximum:10_000 in
+           let%bind height = positive_int fields "height" ~maximum:10_000 in
+           let%bind () = if width * height <= 20_000_000 then Some () else None in
+           let%bind page = positive_int fields "page" ~maximum:100_000 in
+           let%bind page_count =
+             positive_int fields "page_count" ~maximum:100_000
+           in
+           let%bind () = if page <= page_count then Some () else None in
+           let%bind render_profile =
+             bounded_string fields "render_profile" ~maximum:128
+           in
+           let%bind renderer_version =
+             bounded_string fields "renderer_version" ~maximum:256
+           in
+           Some
+             { image_path
+             ; manifest_path
+             ; render_input_path
+             ; source_sha256
+             ; source_format
+             ; render_input_sha256
+             ; image_sha256
+             ; image_size
+             ; width
+             ; height
+             ; page
+             ; page_count
+             ; render_profile
+             ; renderer_version
+             }
+         in
+         Result.of_option parsed ~error:Invalid_result
+       | Some (`String _) -> Error Unsupported_protocol
+       | Some _ | None -> Error Invalid_result)
+    | _ -> Error Invalid_result
+  ;;
+
+  let image_path t = t.image_path
+  let manifest_path t = t.manifest_path
+  let render_input_path t = t.render_input_path
+  let source_sha256 t = t.source_sha256
+  let source_format t = t.source_format
+  let render_input_sha256 t = t.render_input_sha256
+  let image_sha256 t = t.image_sha256
+  let image_size t = t.image_size
+  let width t = t.width
+  let height t = t.height
+  let page t = t.page
+  let page_count t = t.page_count
+  let render_profile t = t.render_profile
+  let renderer_version t = t.renderer_version
 end
 
 module Report_review = struct
@@ -1212,6 +1407,49 @@ let%expect_test "finding reviews are versioned and agent-authored" =
   |> [%sexp_of: (string, Finding_review.error) Result.t]
   |> print_s;
   [%expect {| (Ok partially-supported) |}]
+;;
+
+let%expect_test "visual finding reviews enumerate inspected images" =
+  let visual = "visual_0123456789abcdef0123456789abcdef" in
+  `Assoc
+    [ "protocol", `String "sandwalk.finding-review.v2"
+    ; "verdict", `String "supported"
+    ; "summary", `String "The rendered page was inspected."
+    ; "source_quality", `String "Primary PDF."
+    ; "conflicts", `String ""
+    ; "qualifications", `String ""
+    ; "reviewed_visuals", `List [ `String visual ]
+    ]
+  |> Finding_review.decode
+  |> Result.map ~f:Finding_review.reviewed_visuals
+  |> [%sexp_of: (string list, Finding_review.error) Result.t]
+  |> print_s;
+  [%expect {| (Ok (visual_0123456789abcdef0123456789abcdef)) |}]
+;;
+
+let%expect_test "visual finding review cardinality is bounded" =
+  let decode count =
+    let reviewed_visuals =
+      List.init count ~f:(fun index -> `String (sprintf "visual_%032x" index))
+    in
+    `Assoc
+      [ "protocol", `String "sandwalk.finding-review.v2"
+      ; "verdict", `String "supported"
+      ; "summary", `String "Every rendered page was inspected."
+      ; "source_quality", `String "Primary PDF."
+      ; "conflicts", `String ""
+      ; "qualifications", `String ""
+      ; "reviewed_visuals", `List reviewed_visuals
+      ]
+    |> Finding_review.decode
+    |> Result.is_ok
+  in
+  printf
+    "%d %b %b\n"
+    Finding_review.maximum_reviewed_visuals
+    (decode Finding_review.maximum_reviewed_visuals)
+    (decode (Finding_review.maximum_reviewed_visuals + 1));
+  [%expect {| 256 true false |}]
 ;;
 
 let%expect_test "report reviews bind verdicts to exact block hashes" =

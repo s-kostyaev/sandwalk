@@ -46,12 +46,18 @@ module Error : sig
     | Excerpt_wrong_phase of Sandwalk_core.Phase.t
     | Excerpt_requires_claim
     | Excerpt_id_collision
+    | Visual_wrong_phase of Sandwalk_core.Phase.t
+    | Visual_id_collision
+    | Visual_not_found of string
     | Finding_wrong_phase of Sandwalk_core.Phase.t
     | Finding_step_mismatch
     | Finding_exists of string
     | Finding_not_found of string
     | Excerpt_not_found of string
     | Finding_excerpt_step_mismatch
+    | Finding_visual_step_mismatch
+    | Finding_visual_limit_exceeded of string
+    | Finding_visual_review_incomplete of string
     | Excerpt_stale of string
     | Finding_has_no_evidence of string
     | Finding_not_sealed of string
@@ -117,6 +123,15 @@ module Snapshot_for_excerpt : sig
   val step_key : t -> Sandwalk_core.Plan_step.Key.t option
 end
 
+module Snapshot_for_visual : sig
+  type t
+
+  val snapshot_id : t -> Sandwalk_core.Snapshot_id.t
+  val artifact_path : t -> string
+  val manifest_json : t -> string
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+end
+
 module Promote_snapshot_result : sig
   type t
 
@@ -131,6 +146,39 @@ module Record_excerpt_result : sig
   val excerpt_id : t -> Sandwalk_core.Excerpt_id.t
   val created : t -> bool
   val step_key : t -> Sandwalk_core.Plan_step.Key.t option
+end
+
+module Record_visual_result : sig
+  type t
+
+  val visual_id : t -> Sandwalk_core.Visual_id.t
+  val created : t -> bool
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+end
+
+module Visual_evidence : sig
+  type t
+
+  val visual_id : t -> Sandwalk_core.Visual_id.t
+  val snapshot_id : t -> Sandwalk_core.Snapshot_id.t
+  val step_key : t -> Sandwalk_core.Plan_step.Key.t
+  val image_path : t -> string
+  val manifest_path : t -> string
+  val source_artifact : t -> string
+  val source_sha256 : t -> string
+  val source_format : t -> string
+  val page : t -> int
+  val page_count : t -> int
+  val image_sha256 : t -> string
+  val image_md5 : t -> string
+  val manifest_md5 : t -> string
+  val image_size : t -> int
+  val width : t -> int
+  val height : t -> int
+  val render_profile : t -> string
+  val renderer_version : t -> string
+  val description : t -> string
+  val description_md5 : t -> string
 end
 
 module Create_finding_result : sig
@@ -207,6 +255,32 @@ module Writer_evidence : sig
   val line_end : t -> int
 end
 
+module Writer_visual : sig
+  type t
+
+  val step : t -> string
+  val finding : t -> string
+  val verdict : t -> string
+  val claim : t -> string
+  val relation : t -> string
+  val visual : t -> string
+  val image_path : t -> string
+  val image_md5 : t -> string
+  val image_sha256 : t -> string
+  val manifest_path : t -> string
+  val manifest_md5 : t -> string
+  val source_root : t -> string
+  val source_artifact : t -> string
+  val source_path : t -> string
+  val source_sha256 : t -> string
+  val source_format : t -> string
+  val description : t -> string
+  val description_md5 : t -> string
+  val snapshot : t -> string
+  val source_url : t -> string
+  val page : t -> int
+end
+
 module Submit_report_result : sig
   type t
 
@@ -237,6 +311,7 @@ module Finding_review_context : sig
 
   val statement : t -> string
   val evidence : t -> (string * string * string) list
+  val visuals : t -> (Visual_evidence.t * string) list
 end
 
 module Step_context : sig
@@ -784,6 +859,15 @@ val snapshot_for_excerpt
   -> unit
   -> (Snapshot_for_excerpt.t, Error.t) Result.t
 
+val snapshot_for_visual
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> snapshot_id:Sandwalk_core.Snapshot_id.t
+  -> unit
+  -> (Snapshot_for_visual.t, Error.t) Result.t
+
 val record_excerpt
   :  ?busy_timeout_ms:int
   -> database_path:string
@@ -802,6 +886,43 @@ val record_excerpt
   -> now:string
   -> unit
   -> (Record_excerpt_result.t, Error.t) Result.t
+
+val record_visual
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> snapshot_id:Sandwalk_core.Snapshot_id.t
+  -> visual_id:Sandwalk_core.Visual_id.t
+  -> image_path:string
+  -> manifest_path:string
+  -> source_artifact:string
+  -> source_sha256:string
+  -> source_format:string
+  -> page:int
+  -> page_count:int
+  -> image_sha256:string
+  -> image_md5:string
+  -> image_size:int
+  -> width:int
+  -> height:int
+  -> render_profile:string
+  -> renderer_version:string
+  -> description:string
+  -> description_md5:string
+  -> description_size:int
+  -> manifest_json:string
+  -> manifest_md5:string
+  -> now:string
+  -> unit
+  -> (Record_visual_result.t, Error.t) Result.t
+
+val read_visual
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> visual_id:Sandwalk_core.Visual_id.t
+  -> unit
+  -> (Visual_evidence.t, Error.t) Result.t
 
 val create_finding
   :  ?busy_timeout_ms:int
@@ -830,6 +951,19 @@ val attach_evidence
   -> unit
   -> (Attach_evidence_result.t, Error.t) Result.t
 
+val attach_visual_evidence
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> claim_id:Sandwalk_core.Claim_id.t
+  -> step_key:Sandwalk_core.Plan_step.Key.t
+  -> finding_key:Sandwalk_core.Finding_key.t
+  -> visual_id:Sandwalk_core.Visual_id.t
+  -> relation:Sandwalk_core.Finding_relation.t
+  -> now:string
+  -> unit
+  -> (Attach_evidence_result.t, Error.t) Result.t
+
 val seal_finding
   :  ?busy_timeout_ms:int
   -> database_path:string
@@ -853,6 +987,7 @@ val review_finding
   -> source_quality:string
   -> conflicts:string
   -> qualifications:string
+  -> reviewed_visuals:string list
   -> review_json:string
   -> review_md5:string
   -> now:string
@@ -874,6 +1009,13 @@ val read_writer_evidence
   -> expected_slug:Sandwalk_core.Slug.t
   -> unit
   -> (Writer_evidence.t list, Error.t) Result.t
+
+val read_writer_visuals
+  :  ?busy_timeout_ms:int
+  -> database_path:string
+  -> expected_slug:Sandwalk_core.Slug.t
+  -> unit
+  -> (Writer_visual.t list, Error.t) Result.t
 
 val begin_drafting
   :  ?busy_timeout_ms:int
