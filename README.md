@@ -62,7 +62,7 @@ Markdown.
 The latest release can be installed from its Git tag with opam:
 
 ```console
-opam pin add sandwalk https://github.com/s-kostyaev/sandwalk.git#v0.3.0
+opam pin add sandwalk https://github.com/s-kostyaev/sandwalk.git#v0.4.0
 ```
 
 Install only the runtime tools needed by the source and export adapters you

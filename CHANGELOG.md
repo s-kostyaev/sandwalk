@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-08-14
+
 ### Visual evidence
 
 - Add immutable full-page visual evidence for retained PDFs and paginated rich
